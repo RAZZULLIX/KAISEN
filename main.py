@@ -26,6 +26,8 @@ def main() -> None:
     parser.add_argument("--kai", action="store_true",
                         help="run the KAI protocol stdio server (LLM-facing API)")
     parser.add_argument("--workers", type=int, default=None, help="worker process count (overrides project/config defaults)")
+    parser.add_argument("--multi", type=int, default=None,
+                        help="number of generators (overrides project defaults)")
     args = parser.parse_args()
 
     if args.kai:
