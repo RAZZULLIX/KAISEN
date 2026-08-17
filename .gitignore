@@ -1,0 +1,41 @@
+# secrets & runtime state — never publish
+config.json
+*.env
+secrets.json
+.kaisen_snapshots/
+*.skill_stats.json
+.env
+
+
+# runtime artifacts
+projects/*/.kaisen_scripts/
+projects/*/runs/
+projects/*/best/
+projects/*/state.json
+projects/*/seen_hashes.json
+projects/*/results.csv
+projects/*/memos/
+projects/*/lessons.txt
+projects/*/keywords.txt
+
+# legacy / old harness data (kept locally, not published)
+legacy/
+
+# python
+__pycache__/
+*.pyc
+*.pyo
+*.so
+*.o
+
+# user data
+notes.json
+debug_logs/
+*.log
+
+# test caches
+.pytest_cache/
+.ruff_cache/
+
+# benchmark data (huge)
+temp/

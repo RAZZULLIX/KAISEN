@@ -1,0 +1,9 @@
+aiohttp>=3.9
+requests>=2.31
+psutil>=5.9
+# Linter-backed autofix (recommended, pure-python):
+pyflakes>=3.2
+ruff>=0.6
+# NOTE: numpy/pandas are NOT harness dependencies. The deepwork skill
+# enables pandas on demand (graceful error if absent); candidate code
+# (C/Python artifacts) declares its own deps.

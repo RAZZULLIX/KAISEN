@@ -1,0 +1,66 @@
+# KAISEN framework — example configuration.
+# Copy to config.json and adjust.  SECRETS GO IN THE ENVIRONMENT, not here:
+#   export KAISEN_TG_TOKEN=...            Telegram bot token
+#   export KAISEN_TG_CHAT_ID=...          Telegram chat id
+#   export KAISEN_GITHUB_TOKEN=...        GitHub upload token
+#   export KAISEN_SERVER_<ID>_API_KEY=... API key for a specific LLM server
+#   export KAISEN_OPENAI_API_KEY=...      fallback API key for openai servers
+#   export KAISEN_SAFETY_OFF=1            (with safety.global_off=true) disables
+#                                         guardrails — double action, on purpose
+#   export KAISEN_API_KEY=...            optional server password (wins over server.api_key)
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8080,
+    "api_key": ""
+  },
+  "llm": {
+    "read_timeout": 1200,
+    "connect_timeout": 15,
+    "nodata_timeout": 120,
+    "max_retries": 3,
+    "retry_backoff": 2.0,
+    "active_ids": [],
+    "routing": "cost",
+    "allowlists": {},
+    "servers": [
+      {
+        "id": "my-model",
+        "label": "My Model",
+        "type": "llama",
+        "url": "http://127.0.0.1:8502/completion",
+        "base_url": "",
+        "model": "my-model",
+        "params": {
+          "temperature": 0.6
+        },
+        "payload_template": "",
+        "max_concurrent": 2,
+        "timeout": 1200.0,
+        "enabled": true
+      }
+    ]
+  },
+  "workers": {
+    "default_count": 4,
+    "max_count": 32,
+    "queue_size": 8
+  },
+  "telegram": {
+    "token": "",
+    "chat_id": "",
+    "max_len": 4000,
+    "trunc_len": 3900,
+    "enabled": false
+  },
+  "safety": {
+    "global_off": false
+  },
+  "autofix": {
+    "build_enabled": true,
+    "max_tries": 5,
+    "llm_repair": true,
+    "llm_repair_max": 3
+  },
+  "debug_logs": true
+}

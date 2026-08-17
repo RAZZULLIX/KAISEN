@@ -1,0 +1,789 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>KAISEN // FRAMEWORK</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body class="app-shell-container">
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark">◸△◹</div>
+        <div>
+          <div class="brand-name">KAISEN</div>
+          <div class="brand-sub">改善 AI システム</div>
+        </div>
+      </div>
+      <div class="nav-section" role="navigation" aria-label="Main">
+        <div class="nav-item active" data-view="dashboard" role="button" tabindex="0" onclick="switchView('dashboard')"><div class="nav-item-icon" aria-hidden="true">◎</div><span>Dashboard</span></div>
+        <div class="nav-item" data-view="projects" role="button" tabindex="0" onclick="switchView('projects')"><div class="nav-item-icon" aria-hidden="true">▣</div><span>Projects</span></div>
+        <div class="nav-item" data-view="notes" role="button" tabindex="0" onclick="switchView('notes')"><div class="nav-item-icon" aria-hidden="true">📝</div><span>Notes</span></div>
+        <div class="nav-item" data-view="config" role="button" tabindex="0" onclick="switchView('config')"><div class="nav-item-icon" aria-hidden="true">⚙</div><span>Settings</span></div>
+        <div class="nav-item" data-view="palette" role="button" tabindex="0" onclick="openPalette()"><div class="nav-item-icon" aria-hidden="true">⌘</div><span>Tell KAISEN…</span></div>
+      </div>
+      <div class="status-pill" id="status-pill" role="button" tabindex="0" aria-label="System status — expand for details and controls" onclick="toggleStatusExpand()">
+        <div class="status-label" id="status-label">
+          <span class="status-dot" id="status-dot"></span>
+          <span id="status-text">SYSTEM ACTIVE</span>
+        </div>
+        <div class="status-expand" id="status-expand">
+          <div class="status-detail llm-controls">
+            <span class="detail-label">LLM Control:</span>
+            <div class="llm-button-group">
+              <button id="btn-play" class="llm-btn" aria-label="Resume generation" onclick="event.stopPropagation(); handleLlmControl('play')" title="Resume/Start Generation">
+                <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><path d="M8 5v14l11-7z" fill="currentColor"/></svg>
+              </button>
+              <button id="btn-pause" class="llm-btn" aria-label="Pause generation" onclick="event.stopPropagation(); handleLlmControl('pause')" title="Pause Generation">
+                <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z" fill="currentColor"/></svg>
+              </button>
+              <button id="btn-stop" class="llm-btn" aria-label="Stop generation" onclick="event.stopPropagation(); handleLlmControl('stop')" title="Kill Active Model & Reset">
+                <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><path d="M6 6h12v12H6z" fill="currentColor"/></svg>
+              </button>
+            </div>
+          </div>
+          <div class="status-detail"><span class="detail-label">Project:</span> <span id="detail-project">--</span></div>
+          <div class="status-detail"><span class="detail-label">Status:</span> <span id="detail-status">--</span></div>
+          <div class="status-detail"><span class="detail-label">Guardrails:</span> <span id="detail-guardrails">--</span></div>
+          <div class="status-detail llm-pill-section">
+            <span class="detail-label">LLM Servers:</span>
+            <div id="llm-rows"></div>
+          </div>
+
+          <div class="status-detail"><span class="detail-label">Logs:</span> <button class="btn btn-sm btn-primary" id="btn-logs">View Logs</button></div>
+        </div>
+      </div>
+    </header>
+
+
+    <main class="main">
+      <div id="view-dashboard">
+        <header class="main-header">
+          <div>
+            <div class="breadcrumbs" id="dash-breadcrumbs">PROJECT</div>
+            <div class="project-title" id="dash-project-title">No active project <span class="project-tag" id="worker-count">0 ACTIVE</span> <span id="last-update"></span></div>
+          </div>
+          <div class="header-kpis" id="metrics-card">
+            <div class="kpi-pill"><div><div class="kpi-label">Fitness</div><div class="kpi-value" id="kpi-fitness">--</div></div><div class="kpi-delta" id="kpi-fitness-delta"></div></div>
+            <div class="kpi-pill"><div><div class="kpi-label">Generation</div><div class="kpi-value" id="kpi-gen">--</div></div><div class="kpi-delta" id="kpi-gen-delta"></div></div>
+          </div>
+          <div class="header-actions">
+
+            <button class="btn" onclick="openSwarmModal()">⚡ Swarm</button>
+            <button class="btn btn-primary" id="btn-inject-code" onclick="openCustomCodeModal()">+ Inject Code</button>
+          </div>
+        </header>
+        <div id="welcome" class="welcome" style="display: none;">
+          <div class="welcome-inner">
+            <div class="welcome-mark">◸△◹</div>
+            <div class="welcome-title">KAISEN</div>
+            <div class="welcome-sub">改善 AI システム</div>
+            <div class="welcome-hint">No active project — pick one to run, or create a new one.</div>
+            <div class="welcome-actions">
+              <button class="btn btn-primary" onclick="switchView('projects')">Open Project</button>
+              <button class="btn" onclick="openNewProjectModal()">+ New Project</button>
+            </div>
+          </div>
+        </div>
+        <section class="dashboard-grid" id="dash-grid">
+          <section class="panel">
+            <div class="panel-header">
+              <div><div class="panel-title">Worker Telemetry</div><div class="panel-subtitle">Per-worker execution metrics & artifacts</div></div>
+
+              <div class="panel-badges"><span class="chip">auto-refresh: 1s</span><span class="chip">parallel gens: <button class="btn btn-sm" aria-label="Fewer parallel generations" onclick="adjustMulti(-1)" title="Fewer parallel generations">−</button> <span id="multi-count">1</span> <button class="btn btn-sm" aria-label="More parallel generations" onclick="adjustMulti(1)" title="More parallel generations">+</button></span><button class="btn btn-sm" onclick="addWorker()">+ Add Worker</button></div>
+            </div>
+            <div class="panel-body">
+              <div class="tabs" id="worker-tabs"></div>
+              <div id="worker-panels"></div>
+              <div class="empty-state" id="empty-state"><div class="pulse"></div><span>Awaiting worker telemetry...</span></div>
+            </div>
+          </section>
+        </section>
+        <section class="panel" id="fleet-panel">
+          <div class="panel-header">
+            <div><div class="panel-title">Active Engines</div><div class="panel-subtitle">Every running pool engine — select, pause or stop</div></div>
+          </div>
+          <div class="panel-body" id="fleet-rows"></div>
+        </section>
+
+        <section class="panel iteration-dashboard" id="iter-dash">
+          <div class="panel-header">
+            <div><div class="panel-title">Iteration Analytics</div><div class="panel-subtitle">Score vs generation & outcomes</div></div>
+            <div class="panel-badges">
+              <span class="chip">auto-sync</span>
+              <label class="panel-subtitle" style="align-self:center;">Score:</label>
+              <select id="score-type-select" onchange="changeScoreType()" style="width:auto;min-width:220px;font-size:12px;"></select>
+            </div>
+          </div>
+          <div class="chart-wrap">
+            <canvas id="score-chart" height="160"></canvas>
+          </div>
+          <div class="iteration-filters">
+            <input type="text" id="iter-search" placeholder="Search outcome/detail..." oninput="filterIterations()">
+            <select id="iter-outcome-filter" onchange="filterIterations()">
+              <option value="">All Outcomes</option>
+              <option value="NEW_BEST">New Best</option>
+              <option value="valid">Valid</option>
+              <option value="build_fail">Build Fail</option>
+              <option value="verify_fail">Verify Fail</option>
+              <option value="score_fail">Score Fail</option>
+              <option value="no_metrics">No Metrics</option>
+              <option value="guardrail_denied">Guardrail Denied</option>
+              <option value="protected_data_modified">Protected Data Modified</option>
+              <option value="duplicate_skip">Duplicate</option>
+              <option value="no_code">No Code</option>
+              <option value="rejected_dangerous">Dangerous</option>
+              <option value="cancelled">Cancelled</option>
+              <option value="request_failed">LLM Request Failed</option>
+              <option value="worker_error">Worker Error</option>
+            </select>
+            <input type="number" id="iter-min-time" placeholder="Min Gen Time (s)" step="0.1" oninput="renderIterations()">
+            <input type="number" id="iter-max-time" placeholder="Max Gen Time (s)" step="0.1" oninput="renderIterations()">
+            <select id="iter-limit" onchange="updateIterationLimit()">
+              <option value="100">100 Results</option>
+              <option value="500" selected>500 Results</option>
+              <option value="1000">1000 Results</option>
+              <option value="all">All Results</option>
+            </select>
+          </div>
+          <div class="iteration-table-wrapper">
+            <table class="iteration-table">
+              <thead>
+                <tr>
+                  <th class="sortable" data-sort="iteration" onclick="sortIterations('iteration')">Gen # <span class="sort-arrow"></span></th>
+                  <th class="sortable" data-sort="outcome" onclick="sortIterations('outcome')">Outcome <span class="sort-arrow"></span></th>
+                  <th class="sortable" data-sort="score" onclick="sortIterations('score')">Fitness <span class="sort-arrow"></span></th>
+                  <th class="sortable" data-sort="gen_time" onclick="sortIterations('gen_time')">Gen Time (s) <span class="sort-arrow"></span></th>
+                  <th class="sortable" data-sort="prompt_snippet" onclick="sortIterations('prompt_snippet')">Metrics <span class="sort-arrow"></span></th>
+                  <th class="sortable" data-sort="detail" onclick="sortIterations('detail')">Detail <span class="sort-arrow"></span></th>
+                </tr>
+              </thead>
+              <tbody id="iteration-tbody"></tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+
+      <div id="view-projects" style="display: none;">
+        <header class="main-header">
+          <div><div class="breadcrumbs">MANAGEMENT</div><div class="project-title">Projects</div></div>
+          <div class="header-actions">
+            <button class="btn btn-primary" onclick="openNewProjectModal()">+ New Project</button>
+          </div>
+        </header>
+        <div id="projects-list" class="projects-grid"></div>
+      </div>
+
+
+      <div id="view-notes" style="display: none;">
+        <header class="main-header">
+          <div><div class="breadcrumbs">SYSTEM · NOTES</div><div class="project-title">Operational Notes</div></div>
+          <div class="header-actions">
+            <button class="btn" id="archive-toggle-btn" onclick="toggleArchiveFilter()">Show Archived</button>
+          </div>
+        </header>
+        <div class="notes-container">
+          <div id="color-filters-container" class="color-filters-container"></div>
+          <input type="text" id="notes-search" class="notes-search" placeholder="Search notes..." oninput="filterNotes(this.value)">
+          <div id="notes-list" class="notes-list"></div>
+          <div id="note-detail" class="note-detail" style="display: none;">
+            <div class="note-detail-header">
+              <button class="btn btn-sm" onclick="closeNoteDetail()">← Back to List</button>
+              <div class="note-color-picker" id="note-color-picker"></div>
+            </div>
+            <div class="note-detail-title-bar">
+              <div id="note-detail-title-display" class="note-detail-title-display"></div>
+              <input type="text" id="note-detail-title-editor" class="note-detail-title-editor" style="display: none;" placeholder="Note title...">
+            </div>
+            <div class="note-detail-content">
+              <div id="note-detail-display" class="note-detail-display"></div>
+              <textarea id="note-detail-editor" class="note-detail-editor" style="display: none;"></textarea>
+            </div>
+            <div class="note-detail-timestamp" id="note-detail-last-edited"></div>
+            <div class="note-comments-section">
+              <div class="note-comments-header">Comments</div>
+              <div id="note-comments-list" class="note-comments-list"></div>
+              <div class="note-comment-input-area">
+                <input type="text" id="note-comment-input" class="note-comment-input" placeholder="Add a timestamped comment...">
+                <button class="btn btn-sm btn-primary" onclick="addComment()">Add</button>
+              </div>
+            </div>
+            <div class="note-detail-actions">
+              <button class="btn btn-primary" id="note-edit-btn" onclick="toggleEditNote()">Edit</button>
+              <button class="btn btn-primary" id="note-save-btn" onclick="saveNoteDetail()" style="display: none;">Save Changes</button>
+              <button class="btn" id="note-cancel-edit-btn" onclick="cancelEditNote()" style="display: none;">Cancel</button>
+              <button class="btn" id="note-archive-btn" onclick="toggleArchiveNote()">Archive</button>
+              <button class="btn" style="margin-left: auto; border-color: var(--danger); color: var(--danger);" onclick="deleteNote()">Delete Note</button>
+            </div>
+          </div>
+        </div>
+
+        <button class="fab" aria-label="New note" title="New note" onclick="openNoteModal()">+</button>
+      </div>
+    <div id="view-config" class="settings-bar" style="display: none;">
+      <div class="settings-bar-head">
+        <span class="settings-bar-title">SETTINGS</span>
+        <div class="settings-tabs" role="tablist" aria-label="Settings sections">
+          <div class="tab active" data-tab="general" role="tab" tabindex="0" onclick="switchSettingsTab('general')">General</div>
+          <div class="tab" data-tab="project" role="tab" tabindex="0" style="display: none;" onclick="switchSettingsTab('project')">Active Project</div>
+          <div class="tab" data-tab="servers" role="tab" tabindex="0" onclick="switchSettingsTab('servers')">LLM Servers</div>
+        </div>
+        <div class="settings-bar-actions">
+          <button class="btn" onclick="showOnboarding()">Setup Wizard</button>
+          <button class="btn btn-primary" id="settings-apply" onclick="applyConfig()">Apply Changes</button>
+          <button class="btn btn-sm" aria-label="Close settings" title="Close settings" onclick="closeSettingsBar()">✕ Close</button>
+        </div>
+      </div>
+      <div class="settings-content">
+        <div id="cfg-general" class="tab-content"><div class="settings-grid">
+          <section class="panel">
+            <div class="panel-header"><div class="panel-title">Server</div></div>
+            <div class="form-row"><label>Host</label><input id="cfg-host"></div>
+            <div class="form-row"><label>Port</label><input id="cfg-port" type="number"></div>
+          </section>
+          <section class="panel">
+            <div class="panel-header"><div class="panel-title">Workers</div></div>
+            <div class="form-row"><label>Default count</label><input id="cfg-wcount" type="number"></div>
+            <div class="form-row"><label>Max count</label><input id="cfg-wmax" type="number"></div>
+            <div class="form-row"><label>Queue size</label><input id="cfg-wqueue" type="number"></div>
+          </section>
+          <section class="panel">
+            <div class="panel-header"><div class="panel-title">LLM defaults</div></div>
+            <div class="form-row"><label>Read timeout (s)</label><input id="cfg-llm-timeout" type="number"></div>
+            <div class="form-row"><label>Connect timeout (s)</label><input id="cfg-llm-connect" type="number"></div>
+            <div class="form-row"><label>Max retries</label><input id="cfg-llm-retries" type="number"></div>
+          </section>
+          <section class="panel">
+            <div class="panel-header"><div class="panel-title">Auto-fix build errors (compiler suggestions)</div></div>
+            <div class="form-row"><label>Fix "did you forget / did you mean" — default for NEW projects</label><input id="cfg-autofix" type="checkbox" onchange="autofixDefaultChanged(this.checked)"></div>
+            <div class="form-row"><label>Existing projects</label><button class="btn btn-sm" onclick="openAutofixApplyModal()">Per-project toggles</button></div>
+          </section>
+          <section class="panel">
+            <div class="panel-header"><div class="panel-title">Telegram</div></div>
+            <div class="form-row"><label>Token</label><input id="cfg-tg-token" type="password" placeholder="env: KAISEN_TG_TOKEN"></div>
+            <div class="form-row"><label>Chat ID</label><input id="cfg-tg-chat"></div>
+          </section>
+          <section class="panel">
+            <div class="panel-header"><div class="panel-title">Safety</div></div>
+            <div id="cfg-safety" class="safety-box"></div>
+          </section>
+          <section class="panel">
+            <div class="panel-header"><div class="panel-title">Appearance — the unified standard, revertible</div><div class="panel-subtitle">Every change snapshots the current state; reset restores the defaults.</div></div>
+            <div class="form-row"><label>Density</label><select id="pref-density" onchange="setPref('theme.density', this.value)">
+              <option value="compact">compact</option><option value="comfortable">comfortable</option><option value="spacious">spacious</option></select></div>
+            <div class="form-row"><label>Accent color</label><div class="accent-presets" id="accent-presets"></div></div>
+            <div class="form-row"><label>Standard</label><button class="btn btn-sm" onclick="resetPrefs()">↺ Reset to KAISEN defaults</button></div>
+          </section>
+          <section class="panel">
+            <div class="panel-header"><div class="panel-title">Snapshots — one-click revert</div><div class="panel-subtitle">Taken automatically before agents/config changes alter anything.</div></div>
+            <div class="form-row"><label>Actions</label>
+              <button class="btn btn-sm" onclick="takeSnapshot()">＋ Snapshot now</button>
+              <button class="btn btn-sm" onclick="loadSnapshots()">↻ Refresh</button>
+            </div>
+            <div id="snapshots-list" class="snapshots-list"></div>
+          </section>
+        </div></div>
+        <div id="cfg-project" class="tab-content" style="display: none;">
+          <section class="panel">
+            <div class="panel-header"><div class="panel-title">Project identity</div></div>
+            <div class="form-row"><label>ID</label><input id="pj-id" disabled></div>
+            <div class="form-row"><label>Name</label><input id="pj-name"></div>
+            <div class="form-row"><label>Description</label><input id="pj-desc"></div>
+            <div class="form-row"><label>Language</label><select id="pj-lang"></select></div>
+            <div class="form-row"><label>Artifact name</label><input id="pj-artifact"></div>
+          </section>
+          <section class="panel">
+            <div class="panel-header">
+              <div><div class="panel-title">Pipeline — connected nodes</div><div class="panel-subtitle">Build → Verify → Score. Each node is a script; the arrows show the flow. Click a node to edit it.</div></div>
+              <div class="header-actions">
+                <button class="btn btn-sm" onclick="openAgentModal()">🧠 Agent</button>
+                <button class="btn btn-sm" onclick="smokeTestPipeline()">▶ Test pipeline</button>
+                <button class="btn btn-sm btn-primary" onclick="aiSuggestPipeline()">✨ AI build my pipeline</button>
+              </div>
+            </div>
+            <div id="pj-canvas" class="pipe-canvas"></div>
+            <div class="panel-badges" style="margin-top:10px;">
+              <button class="btn btn-sm" onclick="addPipeNode('verify')">+ Verify node</button>
+              <button class="btn btn-sm" onclick="addPipeNode('score')">+ Score node</button>
+              <span class="chip">Apply Changes saves the pipeline</span>
+            </div>
+          </section>
+          <section class="panel">
+            <div class="panel-header"><div class="panel-title">Metrics (the goal — parsed from score output)</div><div class="panel-subtitle">Each metric = one scored number; "live" cards stream into the worker telemetry.</div></div>
+            <div id="pj-metrics"></div>
+            <div><button class="btn btn-sm" onclick="addMetricRow()">+ Metric</button></div>
+          </section>
+          <section class="panel">
+            <div class="panel-header"><div class="panel-title">Selection, Safety & Prompts</div></div>
+            <div class="form-row"><label>Hysteresis</label><input id="pj-hysteresis" type="number" step="0.0001"></div>
+            <div class="form-row"><label>Guardrails enabled</label><input id="pj-guardrails" type="checkbox"></div>
+            <div class="form-row"><label>Prompt goal</label><textarea id="pj-goal" rows="3"></textarea></div>
+            <div class="form-row"><label>User instructions (always injected)</label><textarea id="pj-user-instructions" rows="2"></textarea></div>
+            <div class="form-row"><label>Variant block mode</label><select id="pj-variant-mode"><option value="random">random</option><option value="all">all</option><option value="pinned">pinned</option></select></div>
+            <div class="form-row"><label>Random variant count</label><input id="pj-variant-n" type="number" min="0" value="1"></div>
+            <div class="form-row"><label>Pinned blocks (comma list)</label><input id="pj-pinned" placeholder="block_a, block_b"></div>
+            <div class="form-row"><label>Baseline source (relative path)</label><input id="pj-baseline"></div>
+            <div class="form-row"><label>Deepwork enabled</label><input id="pj-deepwork" type="checkbox"></div>
+            <div class="form-row"><label>Lessons enabled</label><input id="pj-lessons" type="checkbox"></div>
+            <div class="form-row"><label>Auto-fix build errors (default fixer)</label><input id="pj-autofix" type="checkbox"></div>
+            <div class="form-row"><label>Custom fixer script (path, overrides default)</label><input id="pj-autofix-custom" placeholder="harness/autofix.py — optional"></div>
+            <div class="form-row"><label>Startup workers (blank = config default)</label><input id="pj-workers" type="number" min="1" placeholder="config default"></div>
+            <div class="form-row"><label>Startup parallel gens (blank = config default)</label><input id="pj-multi" type="number" min="1" placeholder="config default"></div>
+          </section>
+        </div>
+        <div id="cfg-servers" class="tab-content" style="display: none;">
+          <section class="panel">
+            <div class="panel-header">
+              <div><div class="panel-title">LLM Server Registry (checkbox = active)</div></div>
+              <div class="header-actions"><button class="btn btn-primary" onclick="openAddServerModal()">+ Add Server</button></div>
+            </div>
+            <div style="overflow-x:auto;"><table class="iteration-table">
+              <thead><tr><th>Active</th><th>ID</th><th>Type</th><th>URL</th><th>Model</th><th>Tier</th><th>Prio</th><th>Ctx</th><th>Concurrency</th><th>State</th><th>Stats</th><th></th></tr></thead>
+              <tbody id="servers-tbody"></tbody>
+            </table></div>
+          </section>
+          <section class="panel" style="margin-top:14px;">
+            <div class="panel-header">
+              <div><div class="panel-title">Model scoreboard — per skill</div>
+                <div class="panel-subtitle">Attempts, one-shot successes, wins and $ per model per skill. Learned from real work: use it to pick the right model for each skill — and to know what to stop using.</div></div>
+              <div class="header-actions"><button class="btn btn-sm" onclick="loadModelStats()">↻ Refresh</button></div>
+            </div>
+            <div style="overflow-x:auto;"><table class="iteration-table">
+              <thead><tr><th>Skill</th><th>Model</th><th>Tier</th><th>Attempts</th><th>One-shots</th><th>Wins</th><th>One-shot rate</th><th>Win rate</th><th>Cost $</th></tr></thead>
+              <tbody id="modelstats-tbody"></tbody>
+            </table></div>
+            <div class="panel-badges" style="margin-top:10px;">
+              <span class="chip">Routing: "adaptive" (config llm.routing) prefers the best score-per-$ per skill</span>
+              <span class="chip">Allowlists: config llm.allowlists = {skill: [server_id or "tier:X"]}</span>
+            </div>
+          </section>
+         </div>
+      </div>
+    </div>
+
+    </main>
+    <footer class="app-footer">
+      <a href="https://laboratorirazzullix.it" target="_blank" rel="noopener" class="footer-link">
+        <img class="footer-mark" src="/svg/logo-lines.svg" alt="">
+        <span>LABORATORI RAZZULLIX</span>
+      </a>
+      <span class="footer-sep" aria-hidden="true"></span>
+      <nav class="footer-social" aria-label="Social links">
+        <a href="https://github.com/RAZZULLIX" target="_blank" rel="noopener" class="footer-social-link">
+          <img src="/svg/github.svg" alt="" aria-hidden="true"><span>github</span>
+        </a>
+        <a href="https://www.linkedin.com/company/RAZZULLIX" target="_blank" rel="noopener" class="footer-social-link">
+          <img src="/svg/linkedin.svg" alt="" aria-hidden="true"><span>linkedin</span>
+        </a>
+      </nav>
+    </footer>
+  </div>
+
+  <div id="autofix-modal" class="modal-overlay" role="dialog" aria-modal="true" style="display: none;">
+    <div class="modal-content modal-wide">
+      <h3>Auto-fix build errors — per project</h3>
+      <p class="modal-desc">Toggle the compiler-suggestion fixer for each existing project. A custom fixer script path overrides the default fixer for that project.</p>
+      <div id="autofix-project-list" style="display:flex;flex-direction:column;gap:8px;max-height:320px;overflow:auto;"></div>
+      <div class="modal-actions">
+        <button class="btn" onclick="closeModal('autofix-modal')">Cancel</button>
+        <button class="btn btn-primary" onclick="applyAutofixProjects()">Apply</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="note-modal" class="modal-overlay" role="dialog" aria-modal="true" style="display: none;">
+    <div class="modal-content">
+      <h3 id="modal-title">New Note</h3>
+      <input type="text" id="modal-note-title" class="modal-input" placeholder="Note title...">
+      <textarea id="modal-textarea" placeholder="Enter note content..."></textarea>
+      <div class="modal-color-picker-section">
+        <span class="modal-label">Color:</span>
+        <div id="modal-color-picker" class="note-color-picker"></div>
+      </div>
+      <input type="hidden" id="modal-note-color" value="">
+      <div class="modal-actions">
+        <button class="btn" onclick="closeNoteModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="saveNoteFromModal()">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="delete-project-modal" class="modal-overlay" role="dialog" aria-modal="true" style="display: none;">
+    <div class="modal-content">
+      <p class="modal-desc">Deletes the project and everything in it — specs, runs, results. Type the project name to confirm; no undo.</p>
+      <div id="dp-target-name" class="dp-target"></div>
+      <input id="dp-confirm-input" class="modal-input" placeholder="project name" autocomplete="off" oninput="dpInputChanged(this)">
+      <div class="modal-actions">
+        <button class="btn" onclick="closeModal('delete-project-modal')">Cancel</button>
+        <button class="btn btn-danger" id="dp-confirm-btn" disabled onclick="confirmDeleteProject()">Delete</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="custom-code-modal" class="modal-overlay" role="dialog" aria-modal="true" style="display: none;">
+    <div class="modal-content">
+      <h3>Inject Custom Code</h3>
+      <p class="modal-desc">Paste source code in the project's language. It will be queued for compilation/verification/benchmarking by the pipeline nodes.</p>
+      <label>Language</label><select id="cc-lang"></select>
+      <textarea id="custom-code-input" class="code-input" placeholder="// paste your code here..."></textarea>
+
+      <div class="modal-actions">
+        <button class="btn" onclick="closeCustomCodeModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="submitCustomCode()">Queue Code</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="new-project-modal" class="modal-overlay" role="dialog" aria-modal="true" style="display: none;">
+    <div class="modal-content">
+      <h3>New Project</h3>
+      <p class="modal-desc">Choose how to set up the project.</p>
+      <button class="setup-option" onclick="closeModal('new-project-modal'); openSuggestProjectModal();">
+        <span class="setup-option-icon" aria-hidden="true">✨</span>
+        <span class="setup-option-body">
+          <span class="setup-option-title">Agent Setup</span>
+          <span class="setup-option-desc">Attach your program and data files plus a goal — the local AI proposes and validates the whole pipeline (build, verify, score, metrics) for you to review.</span>
+        </span>
+      </button>
+      <button class="setup-option" onclick="closeModal('new-project-modal'); openCreateProjectModal();">
+        <span class="setup-option-icon" aria-hidden="true">🛠</span>
+        <span class="setup-option-body">
+          <span class="setup-option-title">Manual Setup</span>
+          <span class="setup-option-desc">Configure everything yourself: ID, language, pipeline steps, metric cards and safety settings, field by field.</span>
+        </span>
+      </button>
+      <div class="modal-actions">
+        <button class="btn" onclick="closeModal('new-project-modal')">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="create-project-modal" class="modal-overlay" role="dialog" aria-modal="true" style="display: none;">
+    <div class="modal-content">
+      <h3>Create Project</h3>
+      <label>ID (lowercase, dashes)</label><input id="np-id" placeholder="my-project">
+      <label>Name</label><input id="np-name" placeholder="My Project">
+      <label>Description</label><input id="np-desc" placeholder="What does it optimize?">
+      <label>Language</label><select id="np-lang"></select>
+      <label>Artifact name</label><input id="np-artifact" value="program">
+      <label>Baseline source (relative C file in project dir)</label><input id="np-baseline" placeholder="original.c">
+      <label>Prompt goal (instructions to the LLM)</label><textarea id="np-goal" rows="3" placeholder="Improve the program..."></textarea>
+      <div class="panel-header"><div class="panel-title">Metric cards — what this project scores</div><div class="panel-subtitle">Each card is one number the harness reports; the "live" ones stream into the worker telemetry while scoring runs.</div></div>
+      <div id="np-cards"></div>
+      <button class="btn btn-sm" onclick="addDesignerCard('np')">+ Metric Card</button>
+      <div class="modal-actions">
+        <button class="btn" onclick="closeModal('create-project-modal')">Cancel</button>
+        <button class="btn btn-primary" onclick="createProject()">Create</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="suggest-project-modal" class="modal-overlay" role="dialog" aria-modal="true" style="display: none;">
+    <div class="modal-content">
+      <h3>Agent-Suggested Project</h3>
+      <p class="modal-desc">Just describe what you need in plain words — the AI designs the pipeline, and if you have no program yet, <b>it writes one from scratch</b> matching your goal. Optionally attach your program/data files. Everything is validated with a real run before you review it. The data file is NEVER modified — only copies may be worked on.</p>
+      <label>AI for this job</label>
+      <select id="sp-server"></select>
+      <label>Language (auto-detects from the goal and your file)</label>
+      <select id="sp-lang"></select>
+      <label>Program file — optional, any language</label>
+      <div class="attach-row">
+        <label class="file-btn" for="sp-file-program">📎 Choose program file…</label>
+        <input type="file" id="sp-file-program" class="attach-input">
+        <span id="sp-program-chip" class="attach-chip" style="display:none;"></span>
+      </div>
+      <label>Data file — optional, any format (protected, immutable)</label>
+      <div class="attach-row">
+        <label class="file-btn" for="sp-file-data">📎 Choose data file…</label>
+        <input type="file" id="sp-file-data" class="attach-input">
+        <span id="sp-data-chip" class="attach-chip" style="display:none;"></span>
+      </div>
+      <label>Goal — the only required field</label><textarea id="sp-goal" rows="3" placeholder="e.g. a program that calculates 1000 digits of pi, in C++, then make it as fast as possible" oninput="spGoalLanguage()"></textarea>
+      <label>Code — optional (pre-filled from the program file; leave empty and the AI writes it)</label><textarea id="sp-code" class="code-input" rows="6" placeholder="// optional — paste the program to improve, or leave empty"></textarea>
+      <div id="sp-status" style="display: none;"></div>
+      <div class="modal-actions">
+        <button class="btn" onclick="closeModal('suggest-project-modal')">Cancel</button>
+        <button class="btn" id="sp-view-live" style="display: none;" onclick="showSuggestProgress()">👁 View Live Progress</button>
+        <button class="btn btn-primary" onclick="suggestProject()">Suggest Pipeline</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="suggest-result-modal" class="modal-overlay" role="dialog" aria-modal="true" style="display: none;">
+    <div class="modal-content modal-wide">
+      <h3>Suggested Spec — review</h3>
+      <p class="modal-desc">The local AI's proposal, validated (guardrails + lint + a real smoke run). Edit freely, then create the project.</p>
+      <div id="sr-notes" class="sr-notes"></div>
+      <textarea id="sr-spec" class="code-input" rows="14" spellcheck="false"></textarea>
+      <div class="form-row" id="sr-id-row"><label>Project ID</label><input id="sr-id" placeholder="my-project"></div>
+      <div class="panel-header"><div class="panel-title">Metric cards — the suggested score, editable</div><div class="panel-subtitle">Edit labels/units/directions/weights here; "live" cards stream into the worker telemetry. These overlay the JSON spec on create.</div></div>
+      <div id="sr-cards"></div>
+      <button class="btn btn-sm" onclick="addDesignerCard('sr')">+ Metric Card</button>
+      <div class="modal-actions">
+        <button class="btn" onclick="closeModal('suggest-result-modal')">Cancel</button>
+        <button class="btn btn-primary" id="sr-create-btn" onclick="createProjectFromSpec()">Create Project</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="suggest-progress-modal" class="modal-overlay console-modal" role="dialog" aria-modal="true" aria-label="AI suggestion progress" style="display: none;">
+    <div class="console-content">
+      <div class="console-header">
+        <span>AI SUGGESTION — LIVE</span>
+        <span id="sgp-meta" class="console-sub"></span>
+        <button class="btn btn-sm" onclick="closeSuggestProgress()">Hide</button>
+      </div>
+      <div class="console-body" id="suggest-progress-body">
+        <div id="sgp-stage" class="sgp-stage">Starting…</div>
+        <div id="suggest-steps" class="suggest-steps"></div>
+        <pre id="sgp-raw" class="sgp-raw" style="display:none;"></pre>
+      </div>
+    </div>
+  </div>
+
+  <div id="add-server-modal" class="modal-overlay" role="dialog" aria-modal="true" style="display: none;">
+    <div class="modal-content">
+      <h3>Add LLM Server</h3>
+      <label>ID</label><input id="as-id" placeholder="my-model">
+      <label>Label (shown in the pill; may repeat across endpoints — leave empty to show the address)</label><input id="as-label" placeholder="GIPPO 1">
+      <label>Type</label><select id="as-type"><option value="llama">llama.cpp (/completion)</option><option value="openai">OpenAI-compatible</option><option value="remote">Remote template</option></select>
+      <label>Tier (smartness — routing prefers the lowest tier that can do the job)</label><select id="as-tier"><option value="tiny">tiny</option><option value="small" selected>small</option><option value="large">large</option></select>
+      <label>Priority (higher = preferred within a tier)</label><input id="as-priority" type="number" value="1" min="0">
+      <label>Context window (tokens, 0 = unknown)</label><input id="as-context" type="number" value="0">
+      <label>URL (llama/remote) or base URL (openai)</label><input id="as-url" placeholder="http://127.0.0.1:8502/completion">
+      <label>Model (openai)</label><input id="as-model">
+      <label>API key (openai — stored in secrets.json, 0600 + gitignored; env KAISEN_SERVER_&lt;ID&gt;_API_KEY overrides)</label><input id="as-apikey" type="password">
+      <label>Max concurrent</label><input id="as-conc" type="number" value="1">
+      <label>Timeout (s)</label><input id="as-timeout" type="number" value="1200">
+      <label>Params (JSON, llama)</label><input id="as-params" value='{"temperature": 0.7}'>
+      <div class="modal-actions">
+        <button class="btn" onclick="closeModal('add-server-modal')">Cancel</button>
+        <button class="btn btn-primary" onclick="addServer()">Add</button>
+      </div>
+    </div>
+  </div>
+
+
+  <div id="system-modal" class="modal-overlay" role="dialog" aria-modal="true" style="display: none;">
+    <div class="modal-content">
+      <h3>System Message</h3>
+      <p id="system-modal-text" class="modal-desc"></p>
+      <div class="modal-actions">
+        <button class="btn" id="system-modal-cancel" style="display: none;">Cancel</button>
+        <button class="btn btn-primary" id="system-modal-ok">Understood</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="live-output-modal" class="modal-overlay console-modal" role="dialog" aria-modal="true" aria-label="Live generations" style="display: none;">
+    <div class="console-content">
+      <div class="console-header">
+        <span>LIVE GENERATIONS</span>
+        <div class="live-source-bar">
+          <span id="live-filter-chip" class="live-filter-chip" style="display:none;"></span>
+          <button class="btn btn-sm" onclick="closeLiveModal()">Close</button>
+        </div>
+      </div>
+      <div id="live-output-content" class="console-body"></div>
+    </div>
+  </div>
+
+  <div id="logs-modal" class="modal-overlay console-modal" role="dialog" aria-modal="true" aria-label="System logs" style="display: none;">
+    <div class="console-content">
+      <div class="console-header">
+        <span>SYSTEM LOGS</span>
+        <button class="btn btn-sm" onclick="closeLogsModal()">Close</button>
+      </div>
+      <div id="logs-modal-content" class="console-body"></div>
+    </div>
+  </div>
+
+  <div id="smoke-modal" class="modal-overlay console-modal" role="dialog" aria-modal="true" aria-label="Pipeline test" style="display: none;">
+    <div class="console-content">
+      <div class="console-header">
+        <span>PIPELINE TEST</span>
+        <span id="smoke-meta" class="console-sub"></span>
+        <button class="btn btn-sm" onclick="closeSmokeModal()">Close</button>
+      </div>
+      <div id="smoke-content" class="console-body"></div>
+    </div>
+  </div>
+
+  <div id="swarm-modal" class="modal-overlay console-modal" role="dialog" aria-modal="true" aria-label="Swarm agents" style="display: none;">
+    <div class="console-content swarm-content">
+      <div class="console-header">
+        <span>⚡ SWARM — parallel agents</span>
+        <span id="swarm-meta" class="console-sub"></span>
+        <button class="btn btn-sm" onclick="closeSwarmModal()">Close</button>
+      </div>
+      <div class="swarm-form">
+        <div class="form-row">
+          <label>Mission</label>
+          <select id="swarm-kind">
+            <option value="code_forge" selected>Forge code — N drafts, each scored by the real pipeline</option>
+            <option value="pipeline">Build pipeline — N validated project designs</option>
+            <option value="answer">Answer — plan → parallel agents → synthesize</option>
+          </select>
+        </div>
+        <div class="form-row" id="swarm-project-row">
+          <label>Project</label>
+          <select id="swarm-project"></select>
+        </div>
+        <div class="form-row" style="align-items:flex-start;">
+          <label>Your request (plain words)</label>
+          <textarea id="swarm-request" rows="2" placeholder="e.g. find a fundamentally faster way to count primes, keep the same outputs"></textarea>
+        </div>
+        <div class="form-row">
+          <label>Agents</label>
+          <select id="swarm-n"><option>2</option><option selected>3</option><option>4</option><option>6</option></select>
+          <label style="width:auto;margin-left:20px;">Parallel slots</label>
+          <select id="swarm-conc"><option>2</option><option selected>3</option><option>4</option><option>6</option></select>
+          <button class="btn btn-primary" style="margin-left:auto;" onclick="startSwarm()">▶ Launch swarm</button>
+        </div>
+      </div>
+      <div id="swarm-live" style="display:none;">
+        <div class="swarm-section-title">LIVE</div>
+        <div id="swarm-log" class="swarm-log"></div>
+        <div id="swarm-tasks" class="swarm-tasks"></div>
+      </div>
+      <div id="swarm-results" style="display:none;">
+        <div class="swarm-section-title">RESULTS</div>
+        <div id="swarm-results-body" class="swarm-results"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="palette-modal" class="modal-overlay palette-overlay" role="dialog" aria-modal="true" aria-label="Tell KAISEN" style="display: none;">
+    <div class="palette-box">
+      <div class="palette-row">
+        <span class="palette-mark">◸△◹</span>
+        <input id="palette-input" class="palette-input" placeholder="Tell KAISEN what to change — e.g. \"make the accent orange\" or \"add a memory metric to my project\"…">
+        <button class="btn btn-primary btn-sm" onclick="submitPalette()">Do it</button>
+      </div>
+      <div id="palette-result" class="palette-result" style="display:none;"></div>
+    </div>
+  </div>
+
+  <div id="agent-modal" class="modal-overlay console-modal" role="dialog" aria-modal="true" aria-label="Project agent" style="display: none;">
+    <div class="console-content">
+      <div class="console-header">
+        <span>🧠 PROJECT AGENT</span>
+        <span id="agent-meta" class="console-sub"></span>
+        <button class="btn btn-sm" onclick="cancelAgent()">Stop</button>
+        <button class="btn btn-sm" onclick="closeAgentModal()">Close</button>
+      </div>
+      <div class="form-row" style="margin:10px 0;">
+        <label style="width:90px;">Mission</label>
+        <input id="agent-mission" placeholder="e.g. find out why generations fail and fix the pipeline">
+        <button class="btn btn-primary btn-sm" onclick="startAgent()">▶ Run agent</button>
+      </div>
+      <div id="agent-transcript" class="console-body agent-transcript"></div>
+    </div>
+  </div>
+
+
+  <div id="onboarding-modal" class="modal-overlay onboarding-overlay" role="dialog" aria-modal="true" aria-label="First-run setup" style="display: none;">
+    <div class="onboarding-card">
+      <div class="onboarding-head">
+        <div class="brand-mark">◸△◹</div>
+        <div>
+          <div class="onboarding-title">Welcome to KAISEN</div>
+          <div class="onboarding-sub">改善 AI システム · set up in two steps</div>
+        </div>
+        <button class="btn btn-sm" style="margin-left:auto;" onclick="closeOnboarding()">Skip for now</button>
+      </div>
+
+
+      <div class="ob-stepper">
+        <div class="ob-step" data-step="1" role="button" tabindex="0" onclick="obGoStep(1)"><span class="ob-step-dot">1</span><span class="ob-step-label">Connect model</span></div>
+        <div class="ob-step-bar"></div>
+        <div class="ob-step" data-step="2" role="button" tabindex="0" onclick="obGoStep(2)"><span class="ob-step-dot">2</span><span class="ob-step-label">First project</span></div>
+        <div class="ob-step-bar"></div>
+        <div class="ob-step" data-step="3" role="button" tabindex="0" onclick="obGoStep(3)"><span class="ob-step-dot">3</span><span class="ob-step-label">Launch</span></div>
+
+      </div>
+
+      <div class="ob-step-body" data-body="1">
+        <div class="ob-heading">Connect your model</div>
+        <div class="ob-desc">KAISEN runs on a local model or any OpenAI-compatible API. Pick one, test it, done.</div>
+        <div id="ob-existing" class="ob-existing" style="display:none;"></div>
+        <div class="ob-kind-grid">
+          <button class="setup-option ob-kind" id="ob-kind-local" role="button" tabindex="0" onclick="obPickKind('local')">
+            <span class="setup-option-icon" aria-hidden="true">💻</span>
+            <span class="setup-option-body">
+              <span class="setup-option-title">Local model on this machine</span>
+              <span class="setup-option-desc">llama.cpp / Ollama / LM Studio endpoint — no API key needed.</span>
+            </span>
+          </button>
+          <button class="setup-option ob-kind" id="ob-kind-api" role="button" tabindex="0" onclick="obPickKind('api')">
+            <span class="setup-option-icon" aria-hidden="true">☁️</span>
+            <span class="setup-option-body">
+              <span class="setup-option-title">I have an API</span>
+              <span class="setup-option-desc">OpenAI, DeepSeek, Groq, OpenRouter… any OpenAI-compatible base URL + key.</span>
+            </span>
+          </button>
+        </div>
+        <div id="ob-server-form" style="display:none;">
+          <div class="form-row"><label id="ob-url-label">Endpoint URL</label><input id="ob-url" placeholder="http://127.0.0.1:8502/completion"></div>
+          <div class="form-row" id="ob-model-row" style="display:none;"><label>Model name</label><input id="ob-model" placeholder="gpt-4o-mini"></div>
+          <div class="form-row" id="ob-key-row" style="display:none;"><label>API key</label><input id="ob-key" type="password" placeholder="sk-…"><span class="ob-key-hint">Stored locally in secrets.json (0600, gitignored) — never written to config.json. Env var KAISEN_SERVER_&lt;ID&gt;_API_KEY overrides.</span></div>
+          <div class="form-row"><label>Label (optional)</label><input id="ob-label" placeholder="My model" oninput="obAutoId()"></div>
+
+          <div class="form-row"><label>Max concurrent</label><input id="ob-conc" type="number" min="1" max="8" value="2"></div>
+          <div class="form-row"><label>ID</label><input id="ob-id" placeholder="my-model" oninput="this.dataset.touched = '1'"></div>
+          <div id="ob-test" class="ob-test" style="display:none;"></div>
+          <div class="modal-actions">
+            <button class="btn" onclick="closeOnboarding()">Skip for now</button>
+            <button class="btn btn-primary" id="ob-test-btn" onclick="obAddServer()">Test &amp; Add</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="ob-step-body" data-body="2" style="display:none;">
+        <div class="ob-heading">Create your first project</div>
+        <div class="ob-desc">A project is your program + a goal; KAISEN evolves it through build → verify → score.</div>
+        <div class="ob-kind-grid ob-kind-grid-col">
+          <button class="setup-option ob-kind" role="button" tabindex="0" onclick="obDemoProject(this)">
+            <span class="setup-option-icon" aria-hidden="true">⚡</span>
+            <span class="setup-option-body">
+              <span class="setup-option-title">Demo project — prime counter <span class="chip chip-accent">Recommended</span></span>
+              <span class="setup-option-desc">One click: a ready-to-run C program + scoring harness. Watch KAISEN evolve real code in seconds.</span>
+            </span>
+          </button>
+          <button class="setup-option ob-kind" role="button" tabindex="0" onclick="openSuggestProjectModal();">
+            <span class="setup-option-icon" aria-hidden="true">✨</span>
+            <span class="setup-option-body">
+              <span class="setup-option-title">Agent Setup</span>
+              <span class="setup-option-desc">Attach your program + data + goal — the local AI proposes and validates the whole pipeline for you to review.</span>
+            </span>
+          </button>
+          <button class="setup-option ob-kind" role="button" tabindex="0" onclick="openCreateProjectModal();">
+            <span class="setup-option-icon" aria-hidden="true">🛠</span>
+            <span class="setup-option-body">
+              <span class="setup-option-title">Manual Setup</span>
+              <span class="setup-option-desc">Configure everything yourself: ID, language, pipeline steps, metric cards, safety settings.</span>
+            </span>
+          </button>
+        </div>
+        <div class="modal-actions">
+          <button class="btn" onclick="obGoStep(3)">No project for now</button>
+        </div>
+      </div>
+
+      <div class="ob-step-body" data-body="3" style="display:none;">
+        <div class="ob-heading">You're ready</div>
+        <div class="ob-desc">Everything is wired up. Launch your project and watch the evolution loop run.</div>
+        <div class="ob-summary" id="ob-summary"></div>
+        <div class="modal-actions">
+          <button class="btn" onclick="obFinish()">I'll launch it myself</button>
+          <button class="btn btn-primary" id="ob-launch-btn" onclick="obLaunch()">▶ Launch project</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+
+
+  <script src="/script.js"></script>
+</body>
+</html>

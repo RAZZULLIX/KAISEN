@@ -1,0 +1,67 @@
+{
+  "name": "Prime Counter — demo",
+  "description": "Count primes below 1,000,000 as fast as possible. Naive trial-division baseline; the AI hunts for speedups.",
+  "language": "c",
+  "artifact_name": "program",
+  "steps": {
+    "build": {
+      "program": "harness/build.py",
+      "args": [
+        "{candidate}",
+        "{artifact}"
+      ],
+      "timeout": 60
+    },
+    "verify": [
+      {
+        "program": "harness/verify.py",
+        "args": [
+          "{artifact}"
+        ],
+        "timeout": 60
+      }
+    ],
+    "score": [
+      {
+        "program": "harness/score.py",
+        "args": [
+          "{artifact}"
+        ],
+        "timeout": 60,
+        "parse": [
+          {
+            "type": "regex",
+            "pattern": "time_ms=(?P<time_ms>[\\d.]+)"
+          }
+        ]
+      }
+    ]
+  },
+  "metrics": {
+    "time_ms": {
+      "label": "Mean time per round (ms)",
+      "unit": "ms",
+      "direction": "lower",
+      "weight": 1
+    }
+  },
+  "telemetry": {
+    "enabled": true,
+    "progress_token": "KAISEN_PROGRESS",
+    "live_fields": [
+      "time_ms"
+    ]
+  },
+  "select": {
+    "hysteresis": 1.0001
+  },
+  "guardrails": {
+    "enabled": true
+  },
+  "prompts": {
+    "goal": "Make the prime counter as fast as possible while keeping the exact same output contract: print the count of primes below the integer given as argv[1]. Prefer algorithmic wins (sieve, odd-only, wheel, bit arrays) over micro-tuning."
+  },
+  "data": {
+    "baseline_source": "original.c"
+  }
+}
