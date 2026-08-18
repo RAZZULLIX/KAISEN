@@ -11,6 +11,7 @@ spec-defined commands).  What needs a registry:
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 LANGUAGES: Dict[str, Dict[str, Any]] = {
@@ -36,6 +37,7 @@ LANGUAGES: Dict[str, Dict[str, Any]] = {
     "lua":        {"ext": ".lua",   "fence": "lua",        "kind": "interpreted"},
     "perl":       {"ext": ".pl",    "fence": "perl",       "kind": "interpreted"},
     "shell":      {"ext": ".sh",    "fence": "bash",       "kind": "interpreted"},
+    "d":          {"ext": ".d",     "fence": "d",          "kind": "compiled"},
 }
 
 # Friendly aliases -> canonical id.
@@ -48,6 +50,7 @@ ALIASES = {
     "rb": "ruby",
     "sh": "shell", "bash": "shell", "zsh": "shell",
     "cuda-c": "cuda", "cuda-c++": "cuda",
+    "dlang": "d", "d2": "d",
 }
 
 # Compiler-message fixer family: gcc/nvcc "did you forget / did you mean".
@@ -80,18 +83,22 @@ def fence_from_lang(lang: Optional[str]) -> str:
 
 
 def lang_from_ext(ext: Optional[str]) -> Optional[str]:
-    """Detect a language id from a filename/extension (e.g. 'foo.py')."""
+    """Detect a language id from a filename or extension ('py', '.py',
+    'foo.py', or a full path all work)."""
     if not ext:
         return None
-    e = str(ext).lower()
-    if not e.startswith("."):
-        e = "." + e
+    suffix = Path(str(ext).lower()).suffix
+    if suffix:
+        e = suffix
+    else:
+        e = str(ext).lower()
+        if not e.startswith("."):
+            e = "." + e
     for key, info in LANGUAGES.items():
         if info["ext"] == e:
             return key
     extra = {".h": "c", ".hpp": "cpp", ".cuh": "cuda", ".m": "c", ".txt": None, ".md": None}
     return extra.get(e)
-
 
 def code_exts() -> set:
     """Every extension the framework accepts as an attached program file."""
@@ -105,9 +112,11 @@ def c_compiler_like(lang: Optional[str]) -> bool:
 def lang_from_goal(goal: str) -> Optional[str]:
     """Detect a language mentioned in a plain-words goal
     ('in c++', 'a rust program', 'cuda kernel', 'node script'...)."""
+    import re as _re
     if not goal:
         return None
-    g = f" {goal.lower()} "
+    # Punctuation becomes spaces so "in D," and "a C program!" still match.
+    g = " " + _re.sub(r"[^\w\s+]", " ", goal.lower()) + " "
     # Ordered: longer/more specific phrases first.
     for phrase, lang in (
         ("cuda", "cuda"), ("c++", "cpp"), ("c++17", "cpp"), ("c++20", "cpp"),
@@ -117,6 +126,7 @@ def lang_from_goal(goal: str) -> Optional[str]:
         ("php", "php"), ("ruby", "ruby"), ("zig", "zig"), ("scala", "scala"),
         ("dart", "dart"), ("haskell", "haskell"), ("lua", "lua"), ("perl", "perl"),
         ("shell script", "shell"), ("bash", "shell"), (" in c ", "c"), ("c program", "c"),
+        ("dlang", "d"), ("d language", "d"), ("d program", "d"), (" in d ", "d"),
     ):
         if phrase in g:
             return lang

@@ -82,6 +82,8 @@ ALLOWED_LAUNCHERS = {
     "python3", "python", "gcc", "g++", "cc", "clang", "clang++", "make",
     "cmake", "ld", "ar", "objcopy", "cp", "mv", "mkdir", "rm", "touch",
     "cat", "chmod", "chown", "ln", "shutil",
+    # D toolchain: dmd/ldc2/gdc compile D sources to native code.
+    "dmd", "ldc2", "gdc", "rdmd",
 }
 # Note: `rm`/`mv`/`chmod`/`chown` remain allowed as launchers for benign use
 # (cleaning a workdir); the denylist regexes above catch destructive forms.

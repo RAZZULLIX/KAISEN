@@ -167,7 +167,7 @@ projects/<id>/
 | `id` | `[a-z0-9_-]+`, unique |
 | `name` | display name |
 | `description` | free text |
-| `language` | any of the 22 languages (§20) |
+| `language` | any of the 23 languages (§20) |
 | `artifact_name` | output file name of the build step |
 | `steps.build` | one build command: `program`, `args`, `timeout`, `memory_limit_mb` |
 | `steps.verify` | list of verify commands (same shape); all must pass |
@@ -179,7 +179,7 @@ projects/<id>/
 | `guardrails` | `{enabled, allow_extra, deny_extra}` — extra command rules |
 | `prompts` | `{generation_dir, goal, study, lesson}` — prompt templates |
 | `skills` | `{analyze, dedup, deepwork, autofix_build, lessons}` — optional brain features (§7, §9) |
-| `data` | `{protected_files: [...]}` — files hashed before every stage |
+| `data` | `{protected_files: [...]}` — files hashed before every stage; `edit_scope: ["fname", ...]` restricts which functions the LLM may change (§6) |
 | `scores` | optional multi-score-type support (`types` + `active`) |
 | `files` | (suggest-flow only) harness scripts + baseline bundled at CREATE time |
 
@@ -297,10 +297,16 @@ One engine per running project; several engines form the pool.
   touching the spec.
 - **Custom code** — hand-written candidates injected as generations
   (`Inject Custom Code`, `CANDIDATE` in KAI, or `POST /api/queue/custom_code`).
+- **Edit scope** — `data.edit_scope: ["fname", ...]` restricts which
+  functions the LLM may change; changes outside the set are rejected with
+  outcome `scope_violation` before the pipeline runs (heuristic diff, §6).
+- **Quiet benchmarking** — `workers.affinity` pins workers to cores and
+  `workers.quiet` nices them, so score timings stop swinging with load on a
+  shared box. Protocol: stop other engines → pin/median A-B runs → resume.
 - **Outcomes** are recorded per generation in the iteration history:
   `ok` (new best), `valid`, `build_fail`, `verify_fail`, `no_metrics`,
-  `no_code`, `llm_repair`, `protected_data_modified`, `guardrail_denied`
-  — visible in the GUI and via KAI `WAIT`/`STATUS`.
+  `no_code`, `llm_repair`, `scope_violation`, `protected_data_modified`,
+  `guardrail_denied` — visible in the GUI and via KAI `WAIT`/`STATUS`.
 
 ---
 
@@ -407,8 +413,8 @@ Servers are managed live in Settings (persisted in `config.json`).
 
 Each server carries: `type` (`llama` = raw `/completion`, or
 OpenAI-compatible chat), `url`/`base_url`, `model`, `params`,
-`max_concurrent`, timeouts, `payload_template`, `spawn_cmd`, and the
-**routing profile**:
+`chat_template`, `max_concurrent`, timeouts, `payload_template`,
+`spawn_cmd`, and the **routing profile**:
 
 | Field | Meaning |
 |---|---|
@@ -427,6 +433,13 @@ reachability probes, per-server stats (requests, failures, tps).
 
 `ESTIMATE <in> [out]` (KAI) or the Servers panel shows per-server
 time/cost for a call of that size before you commit.
+
+For raw `/completion` servers, `chat_template` selects the model's native
+chat format (`auto | gptoss | chatml | qwen | llama3 | llama2 | gemma |
+mistral | deepseek | none`).  `auto` infers from the model name; use
+`"type": "openai"` with a llama.cpp `--jinja` server to skip this
+entirely.  See [`docs/MODELS.md`](docs/MODELS.md) for the compatibility
+matrix and field notes.
 
 Secrets: `KAISEN_SERVER_<ID>_API_KEY` (env, per server) or
 `KAISEN_OPENAI_API_KEY` (fallback). Never written back to config.
@@ -537,6 +550,8 @@ Complete reference — copy from `config.example.json`:
 | `workers.default_count` | `4` | worker processes per engine |
 | `workers.max_count` | `32` | hard ceiling |
 | `workers.queue_size` | `8` | bounded pipeline queue |
+| `workers.affinity` | `""` | pin worker processes to cores (e.g. `"0,2"` or `"1-3"`) — empty = no pinning (§18 quiet benchmarking) |
+| `workers.quiet` | `false` | run workers at lower priority (nice +10) so scorers don't starve the dashboard/LLMs |
 | `engine.start_paused` | `true` | new engines boot paused |
 | `telegram.*` | off | notifications (§17) |
 | `safety.global_off` | `false` | requires `KAISEN_SAFETY_OFF=1` too (§19) |
@@ -583,13 +598,14 @@ Hardcoded, absolute, and — for the one escape hatch — double-gated:
 
 ## 20. Languages
 
-22 languages, one registry (extensions, code fences, guard patterns):
+23 languages, one registry (extensions, code fences, guard patterns):
 c, cpp, cuda, python, java, javascript, typescript, csharp, go, rust,
 kotlin, swift, php, ruby, r, zig, scala, dart, haskell, lua, perl,
-shell — plus aliases (`c++`, `py`, `js`, `cs`, `bash`, …). The gcc/nvcc
-compiler-hint autofixer applies to the C family (c/cpp/cuda); Python
-gets the linter fixer; other languages surface diagnostics through the
-build stderr.
+shell, **d** — plus aliases (`c++`, `py`, `js`, `cs`, `bash`, `dlang`, …).
+The gcc/nvcc compiler-hint autofixer applies to the C family (c/cpp/cuda);
+Python gets the linter fixer; other languages (including D) surface
+diagnostics through the build stderr. D uses the `dmd`/`ldc2`/`gdc`/`rdmd`
+toolchain, which is on the guardrail launcher allowlist.
 
 ---
 
@@ -660,4 +676,4 @@ measurement of the real workload, not by headline multipliers.
 
 ---
 
-*Manual is the complete reference as of KAISEN 0.1.0-alpha.*
+*Manual is the complete reference as of KAISEN 0.1.1-alpha.*

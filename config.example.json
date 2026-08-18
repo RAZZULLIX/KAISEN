@@ -31,6 +31,7 @@
         "url": "http://127.0.0.1:8502/completion",
         "base_url": "",
         "model": "my-model",
+        "chat_template": "auto",
         "params": {
           "temperature": 0.6
         },
@@ -44,7 +45,9 @@
   "workers": {
     "default_count": 4,
     "max_count": 32,
-    "queue_size": 8
+    "queue_size": 8,
+    "affinity": "",
+    "quiet": false
   },
   "telegram": {
     "token": "",

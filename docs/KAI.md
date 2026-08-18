@@ -29,11 +29,17 @@ deliberately tolerant, because LLMs decorate everything:
 
 ## Session state
 
-- `PROJECT <id>` sets the session's project (persists across commands).
+- `PROJECT <id>` sets the session's project (persists across requests via the
+  `kaisen_kai_sid` cookie — curl `-c/-b` keeps it; a plain curl without a
+  cookie starts fresh, so send `PROJECT <id>` + the command in ONE body).
 - Baseline code staged with `BASELINE` and the last `GOAL` result are
   session state used by the following commands.
 - A `RUN` creates an in-flight goal; `WAIT`/`STATUS` report against that
-  goal's engine even when other pool engines are also running.
+  goal's engine even when other pool engines are also running.  Run goals are
+  persisted to disk (`kai_runs.json`), so a daemon restart does not lose the
+  budget.
+- `PAUSE`/`RESUME`/`STOP`/`SMOKE` accept `ON <pid>` to target another pool
+  member without re-selecting it.
 
 
 ## Commands
@@ -47,6 +53,7 @@ deliberately tolerant, because LLMs decorate everything:
 | `WAIT [<secs>]` | block until the in-flight run finishes (or snapshot) |
 | `PAUSE` / `RESUME` / `STOP [ON <pid>]` | engine controls |
 | `BEST [id]` | champion code |
+| `SMOKE [pid]` (also `ON <pid>`) | run the pipeline once on the baseline |
 | `SERVERS` | LLM servers with tier/smartness/cost/free slots |
 | `MODELS [skill]` | per-(model, skill) scoreboard: attempts, one-shots, wins, $ — which model does what best |
 | `BASELINE [lang]` + code lines + `END` | stage the starting program |

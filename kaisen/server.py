@@ -111,6 +111,10 @@ class DashboardServer:
         self._suggest_state: Dict[str, Any] = {"running": False, "stage": "idle"}
         self._suggest_lock = threading.Lock()
         self._pending_data_file: Optional[Dict[str, str]] = None
+        # Sticky KAI sessions: cookie -> KaiSession so an HTTP client keeps
+        # its PROJECT selection between requests (see docs/KAI.md).
+        self._kai_sessions: Dict[str, Any] = {}
+        self._kai_lock = threading.Lock()
         # Server management must work BEFORE any engine exists (first run):
         # fall back to a bare orchestrator when no project engine is up.
         self._base_orchestrator = None
@@ -494,20 +498,39 @@ class DashboardServer:
         Plain text in, plain text out. The body carries one command per
         line (CANDIDATE blocks end with END); every reply starts with OK
         or ERR. See kaisen/kai.py for the command reference.
+
+        PROJECT is sticky across requests via the `kaisen_kai_sid` cookie
+        (curl -c/-b keeps it; a plain curl without a cookie starts fresh),
+        so PROJECT <id> no longer has to ride in every request body.
         """
+        import uuid as _uuid
         from . import kai
         text = await request.text()
         if not text.strip():
             return web.Response(text="ERR empty body — HELP for the reference\n",
                                 content_type="text/plain", charset="utf-8")
         host = "127.0.0.1" if self.host in ("0.0.0.0", "::") else self.host
+        sid = request.cookies.get("kaisen_kai_sid")
+        if not sid:
+            sid = _uuid.uuid4().hex[:16]
+        with self._kai_lock:
+            entry = self._kai_sessions.get(sid)
+            if entry is None or entry.get("created", 0) < time.time() - 86400 * 7:
+                entry = {
+                    "session": kai.KaiSession(kai.KaiClient(f"http://{host}:{self.port}")),
+                    "created": time.time(),
+                }
+                self._kai_sessions[sid] = entry
+            session = entry["session"]
         try:
             out = await asyncio.to_thread(
-                kai.handle_text, text, host=host, port=self.port, auto_start=False
+                kai.handle_text, text, host=host, port=self.port, auto_start=False, session=session
             )
         except Exception as e:
             out = f"ERR {e}"
-        return web.Response(text=out + "\n", content_type="text/plain", charset="utf-8")
+        resp = web.Response(text=out + "\n", content_type="text/plain", charset="utf-8")
+        resp.set_cookie("kaisen_kai_sid", sid, max_age=86400 * 7, samesite="Lax")
+        return resp
 
 
     async def _run_suggest(self, goal: str, code: str, data_file, language: str, server_ids=None) -> Dict[str, Any]:
@@ -792,8 +815,10 @@ class DashboardServer:
                 return {n for n in names if n in ("runs", "best", "state.json", "results.csv", "seen_hashes.json", ".kaisen_scripts")}
             _shutil.copytree(p.path, tmp / p.id, ignore=_ignore)
             from .projects import Project as _Project
+            from .languages import ext_from_lang as _ext_from_lang
             tp = _Project(tmp / p.id)
-            baseline = tp.path / str((tp.spec.get("data") or {}).get("baseline_source", f"original{tp.spec.get('language') == 'python' and '.py' or '.c'}"))
+            lang = str(tp.spec.get("language", "c"))
+            baseline = tp.path / str((tp.spec.get("data") or {}).get("baseline_source", f"original{_ext_from_lang(lang)}"))
             if not baseline.exists():
                 return {"ok": False, "error": f"baseline file not found: {baseline.name}"}
             res = run_pipeline(tp, baseline, tmp / p.id / "smoke")

@@ -55,8 +55,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
+from .util import load_json, save_json
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
-__version__ = "0.1.0-alpha"
+__version__ = "0.1.1-alpha"
+_RUNS_FILE = REPO_ROOT / "kai_runs.json"   # persistent run goals (gitignored)
 
 
 # ---------------------------------------------------------------------------
@@ -71,6 +74,10 @@ class KaiError(Exception):
 class KaiClient:
     def __init__(self, base: str):
         self.base = base.rstrip("/")
+        # One persistent session: cookies (including the KAI sticky-project
+        # session cookie) survive across requests, so a CLI client keeps its
+        # selected project between calls — just like curl -c/-b would.
+        self._session = requests.Session()
         # The dashboard may require a server password. The client reads
         # the same env var the server does (KAISEN_API_KEY) — set it
         # here and both sides agree; empty = no auth.
@@ -82,13 +89,13 @@ class KaiClient:
         url = self.base + path
         try:
             if method == "GET":
-                resp = requests.get(url, headers=self.headers, timeout=(3.0, read_timeout))
+                resp = self._session.get(url, headers=self.headers, timeout=(3.0, read_timeout))
             elif method == "POST":
-                resp = requests.post(url, json=body, headers=self.headers,
-                                     timeout=(3.0, read_timeout))
+                resp = self._session.post(url, json=body, headers=self.headers,
+                                          timeout=(3.0, read_timeout))
             elif method == "PUT":
-                resp = requests.put(url, json=body, headers=self.headers,
-                                    timeout=(3.0, read_timeout))
+                resp = self._session.put(url, json=body, headers=self.headers,
+                                         timeout=(3.0, read_timeout))
             else:
                 raise KaiError(f"unsupported method {method}")
         except requests.exceptions.ConnectionError as e:
@@ -188,7 +195,7 @@ def _read_best(project_id: str) -> Dict[str, Any]:
 
 HELP_TEXT = """KAI protocol — the SERVER's replies start with OK or ERR; you send
 BARE command lines, never prefixed with OK. Commands (case-insensitive):
-  PROJECT <id>                set session project
+  PROJECT <id>                set session project (STICKY for this session)
   STATUS                      engine + project status (lists all active projects)
   SPEC                        pipeline steps, metrics, goal
   RUN [<n>] [FOR <secs>] [ON <pid>] [WITH <k>]
@@ -200,9 +207,12 @@ BARE command lines, never prefixed with OK. Commands (case-insensitive):
                              n parallel drafts, each pipeline-scored
   ESTIMATE <in> [<out>]      per-server cost/time for a call of that size
   WAIT [<secs>]               block until the in-flight run finishes
-  PAUSE | RESUME | STOP       engine control
+  PAUSE | RESUME | STOP [ON <pid>]
+                             engine control — ON <pid> targets another pool
+                             member without re-selecting it
   BEST                        champion source code
-  SMOKE                       run pipeline once on the baseline
+  SMOKE [pid] | SMOKE ON <pid>
+                             run pipeline once on the baseline
   BASELINE [lang]             stage starting code: lines until END
   CANDIDATE [lang]            queue code into evolution: lines until END
   SNAPSHOT [LIST|TAKE|RESTORE <id>] [ON <pid>]
@@ -224,6 +234,9 @@ BARE command lines, never prefixed with OK. Commands (case-insensitive):
                              LLM repair attempts (default 3; off = 0)
   HELP                        this text
   QUIT                        end session
+NOTES: HTTP clients are FRESH per request — send PROJECT <id> + the command
+in ONE body, or pass a cookie (curl -c/-b) so the server remembers the
+project. Run budgets survive daemon restarts (kai_runs.json).
 Examples:
   PROJECT md5-speed
   RUN
@@ -290,11 +303,36 @@ class KaiSession:
         self.client = client
         self.project: Optional[str] = None
         # Sidecar state: baseline code staged for GOAL, last suggested spec,
-        # and the in-flight run goal (None targets = run forever).
+        # and the in-flight run goal (None targets = run forever).  The run
+        # goal persists to disk so a daemon restart doesn't lose the budget.
         self._baseline_code: Optional[str] = None
         self._last_spec: Optional[Dict[str, Any]] = None
         self._last_temp: bool = False
-        self._run_goal: Optional[Dict[str, Any]] = None
+        self._run_goal: Optional[Dict[str, Any]] = self._load_run_goal()
+
+    def _load_run_goal(self) -> Optional[Dict[str, Any]]:
+        data = load_json(_RUNS_FILE, None)
+        if isinstance(data, dict) and data.get("pid"):
+            return data
+        return None
+
+    def _save_run_goal(self) -> None:
+        if self._run_goal:
+            save_json(_RUNS_FILE, self._run_goal)
+        else:
+            try:
+                _RUNS_FILE.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    def _parse_on(self, arg: str) -> Optional[str]:
+        """Extract `ON <pid>` from a command tail, or None.  Lets STOP/SMOKE/
+        PAUSE/RESUME target another pool member without re-selecting it."""
+        tokens = arg.split()
+        for i, t in enumerate(tokens):
+            if t.upper().rstrip(":,s") == "ON" and i + 1 < len(tokens):
+                return tokens[i + 1].strip().lower()
+        return None
 
     def _need_project(self) -> str:
         if not self.project:
@@ -425,6 +463,7 @@ class KaiSession:
             "start_hist": start_hist,
             "start_best": start_best,
         }
+        self._save_run_goal()
         desc = (f"{gen_target} generations" if gen_target else "forever")
         if budget:
             desc += f" (budget {budget:.0f}s)"
@@ -505,6 +544,7 @@ class KaiSession:
                 self.client.call("POST", "/api/engine/pause",
                                  {"paused": True, "project_id": goal["pid"]}, read_timeout=60.0)
                 self._run_goal = None
+                self._save_run_goal()
                 return self._run_summary(goal, done=True)
             if st.get("paused") or time.time() >= deadline:
                 break
@@ -516,26 +556,37 @@ class KaiSession:
 
     def cmd_pause(self, arg: str) -> str:
         body: Dict[str, Any] = {"paused": True}
-        if self.project:
+        pid = self._parse_on(arg)
+        if pid:
+            body["project_id"] = pid
+        elif self.project:
             body["project_id"] = self.project
         self.client.call("POST", "/api/engine/pause", body, read_timeout=60.0)
-        return "OK engine paused"
+        return f"OK engine paused ({pid or self.project or 'all'})"
 
     def cmd_resume(self, arg: str) -> str:
         body: Dict[str, Any] = {"paused": False}
-        if self.project:
+        pid = self._parse_on(arg)
+        if pid:
+            body["project_id"] = pid
+        elif self.project:
             body["project_id"] = self.project
         self.client.call("POST", "/api/engine/pause", body, read_timeout=60.0)
-        return "OK engine running"
+        return f"OK engine running ({pid or self.project or 'all'})"
 
     def cmd_stop(self, arg: str) -> str:
         body: Dict[str, Any] = {}
-        if self.project:
+        pid = self._parse_on(arg)
+        if pid:
+            body["project_id"] = pid
+        elif self.project:
             body["project_id"] = self.project
         self.client.call("POST", "/api/engine/stop", body, read_timeout=60.0)
         self._run_goal = None
-        if self.project:
-            return f"OK engine for project {self.project} stopped"
+        self._save_run_goal()
+        target = pid or self.project
+        if target:
+            return f"OK engine for project {target} stopped"
         return "OK engine stopped"
 
     def cmd_best(self, arg: str) -> str:
@@ -547,7 +598,7 @@ class KaiSession:
         return head + "\n" + b["code"]
 
     def cmd_smoke(self, arg: str) -> str:
-        pid = arg.strip() or self._need_project()
+        pid = self._parse_on(arg) or arg.strip() or self._need_project()
         res = self.client.call("POST", f"/api/projects/{pid}/smoke", read_timeout=600.0)
         if not res.get("ok"):
             reason = (res.get("reason") or res.get("error") or "unknown")[:400]
@@ -1021,11 +1072,13 @@ def serve_stdio(host: str, port: int, auto_start: bool = True) -> None:
 
 
 def handle_text(text: str, host: str = "127.0.0.1", port: int = 8080,
-                auto_start: bool = False) -> str:
-    """HTTP transport: whole body as command lines, fresh session."""
+                auto_start: bool = False, session: Optional[KaiSession] = None) -> str:
+    """HTTP transport: whole body as command lines.  `session` (when given)
+    carries the caller's sticky session — the dashboard passes one so PROJECT
+    selection persists across requests; stdio clients keep their own."""
     client = connect(host, port, auto_start=auto_start)
-    session = KaiSession(client)
-    return run_lines(session, text.splitlines())
+    sess = session or KaiSession(client)
+    return run_lines(sess, text.splitlines())
 
 
 def main(host: Optional[str] = None, port: Optional[int] = None) -> None:

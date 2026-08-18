@@ -206,7 +206,7 @@ def _referenced_programs(spec: Dict[str, Any]) -> List[str]:
             items = steps.get(stage, []) or []
         for st in items:
             p = (st or {}).get("program")
-            if p and p not in ("gcc", "cc", "g++", "clang", "make"):
+            if p and p not in ("gcc", "cc", "g++", "clang", "make", "dmd", "ldc2", "gdc", "rdmd"):
                 progs.append(p)
     return progs
 
@@ -307,7 +307,7 @@ def _guardrail_scan_spec(spec: Dict[str, Any], project_dir: Path) -> List[str]:
         items = [steps.get("build")] if stage == "build" and steps.get("build") else steps.get(stage, []) or []
         for i, st in enumerate(items):
             prog = str(st.get("program", ""))
-            if prog in ("gcc", "cc", "g++", "clang"):
+            if prog in ("gcc", "cc", "g++", "clang", "dmd", "ldc2", "gdc", "rdmd"):
                 # bare compiler launcher — allowlist covers it
                 continue
             p = Path(prog)
@@ -329,7 +329,7 @@ def ensure_harness_ready(root: Path, spec: Dict[str, Any]) -> None:
     guarantee a python shebang + +x so the model can never trip on
     'Exec format error'."""
     for prog in _referenced_programs(spec):
-        if prog in ("gcc", "cc", "g++", "clang", "make"):
+        if prog in ("gcc", "cc", "g++", "clang", "make", "dmd", "ldc2", "gdc", "rdmd"):
             continue
         safe, why = _safe_rel_path(prog)
         if not safe:
@@ -387,6 +387,17 @@ def _safe_rel_path(path: str) -> Tuple[bool, str]:
     if not p.parts:
         return False, "empty path"
     return True, ""
+
+
+def _preserve_user_baseline(spec: Dict[str, Any], baseline_name: str, user_code: str) -> Dict[str, Any]:
+    """Force the user's exact program back into a (possibly LLM-re-emitted)
+    spec.  The user's code is the baseline the project must evolve; a repair
+    round may fix scripts, never the program the user handed us."""
+    files = dict(spec.get("files") or {})
+    files[baseline_name] = user_code
+    spec.setdefault("data", {})["baseline_source"] = baseline_name
+    spec["files"] = files
+    return spec
 
 
 def _score_probe(spec: Dict[str, Any], data_file: Optional[Dict[str, str]]) -> Tuple[bool, str]:
@@ -788,6 +799,12 @@ def suggest_project(
         spec["data"]["protected_files"] = [f"data/{data_file.get('name', 'data.bin')}"]
 
     # ---- GATES + REPAIR ROUNDS ---------------------------------------------
+    # The user's provided program is SACRED: the smoke run must always test
+    # THIS exact file, never an AI rewrite.  Track it outside the loop so
+    # every repair path — including full-spec re-emission — is forced to
+    # preserve it.
+    user_baseline = bool(code.strip())
+    user_baseline_code = code.strip()
     for round_no in range(1, max_rounds + 1):
         result["rounds"] = round_no
         errs: List[str] = []
@@ -850,7 +867,6 @@ def suggest_project(
         fix_feedback = "\n".join((notes[-1].splitlines() if notes else [reason])[:10])
         prog(stage="repair", round=round_no, raw_label=f"Round {round_no} — repairing the {stage} step…")
         repaired = False
-        user_baseline = bool(code.strip())
         if stage in ("build", "baseline") and not user_baseline:
             fixed_b = run_step("baseline", "Fix the baseline program",
                                lambda err: promptlib.step_baseline_program(tier, goal, analysis_json, lang)
@@ -934,6 +950,8 @@ def suggest_project(
                 merged_files = dict(spec.get("files") or {})
                 merged_files.update(rep_spec.get("files") or {})
                 rep_spec["files"] = merged_files
+                if user_baseline:
+                    rep_spec = _preserve_user_baseline(rep_spec, baseline_name, user_baseline_code)
                 spec = rep_spec
             steps.append({"id": "repair", "label": f"Repair round {round_no}",
                           "state": "done" if rep_spec else "failed", "output": rep_raw})

@@ -44,12 +44,17 @@ C_STANDARD_HEADERS = [
 # spec-level guardrail configuration.
 C_FAMILY_DANGER = [
     "remove(", "unlink(", "rmdir(", "DeleteFile", 'system("rm', 'system("del',
-    "fork(", "execv(", "execve(", "popen(", "system(", "mkfifo(", "socket(",
+    "fork(", "vfork(", "execv(", "execve(", "execvp(", "execvpe(", "execl(",
+    "execlp(", "execle(", "fexecve(", "posix_spawn", "posix_spawnp",
+    "popen(", "system(", "mkfifo(", "socket(", "socketpair(", "connect(",
+    "listen(", "accept(", "shm_open", "dlopen(", "dlsym(", "ptrace(",
+    "syscall(", "clone3(", "pidfd_open",
 ]
 PYTHON_DANGER = [
     "os.remove", "os.unlink", "os.rmdir", "shutil.rmtree", "pathlib.Path.unlink",
     "os.system", "subprocess", "os.popen", "socket", "urllib", "requests",
     "http.client", "ftplib", "aiohttp", "eval(", "exec(", "__import__", "pickle.load",
+    "ctypes", "os.startfile", "os.spawn", "os.posix_spawn", "pty.spawn",
 ]
 SHELL_DANGER = [
     "rm -rf", "rm -r ", "rm -fr", "curl ", "wget ", "nc ", "ncat ", "socat ",
@@ -73,12 +78,18 @@ RUST_DANGER = [
     "std::process::command", "std::fs::remove", "std::fs::rename", "tcpstream",
     "udpsocket", "std::net::", "reqwest",
 ]
+D_DANGER = [
+    "std.process", "std.socket", "std.net", "std.file.remove", "std.file.rename",
+    "std.file.delTree", "std.file.rmdir", "std.stdio.remove", "system(",
+    "spawnShell", "spawnProcess", "execv", "execve", "popen", "mkfifo",
+]
 GENERIC_DANGER = ["system(", "socket", "rmtree", "deletefile", "httpclient", "net.http"]
 DANGER_BY_LANG = {
     "c": C_FAMILY_DANGER, "cpp": C_FAMILY_DANGER, "cuda": C_FAMILY_DANGER,
     "python": PYTHON_DANGER, "shell": SHELL_DANGER,
     "javascript": JS_DANGER, "typescript": JS_DANGER,
     "java": JAVA_DANGER, "go": GO_DANGER, "rust": RUST_DANGER,
+    "d": D_DANGER,
 }
 
 
@@ -105,6 +116,7 @@ _STARTERS = {
     "zig": (r"^pub\s+fn\s+\w+", r"^const\s+\w+\s*="),
     "scala": (r"^object\s+\w+", r"^import\s+\w"),
     "dart": (r"^void\s+main\b", r"^import\s+['\"]"),
+    "d": (r"^module\s+\w+", r"^void\s+main\b", r"^int\s+main\b", r"^unittest\b"),
 }
 
 
@@ -165,10 +177,41 @@ def ensure_headers(code: str, language: str = "c") -> str:
     return ("\n".join(missing) + "\n\n" + code) if missing else code
 
 
+def extract_function_names(code: str, language: str = "c") -> set:
+    """Best-effort list of top-level function names defined in `code`, used
+    by the edit-scope guard.  Heuristic (regex, not a parser) and
+    language-aware: C-family and D use brace-body declarations; Python uses
+    `def`/`async def`; others fall back to any `name(` followed by a body.
+    Not exhaustive — a determined obfuscator defeats it, but it catches the
+    common whole-file rewrite where unrelated functions are touched."""
+    from .languages import normalize_lang
+    lang = normalize_lang(language)
+    names: set = set()
+    if lang in ("c", "cpp", "cuda", "d"):
+        for m in re.finditer(
+            r"\b(?:static\s+|inline\s+|extern\s+)*"
+            r"(?:[\w:*&<>\s]+?)\s+(\w+)\s*\([^;{}]*?\)\s*\{",
+            code,
+        ):
+            names.add(m.group(1))
+    elif lang == "python":
+        for m in re.finditer(r"^\s*(?:async\s+)?def\s+(\w+)\s*\(", code, re.M):
+            names.add(m.group(1))
+    else:
+        for m in re.finditer(r"\b\w+\s+(\w+)\s*\([^;{}]*?\)\s*\{", code):
+            names.add(m.group(1))
+    return names
+
+
 def find_dangerous(code: str, language: str = "c") -> Optional[str]:
     """Return the first dangerous API call found, or None.
-    The pattern table is per-language; unknown languages get the generic
-    conservative set."""
+
+    Layer 1: the per-language pattern table (substring scan).  Layer 2:
+    write-mode file open detection — `fopen(path, "w"/"a"/"+")` or raw
+    `open(path, O_WRONLY|O_CREAT|...)` opens a write channel to an
+    arbitrary path (the substring scan alone can't see the mode).  The
+    checks are a tripwire, not containment: process/time/RSS limits are
+    the real fence."""
     from .languages import normalize_lang
     lang = normalize_lang(language)
     patterns = DANGER_BY_LANG.get(lang, GENERIC_DANGER)
@@ -176,6 +219,17 @@ def find_dangerous(code: str, language: str = "c") -> Optional[str]:
     for p in patterns:
         if p.lower() in low:
             return p
+    if lang in ("c", "cpp", "cuda"):
+        # fopen / freopen with a WRITE-capable mode (w, a, +) — reading is fine.
+        m = re.search(r"\bfopen\s*\(\s*[^,]+,\s*[\"']([^\"']*)[\"']\s*\)", code)
+        if m and any(ch in m.group(1).lower() for ch in ("w", "a", "+")):
+            return f"fopen write mode '{m.group(1)}'"
+        m = re.search(r"\bfreopen\s*\(\s*[^,]+,\s*[^,]+,\s*[\"']([^\"']*)[\"']\s*\)", code)
+        if m and any(ch in m.group(1).lower() for ch in ("w", "a", "+")):
+            return f"freopen write mode '{m.group(1)}'"
+        m = re.search(r"\bopen\s*\(\s*[\"'][^\"']*[\"']\s*,\s*(O_WRONLY|O_CREAT|O_APPEND|O_TRUNC|O_RDWR)\b", code)
+        if m:
+            return f"open write flag '{m.group(1)}'"
     return None
 def normalize_code(code: str, language: str = "c") -> str:
     """Semantic normalization for dedup.  C-family languages keep the

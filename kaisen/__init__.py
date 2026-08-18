@@ -9,4 +9,4 @@ that define the pipeline order, the harness programs, the metric schema and
 the guardrail policy.
 """
 
-__version__ = "0.1.0-alpha"
+__version__ = "0.1.1-alpha"

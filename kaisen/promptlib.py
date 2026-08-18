@@ -314,8 +314,9 @@ def step_build_script(tier: str, language: str, kind: str, with_driver: bool = F
     strict = "Reply with ONLY one python code block. Nothing outside." if tier in ("tiny", "small") else "Reply with one python code block."
     if kind == "compiled":
         driver_part = " Compile the candidate file TOGETHER WITH harness/driver.c (or .cpp) in the same command." if with_driver else ""
+        toolchain = {"c": "gcc", "cpp": "g++", "cuda": "nvcc", "d": "dmd or ldc2"}.get(language, "gcc/g++/nvcc")
         how = (f"compile the candidate {language} file (argv[1]) into the artifact (argv[2]) with the "
-               f"project toolchain (gcc/g++/nvcc...). Use -O2 (plus -arch=native for CUDA).{driver_part} "
+               f"project toolchain ({toolchain}). Use -O2 (plus -arch=native for CUDA).{driver_part} "
                "Always write the compiler's stderr to YOUR stderr (success AND failure). Exit non-zero on failure.")
     else:
         how = ("validate the candidate (argv[1]) — e.g. py_compile / node --check — then copy it to the "

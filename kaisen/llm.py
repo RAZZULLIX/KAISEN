@@ -43,27 +43,151 @@ DEFAULT_PARAMS = {
 
 TIER_RANK = {"tiny": 0, "small": 1, "large": 2}
 
+# Chat templates for raw /completion endpoints.  OpenAI-compatible servers
+# (type "openai") apply the model's template SERVER-side; these client-side
+# renderers exist for llama.cpp /completion and "remote" servers, where the
+# raw prompt must already be in the model's native format.  `auto` infers
+# the template from the configured model name.
+CHAT_TEMPLATES = ("auto", "gptoss", "chatml", "qwen", "llama3", "llama2",
+                  "gemma", "mistral", "deepseek", "none")
 
-def _chat_transcript(messages: List[Dict[str, str]]) -> str:
+
+def _infer_chat_template(model: str) -> str:
+    """Guess the native chat format from a model name.  Unknown names fall
+    back to ChatML — the most common open format (Qwen, Phi, Yi, MiniCPM,
+    Mistral v0.3+, and most frontier APIs)."""
+    m = (model or "").lower()
+    if "gpt-oss" in m or "gpt_oss" in m:
+        return "gptoss"
+    if "qwen" in m:
+        return "qwen"
+    if "gemma" in m:
+        return "gemma"
+    if "llama-3" in m or "llama3" in m or "llama_3" in m:
+        return "llama3"
+    if "llama-2" in m or "llama2" in m:
+        return "llama2"
+    if "mistral" in m or "mixtral" in m:
+        return "mistral"
+    if "deepseek" in m:
+        return "deepseek"
+    return "chatml"
+
+
+def _chat_transcript(messages: List[Dict[str, str]], template: str = "auto") -> str:
     """Role-tagged conversation text for raw /completion servers, in the
-    model's NATIVE chat format (gpt-oss: <|start|>role<|message|>...<|end|>).
-    Assistant turns render on the final channel so reasoning never leaks
-    into the next turn. Ends with <|start|>assistant to continue the role."""
-    parts = []
+    model's native format.  Assistant turns render so the final answer
+    channel is the only one the model continues.  Ends with the token(s)
+    that open the assistant role."""
+    t = template if template in CHAT_TEMPLATES else "auto"
+    if t == "auto":
+        t = "chatml"
     msgs = list(messages)
     if not msgs or msgs[0].get("role") != "system":
         msgs.insert(0, {"role": "system",
                         "content": "You are KAISEN, an AI coding framework agent. You reply exactly as each task instructs."})
-    for m in msgs:
-        role = str(m.get("role", "user")).lower()
-        if role not in ("system", "user", "assistant"):
-            role = "user"
-        if role == "assistant":
-            parts.append(f"<|start|>assistant<|channel|>final<|message|>{str(m.get('content', ''))}<|end|>")
-        else:
-            parts.append(f"<|start|>{role}<|message|>{str(m.get('content', ''))}<|end|>")
-    parts.append("<|start|>assistant")
-    return "\n".join(parts)
+    role_map = {"system": "system", "user": "user", "assistant": "assistant"}
+
+    def content(m: Dict[str, str]) -> str:
+        return str(m.get("content", ""))
+
+    if t == "gptoss":
+        parts = []
+        for m in msgs:
+            role = role_map.get(str(m.get("role", "user")).lower(), "user")
+            if role == "assistant":
+                parts.append(f"<|start|>assistant<|channel|>final<|message|>{content(m)}<|end|>")
+            else:
+                parts.append(f"<|start|>{role}<|message|>{content(m)}<|end|>")
+        parts.append("<|start|>assistant")
+        return "\n".join(parts)
+
+    if t == "chatml" or t == "qwen":
+        parts = []
+        for m in msgs:
+            role = role_map.get(str(m.get("role", "user")).lower(), "user")
+            parts.append(f"<|im_start|>{role}\n{content(m)}<|im_end|>\n")
+        parts.append("<|im_start|>assistant\n")
+        return "".join(parts)
+
+    if t == "llama3":
+        parts = ["<|begin_of_text|>"]
+        for m in msgs:
+            role = role_map.get(str(m.get("role", "user")).lower(), "user")
+            parts.append(f"<|start_header_id|>{role}<|end_header_id|>\n\n{content(m)}<|eot_id|>")
+        parts.append("<|start_header_id|>assistant<|end_header_id|>\n\n")
+        return "".join(parts)
+
+    if t == "llama2":
+        # System is folded into the first user turn; assistant turns are
+        # wrapped between [INST]...[/INST] pairs.
+        system = next((m for m in msgs if m.get("role") == "system"), None)
+        first_user_idx = next((i for i, m in enumerate(msgs) if m.get("role") == "user"), 0)
+        parts = ["<s>"]
+        first_user_done = False
+        for m in msgs:
+            role = str(m.get("role", "user")).lower()
+            if role == "system":
+                continue
+            if role == "assistant":
+                parts.append(f"{content(m)} </s>")
+            else:
+                if not first_user_done and system:
+                    body = f"<<SYS>>\n{content(system)}\n<</SYS>>\n\n{content(m)}"
+                    first_user_done = True
+                else:
+                    body = content(m)
+                parts.append(f"[INST] {body} [/INST]")
+        return "".join(parts)
+
+    if t == "gemma":
+        # Gemma has no system role; fold it into the first user turn.
+        system = next((m for m in msgs if m.get("role") == "system"), None)
+        first_user = True
+        parts = ["<bos>"]
+        for m in msgs:
+            role = str(m.get("role", "user")).lower()
+            if role == "system":
+                continue
+            body = content(m)
+            if first_user and system:
+                body = f"{content(system)}\n\n{body}"
+                first_user = False
+            label = "model" if role == "assistant" else "user"
+            parts.append(f"<start_of_turn>{label}\n{body}<end_of_turn>\n")
+        parts.append("<start_of_turn>model\n")
+        return "".join(parts)
+
+    if t == "mistral":
+        # Mistral v0.2: [INST] ... [/INST]; system folded into the first
+        # user turn (v0.3+ uses ChatML — configure "chatml" for those).
+        system = next((m for m in msgs if m.get("role") == "system"), None)
+        first_user = True
+        parts = []
+        for m in msgs:
+            role = str(m.get("role", "user")).lower()
+            if role == "system":
+                continue
+            if role == "assistant":
+                parts.append(f"{content(m)}</s>")
+            else:
+                body = f"{content(system)}\n\n{content(m)}" if first_user and system else content(m)
+                first_user = False
+                parts.append(f"[INST] {body} [/INST]")
+        return "".join(parts)
+
+    if t == "deepseek":
+        # DeepSeek-V3/R1 native template: <｜begin▁of▁sentence｜>Role\n...<｜end▁of▁sentence｜>.
+        role_map_ds = {"system": "System", "user": "User", "assistant": "Assistant"}
+        parts = []
+        for m in msgs:
+            role = role_map_ds.get(str(m.get("role", "user")).lower(), "User")
+            parts.append(f"<｜begin▁of▁sentence｜>{role}\n{content(m)}<｜end▁of▁sentence｜>\n")
+        parts.append("# Assistant:\n")
+        return "".join(parts)
+
+    # none: plain concatenation with role prefixes — no template tokens.
+    return "\n".join(f"{m.get('role', 'user')}: {content(m)}" for m in msgs) + "\nassistant:"
 
 
 def _cap_predict(payload: Dict[str, Any], global_cfg: FrameworkConfig) -> Dict[str, Any]:
@@ -103,6 +227,11 @@ class Server:
         self.url: str = cfg.get("url", "")
         self.base_url: str = cfg.get("base_url", "")
         self.model: str = cfg.get("model", "")
+        # Client-side chat template for raw /completion servers.  "auto"
+        # (default) infers from the model name; "none" disables templating.
+        raw_tpl = cfg.get("chat_template")
+        self.chat_template: str = raw_tpl if raw_tpl in CHAT_TEMPLATES else \
+            (_infer_chat_template(self.model) if raw_tpl in (None, "", "auto") else "auto")
         # Secrets are env-first (KAISEN_SERVER_<ID>_API_KEY / KAISEN_OPENAI_API_KEY);
         # a value in config.json is only a fallback and is never shown in the GUI.
         self.api_key: str = global_cfg.server_api_key(self.id, cfg.get("api_key", ""))
@@ -364,7 +493,7 @@ class Server:
             resp.encoding = "utf-8"
             data = resp.json()
             return data["choices"][0]["message"]["content"]
-        return self.request(_chat_transcript(messages), extra_params)
+        return self.request(_chat_transcript(messages, self.chat_template), extra_params)
 
     def request_chat_stream(self, messages: List[Dict[str, str]],
                             on_token: Optional[Callable[[str], None]] = None,
@@ -383,7 +512,7 @@ class Server:
             resp.raise_for_status()
             content, _ = self._consume_sse(resp, on_token, cancel_event, llama=False)
             return content
-        return self.request_stream(_chat_transcript(messages), on_token=on_token,
+        return self.request_stream(_chat_transcript(messages, self.chat_template), on_token=on_token,
                                    cancel_event=cancel_event)
 
     def _consume_sse(
@@ -645,7 +774,7 @@ class ModelOrchestrator:
         # environment (KAISEN_SERVER_<ID>_API_KEY) or are re-entered.
         return {
             "id": s.id, "label": s.label, "type": s.type, "url": s.url, "base_url": s.base_url,
-            "model": s.model, "params": s.params,
+            "model": s.model, "params": s.params, "chat_template": s.chat_template,
             "payload_template": s.payload_template, "max_concurrent": s.max_concurrent,
             "timeout": s.timeout, "enabled": s.enabled,
             "tier": s.tier, "priority": s.priority, "context_window": s.context_window,

@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from .projects import Project, ProjectRegistry
+from .config import get_config
 
 WORKER_START_TIMEOUT = 15.0
 
@@ -46,6 +47,38 @@ def _worker_main(
     # roots, temp roots, tests) — never from the framework default.
     registry = ProjectRegistry(Path(registry_root))
     project = registry.require(project_id)
+
+    # Quiet mode / affinity: pin this worker to specific cores and/or lower
+    # its priority so a busy score job can't drown the dashboard or LLMs.
+    # The affinity/quiet flags come from config.json (workers.affinity /
+    # workers.quiet) and apply to the whole worker process.
+    try:
+        _cfg = get_config()
+        affinity = str(_cfg.workers.get("affinity", "") or "")
+        quiet = bool(_cfg.workers.get("quiet", False))
+    except Exception:
+        affinity, quiet = "", False
+    if affinity:
+        try:
+            cpus = set()
+            for token in affinity.split(","):
+                token = token.strip()
+                if not token:
+                    continue
+                if "-" in token:
+                    lo, _, hi = token.partition("-")
+                    cpus.update(range(int(lo), int(hi) + 1))
+                else:
+                    cpus.add(int(token))
+            if cpus:
+                os.sched_setaffinity(0, cpus)
+        except Exception:
+            pass
+    if quiet:
+        try:
+            os.nice(10)
+        except Exception:
+            pass
 
     def emit(stage: str, extra: Dict[str, Any]):
         try:

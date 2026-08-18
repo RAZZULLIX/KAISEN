@@ -5,6 +5,7 @@ secrets.json
 .kaisen_snapshots/
 *.skill_stats.json
 .env
+kai_runs.json
 
 
 # runtime artifacts

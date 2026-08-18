@@ -9,7 +9,14 @@ build → verify → score — while you watch every generation live.
 **📖 Complete reference for humans and AI agents:
 [`MANUAL.md`](MANUAL.md)** — every panel, every command, the spec
 reference, routing, safety, and the full config. For the LLM-facing
-protocol specifically: [`docs/KAI.md`](docs/KAI.md).
+protocol specifically: [`docs/KAI.md`](docs/KAI.md). Model
+compatibility matrix: [`docs/MODELS.md`](docs/MODELS.md). Release
+history: [`CHANGELOG.md`](CHANGELOG.md).
+
+> **0.1.1-alpha** adds D language support, multi-model chat templates
+> (Qwen/Gemma/Llama/DeepSeek/… — no longer gpt-oss-only), an edit-scope
+> guard, CPU affinity + quiet benchmarking, KAI sticky sessions and run-goal
+> persistence, and a hardened candidate danger scan.
 
 
 ## The flow
@@ -172,8 +179,9 @@ python -m pytest tests/
 ```
 
 Covers the HTTP API + engine pool scoping, suggest gates, every
-deterministic autofix rule, the KAI grammar, tier routing, and the LLM
-repair flow (122 tests, no network, temp dirs only).
+deterministic autofix rule, the KAI grammar, tier routing, chat templates,
+the D language registry, and the LLM repair flow (181 tests, no network,
+temp dirs only).
 
 ## Layout
 
@@ -187,7 +195,7 @@ kaisen/
   suggest.py     guarded AI project/pipeline builder
   promptlib.py   tier-aware prompt library (the single source of truth)
   linters.py     local lint/autofix backends
-  languages.py   22-language registry (extensions, fences, guard patterns)
+  languages.py   23-language registry (extensions, fences, guard patterns)
   snapshots.py   project/config revert store
   ui_prefs.py    appearance standard + defaults
 pages/           the dashboard (single-page, no build step)
@@ -203,3 +211,21 @@ python main.py --project my-project --multi 2 --workers 4
 ```
 
 Config lives in `config.json` (gitignored; see `config.example.json`).
+
+ Honest assessment from this session:                                                                                                                                                                                                                   
+                                                                                                                                                                                                                                                        
+ What's good:                                                                                                                                                                                                                                           
+ - KAI protocol is genuinely well-built — tolerant parsing, OK/ERR contract, session state, per-project engines. I've been driving it from raw stdin/logs and it never misbehaved.                                                                      
+ - The pipeline abstraction (build → verify → score, parse rules, protected-file hashing, early-abort scoring) is exactly the right architecture for guarded optimization; the smoke-run even surfaced my harness bug with the real compiler error.     
+ - It's designed for agents (stateless HTTP transport, small-model tolerance, WAIT/STATUS), which most local harnesses aren't.                                                                                                                          
+                                                                                                                                                                                                                                                        
+ What I wish it had:                                                                                                                                                                                                                                    
+ 1. Utilization visibility — STATUS shows generations, SERVERS shows free slots, but nothing told me "you're running 1 LLM pipeline of 12 possible". You caught it before the dashboard did. A simple pipelines: 1/12, llm in flight: 1/12 line on      
+    STATUS would fix that.                                                                                                                                                                                                                              
+ 2. Multi-engine orchestration — running 4 projects concurrently means managing 4 RUN contexts by hand; a RUN ALL <secs> WITH <split> or per-project budget table would make this trivial. (Doing it manually right now.)                               
+ 3. Kernel-partition support — I'm hand-building 4 micro-projects to parallelize what is really one artifact. A spec where you declare N extractable kernels and the engine evolves each as a sub-population, then re-integrates, is the natural next   
+    feature for exactly this kind of task.                                                                                                                                                                                                              
+ 4. Engine state persistence — restarting the server process kills in-flight budgets/generations; snapshots cover config but not engine state.                                                                                                          
+ 5. Minor: RUN FOR 5400 parsed as "5400 generations and 5400s budget" — ambiguous grammar wart.                                                                                                                                                         
+                                                                                                                                                                                                                                                        
+ Verdict: the harness is not the bottleneck — the 20B model is. I'd pick this over hand-rolling a scoring loop any day.  

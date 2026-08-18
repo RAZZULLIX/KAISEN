@@ -443,6 +443,13 @@ class ProjectEngine:
                         self.state.save()
                         self._emit_state()
                         continue
+                    violation = self._scope_check(extracted)
+                    if violation:
+                        self.state.append_history({"generation": gen, "outcome": "scope_violation", "detail": violation})
+                        self.state.save()
+                        self._emit_state()
+                        self._log(f"gen {gen}: {violation}")
+                        continue
                     candidate = gen_dir / f"candidate{self._code_ext}"
                     candidate.write_text(extracted, encoding="utf-8")
                     if self._dedup_check(extracted, gen, gen_dir):
@@ -548,6 +555,33 @@ class ProjectEngine:
         except Exception:
             return "// no champion yet"
 
+    def _scope_check(self, code: str) -> Optional[str]:
+        """Edit-scope guard: when the spec declares data.edit_scope (a list
+        of function names), a candidate that changes functions OUTSIDE that
+        set is rejected before it ever reaches the pipeline.  Heuristic
+        (regex function extraction), but it catches the common whole-file
+        rewrite where the model touches unrelated code.  Returns a violation
+        message, or None if the candidate is allowed."""
+        scope = (self.project.spec.get("data") or {}).get("edit_scope")
+        if not scope:
+            return None
+        allowed = {str(s) for s in scope} if isinstance(scope, list) else {str(scope)}
+        if not allowed or "*" in allowed:
+            return None
+        champ = self._champion_code()
+        if not champ or champ.startswith("// no champion"):
+            return None
+        champ_names = skills_mod.extract_function_names(champ, self._code_lang)
+        cand_names = skills_mod.extract_function_names(code, self._code_lang)
+        changed = (champ_names | cand_names) - (champ_names & cand_names)
+        if not champ_names and not cand_names:
+            return None  # nothing to compare — let the pipeline judge
+        outside = changed - allowed
+        if outside:
+            return (f"edit scope violated: candidate changes function(s) "
+                    f"{sorted(outside)} outside the allowed set {sorted(allowed)}")
+        return None
+
     def _dedup_check(self, code: str, gen: int, gen_dir: Path) -> bool:
         h = skills_mod.semantic_hash(code)
         seen_file = self.project.path / "seen_hashes.json"
@@ -593,6 +627,7 @@ class ProjectEngine:
         memory_section += "=== RECENT HISTORY ===\n" + self.memory.build_history_blob()
 
         contract = str((spec.get("data") or {}).get("contract_text") or spec.get("description", ""))
+        scope = (spec.get("data") or {}).get("edit_scope")
 
         variables = {
             "goal": spec.get("prompts", {}).get("goal", spec.get("description", "Improve the program.")),
@@ -603,6 +638,9 @@ class ProjectEngine:
             "lang_fence": self._code_fence,
             "current_code": code[-30000:],
             "contract": contract,
+            "scope_names": ", ".join(sorted(
+                {str(s) for s in scope} if isinstance(scope, list) else [str(scope)]
+            )) if scope else "",
             # Legacy aliases (ported prompts from the original harnesses)
             "TARGET_FILE": str((spec.get("data") or {}).get("score_target", "")),
             "ORIGINAL_SIZE": str(self._target_size(spec)),
@@ -630,7 +668,8 @@ class ProjectEngine:
             self.project.prompts_dir / "blocks",
             stage="generation",
             blocks=merged,
-            default_structural=["contract", "metrics", "memory", "current_code", "output_format"],
+            default_structural=(["contract", "metrics", "memory", "current_code", "output_format"]
+                                + (["scope"] if scope else [])),
         )
         tier = detect_tier(self.orchestrator.active_config)
         return prompt + "\n\n" + generation_boost(tier, self._code_lang)

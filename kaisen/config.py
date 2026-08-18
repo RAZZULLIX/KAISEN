@@ -69,6 +69,14 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "default_count": 1,
         "max_count": 32,
         "queue_size": 15,
+        # Optional CPU pinning for worker processes, e.g. "0,2" or "1-3".
+        # Empty = no pinning.  On a busy shared box, pin each worker to its
+        # own core (or use `nice`) so score timings stop swinging with load.
+        # See MANUAL "Quiet benchmarking".
+        "affinity": "",
+        # Run worker processes at lower priority (nice +10) so scorers don't
+        # starve the dashboard/LLMs while the engines race.
+        "quiet": False,
     },
     # Engine startup: start PAUSED by default — nothing generates until
     # the user presses play.  Set false to start generating immediately.
