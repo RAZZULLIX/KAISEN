@@ -614,10 +614,11 @@ toolchain, which is on the guardrail launcher allowlist.
 The GUI itself is an HTTP client; everything is available over
 `/api/*`. Highlights:
 
-- `GET /api/projects`, `POST /api/projects` (create, guardrail-scanned),
-  `GET /api/projects/{pid}/spec`, `PUT` (update),
-  `DELETE /api/projects/{pid}` (409 while its engine runs),
-  `POST /api/projects/{pid}/smoke`
+- `GET /api/projects`, `POST /api/projects` (create, guardrail-scanned;
+  `"temp": true` creates under `temp/`), `GET /api/projects/{pid}/spec`,
+  `PUT` (update), `GET /api/projects/{pid}/best` (champion source + metrics,
+  works for temp projects too), `DELETE /api/projects/{pid}` (409 while its
+  engine runs), `POST /api/projects/{pid}/smoke`
 - `POST /api/projects/suggest`, `POST /api/suggest/status` — the GOAL flow
 - `GET /api/active` — selected engine snapshot + `engines[]` pool
 - `POST /api/engine/switch|start|stop|pause` — pool controls

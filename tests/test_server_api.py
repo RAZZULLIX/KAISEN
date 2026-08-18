@@ -235,6 +235,62 @@ def test_real_project_wins_over_temp_collision(api, tmp_cfg):
     assert spec["name"] == "REAL"  # the real setup is never shadowed
 
 
+def test_temp_project_best_returns_baseline(api, tmp_cfg):
+    """The /api/projects/{pid}/best endpoint reads temp projects too."""
+    srv, base = api
+    spec = _spec("temp-best")
+    spec["data"] = {"baseline_source": "original.c"}
+    spec["files"] = {"original.c": "int main(){return 0;}"}
+    requests.post(base + "/api/projects",
+                  json={"id": "temp-best", "spec": spec, "temp": True}, timeout=5)
+    r = requests.get(base + "/api/projects/temp-best/best", timeout=5)
+    assert r.status_code == 200
+    d = r.json()
+    assert d["ok"] is True
+    assert d["project_id"] == "temp-best"
+    assert "int main()" in d["code"]
+    temp_root = tmp_cfg.path.parent / "temp"
+    assert d["source_path"].startswith(str(temp_root))  # resolved under temp/, not projects/
+
+
+def test_temp_project_best_returns_champion(api, tmp_cfg):
+    """Best reads the champion from the project's own state.json (temp root)."""
+    import json as _json
+    srv, base = api
+    spec = _spec("temp-champ")
+    spec["data"] = {"baseline_source": "original.c"}
+    spec["files"] = {"original.c": "int main(){return 0;}"}
+    requests.post(base + "/api/projects",
+                  json={"id": "temp-champ", "spec": spec, "temp": True}, timeout=5)
+    temp_root = tmp_cfg.path.parent / "temp"
+    pdir = temp_root / "temp-champ"
+    (pdir / "best").mkdir()
+    champ = pdir / "best" / "program.c"
+    champ.write_text("int main(){return 42;}", encoding="utf-8")
+    _json.dump({"best": {"code_path": str(champ), "metrics": {"ms": 1.2}, "generation": 5}},
+               open(pdir / "state.json", "w", encoding="utf-8"))
+    d = requests.get(base + "/api/projects/temp-champ/best", timeout=5).json()
+    assert d["ok"] is True
+    assert "return 42" in d["code"]
+    assert d["generation"] == 5
+    assert d["metrics"] == {"ms": 1.2}
+
+
+def test_kai_best_resolves_temp(api, tmp_cfg):
+    """KAI BEST routes through /api/projects/{pid}/best, so temp projects work."""
+    srv, base = api
+    spec = _spec("temp-kai-best")
+    spec["data"] = {"baseline_source": "original.c"}
+    spec["files"] = {"original.c": "int main(){return 7;}"}
+    requests.post(base + "/api/projects",
+                  json={"id": "temp-kai-best", "spec": spec, "temp": True}, timeout=5)
+    body = "PROJECT temp-kai-best\nBEST"
+    r = requests.post(base + "/kai", data=body.encode(), timeout=10)
+    assert r.status_code == 200
+    assert "OK temp-kai-best" in r.text
+    assert "return 7" in r.text
+
+
 def test_temp_root_wiped_at_next_startup(api, tmp_cfg, registry):
     srv, base = api
     temp_root = tmp_cfg.path.parent / "temp"

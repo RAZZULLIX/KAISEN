@@ -234,6 +234,7 @@ class DashboardServer:
         r.add_post("/kai", self._api_kai)
         r.add_get("/api/projects/{pid}/spec", self._api_project_spec)
         r.add_put("/api/projects/{pid}/spec", self._api_project_spec_update)
+        r.add_get("/api/projects/{pid}/best", self._api_project_best)
         r.add_post("/api/projects/{pid}/smoke", self._api_project_smoke)
         r.add_post("/api/projects/{pid}/pipeline-suggest", self._api_project_pipeline_suggest)
         r.add_post("/api/swarm/start", self._api_swarm_start)
@@ -707,6 +708,50 @@ class DashboardServer:
             if st.get("running") and st.get("_t0"):
                 st["elapsed"] = round(time.time() - st["_t0"], 1)
             return _json(st)
+
+    async def _api_project_best(self, request):
+        """Champion source + metrics for a project — real OR temp.  Temp
+        projects live under temp/ (not projects/), so the champion is read
+        from the project's own state.json + baseline, never a hardcoded
+        path.  This is what KAI `BEST` uses, and what an agent can poll to
+        fish a temp run's current best while it evolves."""
+        pid = request.match_info["pid"]
+        try:
+            p = self._registry_for(pid)[0]
+        except KeyError:
+            return _json({"error": "project not found"}, 404)
+        state_file = p.path / "state.json"
+        best = None
+        if state_file.is_file():
+            try:
+                best = (load_json(state_file, {}) or {}).get("best")
+            except Exception:
+                best = None
+        code_path = None
+        metrics, generation = {}, None
+        if best and best.get("code_path") and Path(best["code_path"]).is_file():
+            code_path = Path(best["code_path"])
+            metrics, generation = best.get("metrics") or {}, best.get("generation")
+        if not code_path:
+            base = str((p.spec.get("data") or {}).get("baseline_source", "") or "")
+            fallback = p.path / base if base else None
+            if fallback and fallback.is_file():
+                code_path, metrics, generation = fallback, {}, None
+        if not code_path:
+            return _json({"ok": False, "error": f"no champion or baseline source for '{pid}' — run the engine first"}, 404)
+        try:
+            code = code_path.read_text(encoding="utf-8", errors="replace")
+        except OSError as e:
+            return _json({"ok": False, "error": f"cannot read source: {e}"}, 500)
+        return _json({
+            "ok": True,
+            "project_id": pid,
+            "language": p.spec.get("language", "c"),
+            "source_path": str(code_path),
+            "generation": generation,
+            "metrics": metrics,
+            "code": code[:40000],
+        })
 
     async def _api_project_spec(self, request):
         pid = request.match_info["pid"]
@@ -1220,7 +1265,7 @@ class DashboardServer:
         data = await request.json()
         pid = data.get("project_id", "")
         try:
-            project = self._registry_for(pid)[0]
+            project, reg = self._registry_for(pid)
         except KeyError:
             return _json({"ok": False, "error": f"project '{pid}' not found"}, 404)
         started = False
@@ -1230,7 +1275,11 @@ class DashboardServer:
             from .llm import ModelOrchestrator
             orchestrator = ModelOrchestrator(self.cfg)
             events = EngineEvent()
-            eng = ProjectEngine(project, orchestrator, self.registry,
+            # Use the project's OWN registry (temp registry for temp
+            # projects) so its workers resolve candidates/data under the
+            # same root the engine was created with — temp projects must
+            # never leak into the real projects/ tree.
+            eng = ProjectEngine(project, orchestrator, reg,
                                 worker_count=project.default_workers, events=events)
             eng.start(multi=project.default_multi, paused=self.cfg.engine_start_paused)
             self.engines[pid] = eng

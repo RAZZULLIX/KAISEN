@@ -46,6 +46,12 @@ evolution loop.
   user attaches a program, the suggested project always evolves that exact
   file — repair rounds may rewrite harness scripts but can no longer replace
   the user's program with an AI variant.
+- **Temp-project visibility** (`kaisen/kai.py`, `kaisen/server.py`): `BEST`
+  and the new `GET /api/projects/{pid}/best` endpoint now resolve projects
+  under `temp/` too, and `POST /api/engine/switch` uses the temp registry so
+  a temp project's engine actually runs against its own files.  KAI can now
+  fish a temp run's champion while it evolves instead of only reading
+  `projects/`.
 - `lang_from_ext` now accepts full filenames/paths (not just bare extensions);
   `lang_from_goal` normalizes punctuation so "in D," matches.
 - `data.baseline_source` defaults to the correct language extension for every

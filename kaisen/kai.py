@@ -148,47 +148,6 @@ def connect(host: str, port: int, auto_start: bool = True, wait_s: float = 60.0)
     raise KaiError(f"dashboard did not become ready at http://{host}:{port} within {wait_s:.0f}s")
 
 
-def _read_best(project_id: str) -> Dict[str, Any]:
-    proj_dir = REPO_ROOT / "projects" / project_id
-    spec_file = proj_dir / "project.json"
-    if not spec_file.is_file():
-        raise KaiError(f"project '{project_id}' not found")
-    try:
-        spec = json.loads(spec_file.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as e:
-        raise KaiError(f"cannot read project spec: {e}") from e
-    best = None
-    state_file = proj_dir / "state.json"
-    if state_file.is_file():
-        try:
-            best = json.loads(state_file.read_text(encoding="utf-8")).get("best")
-        except (OSError, ValueError):
-            best = None
-    code_path, metrics, generation = None, {}, None
-    if best and best.get("code_path"):
-        code_path = Path(best["code_path"])
-        metrics, generation = best.get("metrics", {}) or {}, best.get("generation")
-    if not code_path or not code_path.is_file():
-        base = str((spec.get("data") or {}).get("baseline_source", "") or "")
-        fallback = proj_dir / base if base else None
-        if fallback and fallback.is_file():
-            code_path, metrics, generation = fallback, {}, None
-    if not code_path or not code_path.is_file():
-        raise KaiError(f"no champion or baseline source for '{project_id}' — run the engine first")
-    try:
-        code = code_path.read_text(encoding="utf-8", errors="replace")
-    except OSError as e:
-        raise KaiError(f"cannot read source: {e}") from e
-    return {
-        "project_id": project_id,
-        "language": spec.get("language", "c"),
-        "source_path": str(code_path),
-        "generation": generation,
-        "metrics": metrics,
-        "code": code[:40000],
-    }
-
-
 # ---------------------------------------------------------------------------
 # the protocol
 # ---------------------------------------------------------------------------
@@ -591,11 +550,15 @@ class KaiSession:
 
     def cmd_best(self, arg: str) -> str:
         pid = arg.strip() or self._need_project()
-        b = _read_best(pid)
-        head = f"OK {pid} gen={b['generation']} lang={b['language']} " \
-               f"metrics: {' '.join(f'{k}={v}' for k, v in b['metrics'].items()) or '-'}\n" \
-               f"PATH {b['source_path']}"
-        return head + "\n" + b["code"]
+        # Route through the API so temp projects (under temp/) resolve too —
+        # the old filesystem path only knew projects/<id> and would miss them.
+        res = self.client.call("GET", f"/api/projects/{pid}/best", read_timeout=30.0)
+        if not res.get("ok"):
+            raise KaiError(res.get("error", "best unavailable"))
+        head = (f"OK {res['project_id']} gen={res.get('generation')} lang={res.get('language')} "
+                f"metrics: {' '.join(f'{k}={v}' for k, v in (res.get('metrics') or {}).items()) or '-'}\n"
+                f"PATH {res.get('source_path')}")
+        return head + "\n" + (res.get("code") or "")
 
     def cmd_smoke(self, arg: str) -> str:
         pid = self._parse_on(arg) or arg.strip() or self._need_project()

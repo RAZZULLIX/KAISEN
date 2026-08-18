@@ -52,7 +52,7 @@ deliberately tolerant, because LLMs decorate everything:
 | `RUN [<n>] [FOR <secs>] [WITH <k>] [ON <pid>]` | start evolution (forever by default), background |
 | `WAIT [<secs>]` | block until the in-flight run finishes (or snapshot) |
 | `PAUSE` / `RESUME` / `STOP [ON <pid>]` | engine controls |
-| `BEST [id]` | champion code |
+| `BEST [id]` | champion source + metrics — resolves real and temp projects (via `/api/projects/{pid}/best`) |
 | `SMOKE [pid]` (also `ON <pid>`) | run the pipeline once on the baseline |
 | `SERVERS` | LLM servers with tier/smartness/cost/free slots |
 | `MODELS [skill]` | per-(model, skill) scoreboard: attempts, one-shots, wins, $ — which model does what best |
