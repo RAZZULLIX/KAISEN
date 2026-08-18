@@ -13,11 +13,6 @@ protocol specifically: [`docs/KAI.md`](docs/KAI.md). Model
 compatibility matrix: [`docs/MODELS.md`](docs/MODELS.md). Release
 history: [`CHANGELOG.md`](CHANGELOG.md).
 
-> **0.1.1-alpha** adds D language support, multi-model chat templates
-> (Qwen/Gemma/Llama/DeepSeek/… — no longer gpt-oss-only), an edit-scope
-> guard, CPU affinity + quiet benchmarking, KAI sticky sessions and run-goal
-> persistence, and a hardened candidate danger scan.
-
 
 ## The flow
 
