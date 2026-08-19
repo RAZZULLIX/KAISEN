@@ -322,6 +322,11 @@ One engine per running project; several engines form the pool.
   parallel per project, sharing the champion.
 - **Pause/Resume/Stop** — per project; pause drains in-flight work
   cleanly.
+- **Crash recovery** — the running pool (project + pipeline count) is
+  persisted to `engine_pool.json` (gitignored) on every start/stop/multi
+  change; the next daemon boot restores it automatically, so a restart no
+  longer silently kills every in-flight run. Only real projects restore
+  (temp/ is wiped at startup).
 - **Workers** — add/remove/kill individually (GUI or API).
 - **Prompt override** — replace the generation prompt mid-run without
   touching the spec.
@@ -377,9 +382,10 @@ KAISEN as an optimization sidecar. Two transports, same grammar:
 - HTTP: `POST /kai` (text in, text out)
 
 Key commands: `PROJECT`, `STATUS`, `SPEC`, `RUN [n] [FOR secs] [WITH k]
-[ON pid]`, `BUDGET`, `SCORE <path>`, `FUZZY <n>`, `WAIT`, `PAUSE/RESUME/STOP`,
-`BEST`, `SMOKE`, `BASELINE`/`END`, `CANDIDATE`/`END`, `SNAPSHOT`, `SERVERS`,
-`GOAL`, `ACCEPT`, `CREATE`, `ESTIMATE`, `FORGE`, `HELP`, `QUIT`.
+[ON pid]`, `RUN ALL [FOR secs] [WITH k]`, `BUDGET`, `SCORE <path>`,
+`FUZZY <n>`, `WAIT`, `PAUSE/RESUME/STOP`, `BEST`, `SMOKE`, `BASELINE`/`END`,
+`CANDIDATE`/`END`, `SNAPSHOT`, `SERVERS`, `GOAL`, `ACCEPT`, `CREATE`,
+`ESTIMATE`, `FORGE`, `HELP`, `QUIT`.
 
 Reliability contract: every reply starts `OK` or `ERR`; parsing is
 deliberately tolerant (LLMs decorate commands with quotes, `CMD:`,
@@ -388,12 +394,16 @@ error never kills the session and always says what to do next.
 
 Run budgets: `RUN <n>` = stop after n scored generations; `RUN FOR <secs>`
 = time budget that only burns while the engine runs (paused time excluded);
-both = whichever comes first. `BUDGET` shows the in-flight budget.
-`SCORE <path> [ON <pid>]` scores an arbitrary file through the full
-pipeline with no engine. `FUZZY <n> [ON <pid>]` is opt-in prompt diversity:
-each generation's prompt is seeded with a random one of the top n scored
-iterations (plus the last 10 scored outcomes as memory) instead of the
-champion — off by default, runtime only.
+both = whichever comes first. `RUN ALL [FOR <secs>] [WITH <k>]` starts every
+pool member at once — same budget and pipeline count each, and everything
+about multi-engine mode is optional. `BUDGET` shows the in-flight budget
+(single or per-project table). `STATUS` shows the pool utilization line
+(`LLM PIPELINES x/y (z in flight)`) so you can see how much of your
+capacity is actually in use. `SCORE <path> [ON <pid>]` scores an arbitrary
+file through the full pipeline with no engine. `FUZZY <n> [ON <pid>]` is
+opt-in prompt diversity: each generation's prompt is seeded with a random
+one of the top n scored iterations (plus the last 10 scored outcomes as
+memory) instead of the champion — off by default, runtime only.
 
 Full grammar, alias table, and session semantics: [`docs/KAI.md`](docs/KAI.md).
 

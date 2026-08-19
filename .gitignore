@@ -6,6 +6,7 @@ secrets.json
 *.skill_stats.json
 .env
 kai_runs.json
+engine_pool.json
 
 
 # runtime artifacts

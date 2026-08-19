@@ -74,11 +74,15 @@ class DashboardServer:
         host: str = "0.0.0.0",
         port: int = 8080,
         temp_root: Optional[Path] = None,
+        restore_paused: bool = False,
     ):
         self.registry = registry
         self.cfg = config
         self.engines: Dict[str, ProjectEngine] = {}
         self._selected_project_id: Optional[str] = None
+        # Crash-recovery file lives NEXT TO config.json (repo root in
+        # production, temp dir in tests).
+        self._pool_file = Path(config.path).parent / "engine_pool.json"
         if engine is not None:
             self.set_engine(engine)
         self.host = host
@@ -102,6 +106,11 @@ class DashboardServer:
         _shutil.rmtree(self._temp_root, ignore_errors=True)
         self._temp_root.mkdir(parents=True, exist_ok=True)
         self._temp_registry = ProjectRegistry(self._temp_root)
+        # Crash recovery: bring back the pool that was running when the
+        # daemon died.  Temp projects are wiped at startup so only REAL
+        # projects restore; restore_paused=True (tests) boots them paused.
+        self._restore_paused = restore_paused
+        self._restore_engine_pool(registry)
         self.app.on_cleanup.append(self._on_cleanup)
         self._runner = None
         self._site = None
@@ -166,9 +175,11 @@ class DashboardServer:
     def engine(self, eng: Optional[ProjectEngine]) -> None:
         if eng is None:
             self._selected_project_id = None
+            self._persist_engine_pool()
             return
         self.engines[eng.project.id] = eng
         self._selected_project_id = eng.project.id
+        self._persist_engine_pool()
 
     def set_engine(self, engine: ProjectEngine) -> None:
         self.engine = engine
@@ -177,6 +188,59 @@ class DashboardServer:
         if pid:
             return self.engines.get(pid)
         return self.engine
+
+    def _persist_engine_pool(self) -> None:
+        """Snapshot which projects are running (and how many pipelines each)
+        to engine_pool.json — crash recovery: the next daemon boot restores
+        the pool instead of silently losing every in-flight run."""
+        try:
+            data = {
+                "selected": self._selected_project_id,
+                "engines": {
+                    pid: {"multi": getattr(eng, "_multi", 1)}
+                    for pid, eng in self.engines.items()
+                },
+            }
+            save_json(self._pool_file, data)
+        except Exception:
+            pass
+
+    def _restore_engine_pool(self, registry: ProjectRegistry) -> None:
+        """Bring back the pool recorded before the last shutdown/crash.
+        Only real projects restore (temp/ is wiped at startup); engines
+        boot with their saved multi.  Best-effort — never blocks startup."""
+        data = load_json(self._pool_file, None)
+        if not isinstance(data, dict):
+            return
+        engines = data.get("engines") or {}
+        restored = 0
+        for pid, info in engines.items():
+            try:
+                project = registry.get(pid)
+                if project is None:
+                    continue
+                from .engine import EngineEvent, ProjectEngine
+                from .llm import ModelOrchestrator
+                eng = ProjectEngine(
+                    project,
+                    ModelOrchestrator(self.cfg),
+                    registry,
+                    worker_count=project.default_workers,
+                    events=EngineEvent(),
+                )
+                eng.start(multi=int(info.get("multi") or project.default_multi),
+                          paused=self._restore_paused)
+                self.engines[pid] = eng
+                restored += 1
+            except Exception:
+                continue
+        sel = data.get("selected")
+        if sel and sel in self.engines:
+            self._selected_project_id = sel
+        if restored:
+            print(f"[KAISEN] restored {restored} engine(s) from engine_pool.json")
+        elif engines:
+            print("[KAISEN] engine_pool.json present but no engines restored (projects missing?)")
 
     def _engines_summary(self) -> List[Dict[str, Any]]:
         out = []
@@ -1360,6 +1424,7 @@ class DashboardServer:
             eng.start(multi=project.default_multi, paused=self.cfg.engine_start_paused)
             self.engines[pid] = eng
             started = True
+            self._persist_engine_pool()
         self._selected_project_id = pid
         return _json({"ok": True, "active_id": pid, "started": started})
 
@@ -1389,6 +1454,7 @@ class DashboardServer:
         self.engines.pop(stopped_pid, None)
         if self._selected_project_id == stopped_pid:
             self._selected_project_id = None
+        self._persist_engine_pool()
         return _json({"ok": True, "stopped": stopped_pid})
 
     async def _api_engine_pause(self, request):
@@ -1917,6 +1983,7 @@ class DashboardServer:
         except (TypeError, ValueError):
             n = 1
         n = eng.set_multi(n)
+        self._persist_engine_pool()
         return _json({"ok": True, "multi": n})
 
     async def _api_worker_kill_legacy(self, request):

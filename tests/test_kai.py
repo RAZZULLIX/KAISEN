@@ -2,6 +2,8 @@
 
 All commands are exercised against a FakeClient — no network, no engine.
 """
+import time
+
 import pytest
 
 from kaisen.kai import ALIASES, _ALIAS_INDEX, KaiSession, KaiError, _split
@@ -191,6 +193,116 @@ def test_run_requires_project():
     s = _session(_run_routes("md5-speed"))
     with pytest.raises(KaiError, match="no project set"):
         s.cmd_run("5")
+
+
+def _multi_pool_routes():
+    """Two-engine pool: md5-speed (multi 2) + prime-counter (multi 1)."""
+    md5 = {"project_id": "md5-speed", "name": "md5-speed",
+           "engine_state": "running", "generation": 4, "paused": False,
+           "best_fitness": 1.2, "best_metrics": {}, "multi": 2, "workers": 3,
+           "spec_revision": "abc", "autofix": {"max_tries": 5, "repair_max": 3},
+           "valid_rate": {"valid_rate": 0.5, "outcome_counts": {}}, "fuzzy_top_n": 0}
+    pc = {"project_id": "prime-counter", "name": "prime-counter",
+          "engine_state": "running", "generation": 9, "paused": False,
+          "best_fitness": 3.3, "best_metrics": {}, "multi": 1, "workers": 2,
+          "spec_revision": "def", "autofix": {"max_tries": 5, "repair_max": 3},
+          "valid_rate": {"valid_rate": 0.8, "outcome_counts": {}}, "fuzzy_top_n": 0}
+    routes = {
+        ("GET", "/api/projects"): PROJECTS,
+        ("POST", "/api/engine/switch"): {"ok": True},
+        ("POST", "/api/engine/multi"): {"multi": 2},
+        ("GET", "/api/active"): {"project_id": "md5-speed", "engine_state": "running",
+                                  "state": {"generation": 4, "paused": False, "best": {}},
+                                  "engines": [md5, pc]},
+        ("GET", "/api/iterations"): [],
+        ("POST", "/api/engine/pause"): {"ok": True},
+    }
+    return routes
+
+
+def test_run_all_starts_every_pool_member():
+    s = _session(_multi_pool_routes())
+    s.project = "md5-speed"
+    out = s.cmd_run_all("FOR 300 WITH 2")
+    assert len(s._run_goals) == 2
+    assert all(g["ts_deadline"] is not None and g["gen_target"] is None
+               for g in s._run_goals)
+    assert s._run_goal is None
+    assert "2 pool projects" in out and "budget 300s" in out
+    # every engine got its switch + multi call
+    switches = [c for c in s.client.calls if c[0:2] == ("POST", "/api/engine/switch")]
+    assert len(switches) == 2
+
+
+def test_run_all_without_budget_is_forever():
+    s = _session(_multi_pool_routes())
+    s.project = "md5-speed"
+    s.cmd_run_all("")
+    assert len(s._run_goals) == 2
+    assert all(g["ts_deadline"] is None for g in s._run_goals)
+
+
+def test_run_all_via_run_prefix():
+    s = _session(_multi_pool_routes())
+    s.project = "md5-speed"
+    s.cmd_run("ALL FOR 300")
+    assert len(s._run_goals) == 2
+
+
+def test_budget_multi_table():
+    s = _session(_multi_pool_routes())
+    s._run_goals = [
+        {"pid": "md5-speed", "gen_target": None, "ts_deadline": time.time() + 60,
+         "start_gen": 0, "start_hist": 0, "start_best": None},
+        {"pid": "prime-counter", "gen_target": None, "ts_deadline": time.time() + 120,
+         "start_gen": 0, "start_hist": 0, "start_best": None},
+    ]
+    out = s.cmd_budget("")
+    assert "2 runs in flight" in out
+    assert "md5-speed: 0 scored" in out
+    assert "prime-counter: 0 scored" in out
+
+
+def test_wait_multi_completes_all():
+    s = _session(_multi_pool_routes())
+    s._run_goals = [
+        {"pid": "md5-speed", "gen_target": None, "ts_deadline": time.time() - 10,
+         "start_gen": 0, "start_hist": 0, "start_best": None},
+        {"pid": "prime-counter", "gen_target": None, "ts_deadline": time.time() - 10,
+         "start_gen": 0, "start_hist": 0, "start_best": None},
+    ]
+    out = s.cmd_wait("")
+    assert "all 2 runs complete" in out
+    assert s._run_goals == [] and s._run_goal is None
+
+
+def test_multi_goals_persist(tmp_path, monkeypatch):
+    monkeypatch.setattr("kaisen.kai._RUNS_FILE", tmp_path / "kai_runs.json")
+    s = _session(_multi_pool_routes())
+    s._run_goals = [
+        {"pid": "a", "gen_target": None, "ts_deadline": None,
+         "start_gen": 0, "start_hist": 0, "start_best": None},
+        {"pid": "b", "gen_target": None, "ts_deadline": None,
+         "start_gen": 0, "start_hist": 0, "start_best": None},
+    ]
+    s._save_run_state()
+    s2 = _session(_multi_pool_routes())
+    assert len(s2._run_goals) == 2 and s2._run_goal is None
+
+
+def test_status_shows_utilization_line():
+    routes = {
+        ("GET", "/api/active"): _pool_active("md5-speed"),
+        ("GET", "/api/projects"): PROJECTS,
+        ("GET", "/api/llm/status"): {"servers": [
+            {"id": "s1", "enabled": True, "online": True, "max_concurrent": 4, "inflight": 1},
+            {"id": "s2", "enabled": True, "online": True, "max_concurrent": 8, "inflight": 2},
+        ]},
+    }
+    s = _session(routes)
+    s.project = "md5-speed"
+    out = s.cmd_status("")
+    assert "LLM PIPELINES 2/12 (3 in flight)" in out
 
 
 # ----------------------------------------------------------------------

@@ -23,6 +23,16 @@ staleness correctness, and opt-in diversity — all from real campaign pain.
   only (resets on restart).
 - **`BUDGET`** KAI command: in-flight run's budget at a glance (scored so far
   vs target + time remaining).
+- **`RUN ALL [FOR <secs>] [WITH <k>]`**: start every pool member at once —
+  same budget and pipeline count each, multi-engine orchestration as opt-in
+  only (single-project `RUN` unchanged).
+- **Pool utilization line**: `STATUS` now shows `LLM PIPELINES x/y (z in
+  flight)` so a glance tells you how much of your active LLM capacity is
+  actually in use (GUI unchanged — the server list already carries it).
+- **Engine crash recovery**: the running pool is persisted to
+  `engine_pool.json` (gitignored) on start/stop/multi changes; the next
+  daemon boot restores it — a restart no longer silently kills in-flight
+  runs.  Only real projects restore; temp/ is wiped at startup.
 - **Two-stage scoring** (`stage: screen|confirm` on score steps): the
   confirm metric — not the noisy screen — is what selects the champion;
   early-abort never kills a confirm benchmark.  GUI-safe (spec field passes

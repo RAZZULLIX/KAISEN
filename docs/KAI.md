@@ -47,9 +47,10 @@ deliberately tolerant, because LLMs decorate everything:
 | Command | Effect |
 |---|---|
 | `PROJECT <id>` | select the session project (must exist) |
-| `STATUS` | engine + pool overview, per-project |
+| `STATUS` | engine + pool overview, per-project; includes `LLM PIPELINES x/y (z in flight)` utilization line |
 | `SPEC [id]` | the project's spec: steps, metrics, goal |
 | `RUN [<n>] [FOR <secs>] [WITH <k>] [ON <pid>]` | start evolution (forever by default), background. `<n>` = stop after n SCORED generations; `FOR <secs>` = time budget (paused time excluded — only burns while the engine runs); both = whichever comes first |
+| `RUN ALL [FOR <secs>] [WITH <k>]` | start every pool member at once — same budget and pipeline count each; everything about multi-engine mode is optional |
 | `BUDGET` | the in-flight run's budget: scored so far vs target + time remaining |
 | `SCORE <path> [ON <pid>]` | score any file through the project's pipeline — no engine, no run (audit copy under `runs/score_*`) |
 | `FUZZY <n> [ON <pid>]` | opt-in prompt diversity: random top-N scored basis per generation; also feeds the prompt the last 10 scored outcomes. 0 = off (default). Runtime only |

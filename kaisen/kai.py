@@ -164,6 +164,10 @@ BARE command lines, never prefixed with OK. Commands (case-insensitive):
                              budget (paused time excluded — only burns while
                              the engine runs); WITH <k> = k LLM pipelines.
                              Both given? The run ends at whichever comes first.
+  RUN ALL [FOR <secs>] [WITH <k>]
+                             start every pool member at once, same budget and
+                             pipeline count each — optional: everything about
+                             multi-engine mode is opt-in
   BUDGET                      in-flight run's budget: scored so far + time left
   FORGE [<n>] [TIER <tiny|small|large>] [ON <pid>] [GOAL <words...>]
                              n parallel drafts, each pipeline-scored
@@ -276,16 +280,44 @@ class KaiSession:
         # Sidecar state: baseline code staged for GOAL, last suggested spec,
         # and the in-flight run goal (None targets = run forever).  The run
         # goal persists to disk so a daemon restart doesn't lose the budget.
+        # A session carries EITHER one single-project goal (RUN) or a list of
+        # them (RUN ALL) — never both.
         self._baseline_code: Optional[str] = None
         self._last_spec: Optional[Dict[str, Any]] = None
         self._last_temp: bool = False
-        self._run_goal: Optional[Dict[str, Any]] = self._load_run_goal()
+        self._run_goal: Optional[Dict[str, Any]] = None
+        self._run_goals: List[Dict[str, Any]] = []
+        loaded = self._load_run_state()
+        if isinstance(loaded, list):
+            self._run_goals = loaded
+        elif isinstance(loaded, dict):
+            self._run_goal = loaded
+
+    def _load_run_state(self):
+        """Persisted run goals: either a single dict (RUN) or a list (RUN ALL)."""
+        data = load_json(_RUNS_FILE, None)
+        if isinstance(data, dict):
+            goals = data.get("goals")
+            if isinstance(goals, list) and goals:
+                return goals
+            if data.get("pid"):
+                return data
+        return None
+
+    def _save_run_state(self) -> None:
+        if self._run_goals:
+            save_json(_RUNS_FILE, {"goals": self._run_goals})
+        elif self._run_goal:
+            save_json(_RUNS_FILE, self._run_goal)
+        else:
+            try:
+                _RUNS_FILE.unlink(missing_ok=True)
+            except Exception:
+                pass
 
     def _load_run_goal(self) -> Optional[Dict[str, Any]]:
-        data = load_json(_RUNS_FILE, None)
-        if isinstance(data, dict) and data.get("pid"):
-            return data
-        return None
+        data = self._load_run_state()
+        return data if isinstance(data, dict) else None
 
     def _save_run_goal(self) -> None:
         if self._run_goal:
@@ -351,6 +383,21 @@ class KaiSession:
         lines.append(f"ENGINE {eng} gen={st.get('generation', '-')} paused={st.get('paused', '-')} project={eng_pid or '-'}{extras}")
         if (entry or {}).get("spec_revision"):
             lines[-1] += f" spec={entry['spec_revision']}"
+        # Utilization: how much of the active LLM capacity the pool is using.
+        # SERVERS shows per-server slots; this line sums it so a glance tells
+        # you "you're running 3 of 12 possible pipelines" without doing math.
+        try:
+            llm_status = self.client.call("GET", "/api/llm/status", read_timeout=10.0)
+            servers = llm_status.get("servers") or []
+            total = sum(max(1, int(s.get("max_concurrent", 1) or 1))
+                        for s in servers if s.get("enabled", True) and s.get("online") is not False)
+            inflight = sum(int(s.get("inflight", 0) or 0) for s in servers if s.get("enabled", True))
+            active_pipelines = sum(int(e.get("multi", 0) or 0)
+                                   for e in (act.get("engines") or [])
+                                   if e.get("engine_state") == "running")
+            lines.append(f"LLM PIPELINES {active_pipelines}/{total} ({inflight} in flight)")
+        except KaiError:
+            pass
         best = st.get("best") or {}
         if best:
             lines.append(f"BEST fitness={best.get('fitness')} metrics: " +
@@ -361,6 +408,8 @@ class KaiSession:
             if goal["ts_deadline"]:
                 prog += f", {max(0.0, goal['ts_deadline'] - time.time()):.0f}s left"
             lines.append("RUN " + prog + " (in flight — WAIT/BUDGET/STOP)")
+        elif self._run_goals:
+            lines.append(f"RUN ALL in flight: {len(self._run_goals)} projects")
         if self.project:
             spec = self.client.call("GET", f"/api/projects/{self.project}/spec", read_timeout=10.0).get("spec")
             if spec:
@@ -409,9 +458,12 @@ class KaiSession:
         RUN FOR <secs> = time budget (paused time excluded — the budget
         only burns while the engine runs), RUN WITH <k> = k parallel LLM
         pipelines.  When BOTH a count and a budget are given, the run ends
-        at whichever comes first.  Always returns immediately — use WAIT to
-        synchronize, STATUS/BUDGET to watch, STOP to end."""
+        at whichever comes first.  RUN ALL [FOR <secs>] [WITH <k>] starts
+        every pool member at once.  Always returns immediately — use WAIT
+        to synchronize, STATUS/BUDGET to watch, STOP to end."""
         tokens = arg.split()
+        if tokens and tokens[0].strip().upper().rstrip(":,") in ("ALL", "EVERY", "EVERYTHING"):
+            return self.cmd_run_all(" ".join(tokens[1:]))
         gen_target: Optional[int] = None
         budget: Optional[float] = None
         multi_k: Optional[int] = None
@@ -473,7 +525,8 @@ class KaiSession:
             "start_hist": start_hist,
             "start_best": start_best,
         }
-        self._save_run_goal()
+        self._run_goals = []
+        self._save_run_state()
         desc_parts = []
         desc_parts.append(f"{gen_target} generations" if gen_target else "forever")
         if budget:
@@ -481,6 +534,65 @@ class KaiSession:
         if multi_k:
             desc_parts.append(f"with {multi_k} LLMs")
         return (f"OK running {', '.join(desc_parts)} on {pid} in the background — WAIT to synchronize, "
+                f"STATUS/BUDGET to watch, STOP to end")
+
+    def cmd_run_all(self, arg: str) -> str:
+        """Start every pool member at once: RUN ALL [FOR <secs>] [WITH <k>].
+        Each project gets the same time budget (paused time excluded) and
+        pipeline count; no per-project generation targets — keep it simple.
+        Optional: only the pool is touched, nothing else is required."""
+        tokens = arg.split()
+        budget: Optional[float] = None
+        multi_k: Optional[int] = None
+        i = 0
+        while i < len(tokens):
+            t = tokens[i]
+            u = t.upper().rstrip(":,s")
+            if u in ("FOR", "BUDGET", "TIME"):
+                if i + 1 < len(tokens) and tokens[i + 1].isdigit():
+                    budget = float(tokens[i + 1])
+                    i += 2
+                    continue
+                i += 1
+                continue
+            if u in ("WITH", "USING"):
+                if i + 1 < len(tokens) and tokens[i + 1].isdigit():
+                    multi_k = max(1, int(tokens[i + 1]))
+                    i += 2
+                    continue
+                i += 1
+                continue
+            i += 1
+        act = self._active_state()
+        pool = act.get("engines") or []
+        if not pool:
+            raise KaiError("no engines in the pool — start projects first (RUN <pid> for each)")
+        now = time.time()
+        goals: List[Dict[str, Any]] = []
+        for e in pool:
+            pid = e.get("project_id")
+            self.client.call("POST", "/api/engine/switch", {"project_id": pid}, read_timeout=60.0)
+            if multi_k:
+                self.client.call("POST", "/api/engine/multi", {"multi": multi_k, "project_id": pid}, read_timeout=60.0)
+            self.client.call("POST", "/api/engine/pause", {"paused": False, "project_id": pid}, read_timeout=60.0)
+            entry = self._engine_entry(pid)
+            goals.append({
+                "pid": pid,
+                "gen_target": None,
+                "ts_deadline": (now + budget) if budget else None,
+                "start_gen": int(entry.get("generation", 0)),
+                "start_hist": self._hist_len(pid),
+                "start_best": (entry.get("best") or {}).get("fitness"),
+            })
+        self._run_goals = goals
+        self._run_goal = None
+        self._save_run_state()
+        desc = f"{len(goals)} pool projects"
+        if budget:
+            desc += f", budget {budget:.0f}s each"
+        if multi_k:
+            desc += f", {multi_k} LLMs each"
+        return (f"OK running all {desc} in the background — WAIT to synchronize, "
                 f"STATUS/BUDGET to watch, STOP to end")
 
     def _hist_len(self, pid: Optional[str] = None) -> int:
@@ -545,6 +657,8 @@ class KaiSession:
     def cmd_wait(self, arg: str) -> str:
         """Block until the in-flight run reaches its goal (or the timeout);
         on a forever run, snapshots progress after <secs> (default 60)."""
+        if self._run_goals:
+            return self._wait_multi(arg)
         goal = self._run_goal
         if not goal:
             raise KaiError("no run in progress — RUN first (STOP ended the last one?)")
@@ -559,14 +673,15 @@ class KaiSession:
                 self.client.call("POST", "/api/engine/pause",
                                  {"paused": True, "project_id": goal["pid"]}, read_timeout=60.0)
                 self._run_goal = None
-                self._save_run_goal()
+                self._run_goals = []
+                self._save_run_state()
                 return self._run_summary(goal, done=True)
             if st.get("paused"):
                 # Paused time does not burn the wall-clock budget — slide the
                 # deadline forward so the remaining budget survives the pause.
                 if goal["ts_deadline"]:
                     goal["ts_deadline"] += 2.0
-                    self._save_run_goal()
+                    self._save_run_state()
                 break
             if time.time() >= deadline:
                 break
@@ -576,9 +691,51 @@ class KaiSession:
         return (f"OK {state} — " + self._run_progress(goal, st)
                 + f", best fitness {(st.get('best') or {}).get('fitness')} — WAIT again or STOP")
 
+    def _wait_multi(self, arg: str) -> str:
+        """Block until EVERY pool member in the RUN ALL batch finishes (or
+        the client-side timeout).  Paused engines don't burn their budget."""
+        goals = list(self._run_goals)
+        tokens = arg.split()
+        secs = float(tokens[0]) if tokens and tokens[0].isdigit() else None
+        has_target = any(g["ts_deadline"] for g in goals)
+        timeout = secs or (3600.0 if has_target else 60.0)
+        deadline = time.time() + timeout
+        finished: List[Dict[str, Any]] = []
+        while time.time() < deadline:
+            for g in goals:
+                st = self._engine_entry(g["pid"])
+                if self._run_finished(g, st):
+                    if g not in finished:
+                        finished.append(g)
+                elif st.get("paused") and g["ts_deadline"]:
+                    g["ts_deadline"] += 2.0
+                    self._save_run_state()
+            if len(finished) == len(goals):
+                for g in finished:
+                    self.client.call("POST", "/api/engine/pause",
+                                     {"paused": True, "project_id": g["pid"]}, read_timeout=60.0)
+                self._run_goals = []
+                self._run_goal = None
+                self._save_run_state()
+                rows = "; ".join(
+                    f"{g['pid']} finished ({max(0, self._hist_len(g['pid']) - g['start_hist'])} scored)"
+                    for g in finished)
+                return f"OK all {len(goals)} runs complete — {rows}"
+            time.sleep(2.0)
+        return f"OK {len(finished)}/{len(goals)} finished — WAIT again or STOP"
+
     def cmd_budget(self, arg: str) -> str:
         """Show the session's in-flight run budget: generations scored so far
         vs target, and time remaining (paused time excluded via WAIT)."""
+        if self._run_goals:
+            lines = [f"OK {len(self._run_goals)} runs in flight:"]
+            for g in self._run_goals:
+                done = max(0, self._hist_len(g["pid"]) - g["start_hist"])
+                rem = max(0.0, g["ts_deadline"] - time.time()) if g["ts_deadline"] else None
+                lines.append(
+                    f"  {g['pid']}: {done} scored"
+                    + (f", {rem:.0f}s left" if rem is not None else ", no limit"))
+            return "\n".join(lines)
         goal = self._run_goal
         if not goal:
             raise KaiError("no run in progress — RUN first (STOP ended the last one?)")
@@ -619,9 +776,20 @@ class KaiSession:
             body["project_id"] = pid
         elif self.project:
             body["project_id"] = self.project
+        if self._run_goals:
+            # RUN ALL: stop every project in the batch, not just the selected one.
+            for g in self._run_goals:
+                self.client.call("POST", "/api/engine/stop",
+                                 {"project_id": g["pid"]}, read_timeout=60.0)
+            n = len(self._run_goals)
+            self._run_goals = []
+            self._run_goal = None
+            self._save_run_state()
+            return f"OK stopped all {n} run-goal engines"
         self.client.call("POST", "/api/engine/stop", body, read_timeout=60.0)
         self._run_goal = None
-        self._save_run_goal()
+        self._run_goals = []
+        self._save_run_state()
         target = pid or self.project
         if target:
             return f"OK engine for project {target} stopped"

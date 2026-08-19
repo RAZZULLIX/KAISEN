@@ -369,6 +369,29 @@ def test_engine_fuzzy_endpoint(api):
     assert srv.engines["a-proj"].fuzzy_top_n == 4
 
 
+def test_engine_pool_persist_and_restore(tmp_cfg, registry):
+    """The running pool survives a daemon restart: persisted on stop/start,
+    restored on the next boot (only real projects; temp/ is wiped)."""
+    spec = _spec("pool-a")
+    spec["engine"] = {"workers": 1}
+    registry.create("pool-a", spec)
+    temp_root = tmp_cfg.path.parent / "temp"
+    srv1 = DashboardServer(registry, tmp_cfg, engine=None,
+                           host="127.0.0.1", port=8080, temp_root=temp_root,
+                           restore_paused=True)
+    srv1.engines["pool-a"] = FakeEngine("pool-a", multi=3)
+    srv1._selected_project_id = "pool-a"
+    srv1._persist_engine_pool()
+    assert (tmp_cfg.path.parent / "engine_pool.json").exists()
+    srv2 = DashboardServer(registry, tmp_cfg, engine=None,
+                           host="127.0.0.1", port=8080, temp_root=temp_root,
+                           restore_paused=True)
+    assert "pool-a" in srv2.engines
+    assert srv2.engines["pool-a"]._multi == 3
+    assert srv2._selected_project_id == "pool-a"
+    srv2.engines["pool-a"].stop()
+
+
 def test_score_endpoint_scores_file(api, tmp_path):
     """SCORE any file: full build+verify+score pipeline, no engine needed."""
     srv, base = api
