@@ -88,9 +88,47 @@ def validate_spec(spec: Dict[str, Any]) -> List[str]:
             has_inline = isinstance(inline, dict) and str(inline.get("code", "")).strip()
             if not step.get("program") and not has_inline:
                 errors.append(f"steps.{stage}[{i}]: program or inline script required")
+            if stage == "score":
+                stg = step.get("stage")
+                if stg is not None and stg not in ("screen", "confirm"):
+                    errors.append(f"steps.score[{i}].stage: must be 'screen' or 'confirm' (screen = cheap filter, confirm = robust measurement used for selection)")
     metrics = spec.get("metrics") or {}
     # validate_metric_schema reports the empty case — don't double it.
     errors.extend(validate_metric_schema(metrics))
+    eng = spec.get("engine") or {}
+    autofix = eng.get("autofix")
+    if autofix is not None:
+        if not isinstance(autofix, dict):
+            errors.append("engine.autofix: must be an object")
+        else:
+            tries = autofix.get("tries")
+            repair = autofix.get("repair")
+            if tries is not None:
+                try:
+                    if int(tries) < 1:
+                        errors.append("engine.autofix.tries: must be an integer >= 1")
+                except (TypeError, ValueError):
+                    errors.append("engine.autofix.tries: must be an integer >= 1")
+            if repair is not None:
+                try:
+                    if int(repair) < 0:
+                        errors.append("engine.autofix.repair: must be an integer >= 0 (0 = LLM repair off)")
+                except (TypeError, ValueError):
+                    errors.append("engine.autofix.repair: must be an integer >= 0 (0 = LLM repair off)")
+    retention = eng.get("retention")
+    if retention is not None:
+        if not isinstance(retention, dict):
+            errors.append("engine.retention: must be an object")
+        else:
+            kl = retention.get("keep_last")
+            if kl is not None and (not isinstance(kl, int) or isinstance(kl, bool) or kl < 1):
+                errors.append("engine.retention.keep_last: must be an integer >= 1")
+            kb = retention.get("keep_best")
+            if kb is not None and not isinstance(kb, bool):
+                errors.append("engine.retention.keep_best: must be boolean")
+            en = retention.get("enabled")
+            if en is not None and not isinstance(en, bool):
+                errors.append("engine.retention.enabled: must be boolean")
     telemetry = spec.get("telemetry") or {}
     if not isinstance(telemetry.get("live_fields", []), list):
         errors.append("telemetry.live_fields: must be a list of metric keys shown live in worker cards")
@@ -127,6 +165,12 @@ class Project:
         self.path = path
         self.spec: Dict[str, Any] = _merge_defaults(load_json(path / SPEC_FILE, {}))
         self.spec["dir"] = str(path)
+
+    def reload(self) -> None:
+        """Re-read project.json into this Project (spec changes apply to the
+        engine/workers at the next generation without a restart)."""
+        self.spec = _merge_defaults(load_json(self.path / SPEC_FILE, {}))
+        self.spec["dir"] = str(self.path)
 
     @property
     def id(self) -> str:

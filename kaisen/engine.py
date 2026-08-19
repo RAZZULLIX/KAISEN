@@ -16,6 +16,7 @@ paused/stop flags, periodic deepwork + lessons (spec-driven).
 from __future__ import annotations
 
 import os
+import random
 import shutil
 import threading
 import time
@@ -31,7 +32,7 @@ from .scores import evaluate_score_type, metric_goodness
 from .languages import ext_from_lang, fence_from_lang
 from .state import ProjectState
 from .telegram import pin_message, send_message
-from .util import load_json, save_json
+from .util import file_sha256, load_json, save_json
 from .workers import WorkerPool
 
 # Engine states: the system's ACTUAL state (shown in the status pill).
@@ -221,6 +222,10 @@ class ProjectEngine:
         self._deepwork_last = 0
         self._worker_count = worker_count
         self._multi = 1
+        # Opt-in fuzzy prompt basis: when > 0, each generation's prompt is
+        # seeded with a RANDOM one of the top N scored iterations instead of
+        # the champion (default 0 = champion always — the safe behavior).
+        self._fuzzy_top_n = 0
         self.sessions = SessionHub()
         self.prompt_override: Optional[str] = None
         self.prompt_override_active = False
@@ -263,10 +268,12 @@ class ProjectEngine:
         self._stop.clear()
         self._set_state(STATE_PAUSED if paused else STATE_RUNNING)
         self._running = True
+        self._refresh_spec()
         self.project.ensure_dirs()
         self.state.data["active"] = True
         self.state.data["started_at"] = self.state.data.get("started_at") or time.time()
         self.state.save()
+        self._check_baseline_source()
         self._bootstrap_baseline()
         if not self.pool.worker_count():
             self.pool.start(self._worker_count)
@@ -300,6 +307,19 @@ class ProjectEngine:
         self._multi = n
         self._log(f"parallel generation pipelines: {n}")
         return n
+
+    def set_fuzzy(self, top_n: int) -> int:
+        """Opt-in fuzzy prompt basis (KAI FUZZY): 0 = champion always
+        (default); N > 0 = each generation's prompt is seeded with a RANDOM
+        one of the top N scored iterations.  Also enables the bounded
+        recent-outcomes section in the prompt.  Runtime only — resets on
+        engine restart."""
+        top_n = max(0, int(top_n))
+        self._fuzzy_top_n = top_n
+        mode = "ON" if top_n else "OFF (champion only)"
+        self._log(f"fuzzy prompt basis: {mode}" + (f", top {top_n}" if top_n else ""))
+        return top_n
+
     def stop(self) -> None:
         """Hard stop: cancel in-flight LLM streams, kill worker evals, stay
         stopped until start()."""
@@ -378,6 +398,8 @@ class ProjectEngine:
                 if self.engine_state in (STATE_PAUSING, STATE_PAUSED, STATE_STOPPING, STATE_STOPPED):
                     time.sleep(1.0)
                     continue
+                self._refresh_spec()
+                self._check_baseline_source()
                 qsize = int(get_config().workers.get("queue_size", 15))
                 # Legacy-style queueing: producers keep preparing programs
                 # while the workers test.  Pause only when the WAITING
@@ -391,6 +413,7 @@ class ProjectEngine:
                 gen_dir = self._make_gen_dir(gen)
                 champion_path = self._champion_path()
                 code = self._champion_code()
+                code, champion_path = self._prompt_basis(champion_path, code)
                 if self.prompt_override_active and self.prompt_override:
                     prompt = self.prompt_override
                 else:
@@ -466,10 +489,10 @@ class ProjectEngine:
                 **extra: Any) -> None:
         job_id = f"{int(time.time() * 1000)}-{gen}"
         context = {} if baseline else self._abort_context()
-        # Compile-loop cap override (KAI AUTOFIX tries <n>) reaches the
-        # pipeline worker through the job context.
-        if not baseline and self._autofix_settings.get("max_tries") is not None:
-            context["autofix_max_tries"] = int(self._autofix_settings["max_tries"])
+        # Compile-loop caps (KAI AUTOFIX > spec engine.autofix > config
+        # autofix) reach the pipeline worker through the job context.
+        if not baseline:
+            context["autofix_max_tries"] = self._autofix_effective()["max_tries"]
         job = {
             "job_id": job_id,
             "generation": gen,
@@ -596,6 +619,156 @@ class ProjectEngine:
         return False
 
     # ======================================================================
+    # spec freshness / baseline drift / fuzzy basis / retention
+    # ======================================================================
+
+    def _refresh_spec(self) -> None:
+        """Re-read project.json so spec changes (timeouts, metrics, engine
+        knobs) apply at the NEXT generation instead of only after a restart.
+        Cheap — one small JSON read per generation."""
+        self.project.reload()
+        self._code_ext = ext_from_lang(self.project.spec.get("language", "c"))
+        self._code_lang = str(self.project.spec.get("language", "c"))
+        self._code_fence = fence_from_lang(self._code_lang)
+
+    def _check_baseline_source(self) -> None:
+        """Detect when data.baseline_source changed since the engine (or the
+        previous run) recorded it.  A changed baseline means the stored
+        champion was measured against a different file — warn loudly instead
+        of silently scoring against the wrong reference."""
+        baseline = (self.project.spec.get("data") or {}).get("baseline_source")
+        if not baseline:
+            return
+        src = self.project.path / baseline
+        h = file_sha256(src) if src.exists() else None
+        stored = self.state.data.get("baseline_source_hash")
+        if stored is None:
+            self.state.data["baseline_source_hash"] = h
+            self.state.save()
+            return
+        if h != stored:
+            self.state.data["baseline_source_hash"] = h
+            self.state.append_history({
+                "generation": self.state.generation,
+                "outcome": "baseline_source_changed",
+                "detail": (f"baseline '{baseline}' changed since last run — "
+                           "champion comparison point is stale"),
+            })
+            self.state.save()
+            self._emit_state()
+            self._log(f"WARNING: baseline source '{baseline}' changed — comparison point is stale")
+
+    def _prompt_basis(self, champion_path: str, code: str) -> tuple:
+        """(code, path) to seed this generation's prompt.  Default: the
+        champion.  Fuzzy mode (FUZZY <n>): a random one of the top N scored
+        iterations, so different pipelines explore around different local
+        optima instead of all hammering the same file."""
+        if self._fuzzy_top_n <= 0:
+            return code, champion_path
+        rows = [r for r in self.results.read()
+                if str(r.get("fitness", "")).replace(".", "", 1).isdigit()]
+        if len(rows) <= 1:
+            return code, champion_path
+        score_key, score_type = self._active_score_type()
+        direction = score_type.get("direction", "higher")
+        scored = []
+        for r in rows:
+            try:
+                f = float(r["fitness"])
+            except (TypeError, ValueError):
+                continue
+            g = int(r.get("generation", 0))
+            cand = self.project.runs_dir / f"gen_{g:06d}" / f"candidate{self._code_ext}"
+            if cand.exists():
+                scored.append((f, g, cand))
+        if not scored:
+            return code, champion_path
+        scored.sort(key=lambda t: t[0], reverse=(direction == "higher"))
+        top = scored[:max(1, self._fuzzy_top_n)]
+        _f, g, cand = random.choice(top)
+        try:
+            return cand.read_text(encoding="utf-8"), str(cand)
+        except Exception:
+            return code, champion_path
+
+    def _valid_rate(self, window: int = 20) -> Dict[str, Any]:
+        """Rolling telemetry: fraction of recent generations that scored OK,
+        plus per-outcome counts — a run gone toxic (90% build_fail/repair
+        churn) is visible at a glance instead of buried in history."""
+        hist = self.state.history[-window:]
+        counts: Dict[str, int] = {}
+        for h in hist:
+            counts[h.get("outcome", "?")] = counts.get(h.get("outcome", "?"), 0) + 1
+        good = counts.get("ok", 0) + counts.get("valid", 0)
+        total = len(hist)
+        return {"window": total, "valid_rate": round(good / total, 3) if total else None,
+                "outcome_counts": counts}
+
+    def _maybe_prune_runs(self) -> None:
+        """Opt-in retention: spec engine.retention {keep_last, keep_best} —
+        delete old per-generation dirs beyond the window, always keeping the
+        champion's generation and anything still in flight."""
+        retention = (self.project.spec.get("engine") or {}).get("retention") or {}
+        if not retention.get("enabled"):
+            return
+        keep_last = max(1, int(retention.get("keep_last", 50) or 50))
+        keep_best = bool(retention.get("keep_best", True))
+        cutoff = self.state.generation - keep_last
+        best_gen = int((self.state.best or {}).get("generation", -1) or -1)
+        with self._lock:
+            inflight = set(self._in_flight.keys())
+        for d in self.project.runs_dir.iterdir():
+            if not d.is_dir() or not d.name.startswith("gen_"):
+                continue
+            try:
+                g = int(d.name[4:])
+            except ValueError:
+                continue
+            if g >= cutoff or g in inflight:
+                continue
+            if keep_best and g == best_gen:
+                continue
+            try:
+                shutil.rmtree(d, ignore_errors=True)
+            except Exception:
+                pass
+
+    def _write_diff_summary(self, gen_dir: Path, candidate: str) -> None:
+        """Machine-readable diff summary against the baseline, written next
+        to each scored generation — harvesting/attribution without hand-diffing."""
+        baseline = (self.project.spec.get("data") or {}).get("baseline_source")
+        if not baseline:
+            return
+        src = self.project.path / baseline
+        if not src.exists():
+            return
+        try:
+            import difflib
+            a = src.read_text(encoding="utf-8", errors="replace").splitlines()
+            b = Path(candidate).read_text(encoding="utf-8", errors="replace").splitlines()
+            sm = difflib.SequenceMatcher(None, a, b)
+            added = removed = 0
+            for tag, i1, i2, j1, j2 in sm.get_opcodes():
+                if tag == "insert":
+                    added += i2 - i1 or j2 - j1
+                elif tag == "delete":
+                    removed += i2 - i1 or j2 - j1
+                elif tag == "replace":
+                    added += j2 - j1
+                    removed += i2 - i1
+            save_json(gen_dir / "diff.json", {
+                "candidate": Path(candidate).name,
+                "baseline": str(src.name),
+                "baseline_lines": len(a),
+                "candidate_lines": len(b),
+                "added_lines": added,
+                "removed_lines": removed,
+                "changed_lines": added + removed,
+            })
+        except Exception:
+            pass
+
+    # ======================================================================
     # prompt assembly
     # ======================================================================
 
@@ -625,6 +798,33 @@ class ProjectEngine:
         if kc:
             memory_section += "=== KEYWORD FREQUENCIES (lessons/memos) ===\n" + ", ".join(f"{k}:{v}" for k, v in kc.items()) + "\n\n"
         memory_section += "=== RECENT HISTORY ===\n" + self.memory.build_history_blob()
+        # Fuzzy mode doubles as the mule's own memory: bounded recent scored
+        # outcomes (config -> size, delta vs champion) so the model can see
+        # its own measured results instead of guessing.
+        if self._fuzzy_top_n > 0:
+            recent_rows = [r for r in self.results.read()[-10:]
+                           if str(r.get("fitness", "")).replace(".", "", 1).isdigit()]
+            if recent_rows:
+                lines = ["=== RECENT SCORED OUTCOMES (last 10) ==="]
+                for r in recent_rows:
+                    try:
+                        f = float(r["fitness"])
+                    except (TypeError, ValueError):
+                        continue
+                    best_f = best.get("fitness")
+                    delta = ""
+                    if best_f:
+                        try:
+                            base = float(best_f)
+                            if base:
+                                pct = (f - base) / base * 100.0
+                                delta = f" (delta {pct:+.1f}% vs champion)"
+                        except (TypeError, ValueError):
+                            pass
+                    metrics_str = " ".join(f"{k}={v}" for k, v in r.items()
+                                            if k not in ("generation", "outcome", "fitness") and v != "")
+                    lines.append(f"  gen {r.get('generation')}: {r.get('outcome')} {metrics_str}{delta}".rstrip())
+                memory_section += "\n".join(lines) + "\n\n"
 
         contract = str((spec.get("data") or {}).get("contract_text") or spec.get("description", ""))
         scope = (spec.get("data") or {}).get("edit_scope")
@@ -779,12 +979,26 @@ class ProjectEngine:
             return
 
         score_key, score_type = self._active_score_type()
-        fitness = evaluate_score_type(metrics, score_type)
+        # Two-stage scoring: when any score step declares stage "confirm",
+        # selection uses the CONFIRM metrics (the robust measurement) — the
+        # screen metrics still appear in results/telemetry but never crown a
+        # champion on screen-noise alone.
+        sel_metrics = result.get("confirm_metrics") or metrics
+        if sel_metrics:
+            fitness = evaluate_score_type(sel_metrics, score_type)
+        else:
+            fitness = evaluate_score_type(metrics, score_type)
         if fitness is None:
             self.state.append_history({"generation": gen, "outcome": "no_score", "detail": f"missing metrics for score '{score_key}': {str(metrics)[:300]}"})
             self.state.save()
             self._emit_state()
             return
+
+        if job and job.get("gen_dir"):
+            self._write_diff_summary(
+                Path(job["gen_dir"]),
+                str(Path(job["gen_dir"]) / f"candidate{self._code_ext}"))
+        self._maybe_prune_runs()
 
         best_f = self.state.best.get("fitness")
         # hysteresis >= 1: 1 = any strict improvement; >1 requires beating
@@ -877,16 +1091,24 @@ class ProjectEngine:
         return dict(self._autofix_settings)
 
     def _autofix_effective(self) -> Dict[str, int]:
-        """Effective compile-loop caps: engine override (KAI AUTOFIX) >
-        config autofix.max_tries / llm_repair_max > built-in defaults."""
+        """Effective compile-loop caps: KAI AUTOFIX override > project
+        engine.autofix > config autofix > built-in defaults."""
         cfg = self.orchestrator.cfg
         af = cfg.data.get("autofix") or {}
+        spec_af = (self.project.spec.get("engine") or {}).get("autofix") or {}
+        max_tries = self._autofix_settings.get("max_tries")
+        if max_tries is None:
+            max_tries = spec_af.get("tries")
+        if max_tries is None:
+            max_tries = int(af.get("max_tries", 5) or 5)
+        repair = self._autofix_settings.get("repair_max")
+        if repair is None:
+            repair = spec_af.get("repair")
+        if repair is None:
+            repair = int(af.get("llm_repair_max", 3) or 3)
         return {
-            "max_tries": self._autofix_settings.get("max_tries")
-            or int(af.get("max_tries", 5) or 5),
-            "repair_max": self._autofix_settings.get("repair_max")
-            if self._autofix_settings.get("repair_max") is not None
-            else int(af.get("llm_repair_max", 3) or 3),
+            "max_tries": max(1, int(max_tries)),
+            "repair_max": max(0, int(repair)),
         }
 
     def _maybe_llm_repair(self, gen: int, job: Optional[Dict[str, Any]],
@@ -1187,6 +1409,8 @@ class ProjectEngine:
         types = scores_cfg.get("types") or {}
         if not types:
             types = {"weighted_composite": score_type}
+        spec_file = self.project.path / "project.json"
+        spec_revision = file_sha256(spec_file)[:12] if spec_file.exists() else None
         return {
             "project_id": self.project.id,
             "project_name": self.project.name,
@@ -1202,6 +1426,10 @@ class ProjectEngine:
             "guardrails": self._guardrail_status(),
             "sessions": self.sessions.snapshot(),
             "logs": self._last_log[-80:],
+            "spec_revision": spec_revision,
+            "autofix": self._autofix_effective(),
+            "valid_rate": self._valid_rate(),
+            "fuzzy_top_n": self._fuzzy_top_n,
         }
 
     def _guardrail_status(self) -> Dict[str, Any]:

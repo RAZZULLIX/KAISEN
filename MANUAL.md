@@ -171,10 +171,10 @@ projects/<id>/
 | `artifact_name` | output file name of the build step |
 | `steps.build` | one build command: `program`, `args`, `timeout`, `memory_limit_mb` |
 | `steps.verify` | list of verify commands (same shape); all must pass |
-| `steps.score` | list of score commands; must emit parseable metrics |
+| `steps.score` | list of score commands; must emit parseable metrics. A score step may declare `stage: "screen"|"confirm"` — the CONFIRM step's metric is what selects the champion (robust measurement); screen steps are cheap filters (§6) |
 | `metrics` | `{key: {direction: lower\|higher, weight: float, unit?: str, constraint?: float}}` — at least one required. A `constraint` is a HARD gate: violating it rejects the candidate outright (outcome `constraint_violated`) — no fitness weighting can compensate. Enforce "without changing the output" here, not in a prompt |
 | `telemetry` | `{enabled, progress_token, live_fields}` — harness progress protocol (§6) |
-| `engine` | `{workers, multi}` — startup sizing (project > config > 1/1) |
+| `engine` | `{workers, multi, autofix, retention}` — startup sizing (project > config > 1/1); `autofix: {tries, repair}` sets per-project compile-loop caps (KAI override > spec > config); `retention: {enabled, keep_last, keep_best}` opt-in pruning of old `runs/gen_*` dirs (§8) |
 | `select.hysteresis` | champion replacement threshold; 1 = any improvement, 1.1 = must beat the champion by 10% (values < 1 are clamped to 1) |
 | `guardrails` | `{enabled, allow_extra, deny_extra}` — extra command rules |
 | `prompts` | `{generation_dir, goal, study, lesson}` — prompt templates |
@@ -235,6 +235,19 @@ whose live value already cannot beat the champion is killed mid-run.
   verify prompt teaches harnesses this, and the metric is what the
   pipeline parses.
 
+**Two-stage scoring**: a score step may declare `stage: "confirm"` (vs
+default `"screen"`). The confirm step's metric is what the engine uses for
+selection — run a cheap screen slice first to filter, then confirm on a
+bigger, robust slice so the champion is never crowned on screen-noise.
+Early-abort only applies to screen steps.
+
+**Spec freshness**: `PUT /api/projects/{pid}/spec` takes effect at the next
+generation — the engine and its workers re-read project.json per generation,
+so a timeout bump lands without a restart. STATUS shows the active
+`spec_revision`. Harness programs run in temp copies; a SMOKE result is
+persisted to `projects/<id>/smoke_results.json` and the daemon log, so a
+smoke that outlives the client timeout is still readable afterwards.
+
 ---
 
 ## 7. Autofix ladder
@@ -272,6 +285,14 @@ Per-project control: `skills.autofix_build` = `true` (default), `false`,
 or a custom fixer path. Non-C/Python languages surface their compiler
 diagnostics through the build stderr without a default fixer.
 
+**Declarative + discoverable**: `engine.autofix: {tries, repair}` in
+`project.json` is the spec-level way to set the same knobs; the effective
+cap chain is KAI override > spec > config > built-in defaults, and STATUS
+shows the active policy.  For mule runs the field-tested recommendation is
+`AUTOFIX tries 2 repair off` — repair cycles mostly re-break files, so let
+the cheap deterministic passes try, then fail fast instead of spending
+LLM turns.
+
 ---
 
 ## 8. The engine (evolution loop)
@@ -300,13 +321,26 @@ One engine per running project; several engines form the pool.
 - **Edit scope** — `data.edit_scope: ["fname", ...]` restricts which
   functions the LLM may change; changes outside the set are rejected with
   outcome `scope_violation` before the pipeline runs (heuristic diff, §6).
+- **Fuzzy basis** — `FUZZY <n>` (KAI) or `POST /api/engine/fuzzy` is opt-in
+  prompt diversity: each generation's prompt is seeded with a random one of
+  the top n scored iterations instead of the champion, plus the last 10
+  scored outcomes as memory. Off by default; runtime only.
+- **Baseline drift guard** — the engine hashes `data.baseline_source` into
+  state.json; a change since the last run is logged loudly
+  (`baseline_source_changed`) instead of scoring against a stale reference.
+- **Retention** — opt-in `engine.retention {enabled, keep_last, keep_best}`
+  prunes old `runs/gen_*` dirs (champion generation + in-flight always kept).
+- **Valid-rate telemetry** — STATUS shows rolling valid-rate and per-outcome
+  counts; a run gone toxic (90% build_fail churn) is visible at a glance.
 - **Quiet benchmarking** — `workers.affinity` pins workers to cores and
   `workers.quiet` nices them, so score timings stop swinging with load on a
   shared box. Protocol: stop other engines → pin/median A-B runs → resume.
 - **Outcomes** are recorded per generation in the iteration history:
   `ok` (new best), `valid`, `build_fail`, `verify_fail`, `no_metrics`,
-  `no_code`, `llm_repair`, `scope_violation`, `protected_data_modified`,
-  `guardrail_denied` — visible in the GUI and via KAI `WAIT`/`STATUS`.
+  `no_code`, `llm_repair`, `scope_violation`, `baseline_source_changed`,
+  `protected_data_modified`, `guardrail_denied` — visible in the GUI and
+  via KAI `WAIT`/`STATUS`. Scored generations also get a diff summary
+  (`runs/gen_NNNN/diff.json`) against the baseline for harvesting.
 
 ---
 
@@ -334,14 +368,23 @@ KAISEN as an optimization sidecar. Two transports, same grammar:
 - HTTP: `POST /kai` (text in, text out)
 
 Key commands: `PROJECT`, `STATUS`, `SPEC`, `RUN [n] [FOR secs] [WITH k]
-[ON pid]`, `WAIT`, `PAUSE/RESUME/STOP`, `BEST`, `SMOKE`, `BASELINE`/`END`,
-`CANDIDATE`/`END`, `SNAPSHOT`, `SERVERS`, `GOAL`, `ACCEPT`, `CREATE`,
-`ESTIMATE`, `FORGE`, `HELP`, `QUIT`.
+[ON pid]`, `BUDGET`, `SCORE <path>`, `FUZZY <n>`, `WAIT`, `PAUSE/RESUME/STOP`,
+`BEST`, `SMOKE`, `BASELINE`/`END`, `CANDIDATE`/`END`, `SNAPSHOT`, `SERVERS`,
+`GOAL`, `ACCEPT`, `CREATE`, `ESTIMATE`, `FORGE`, `HELP`, `QUIT`.
 
 Reliability contract: every reply starts `OK` or `ERR`; parsing is
 deliberately tolerant (LLMs decorate commands with quotes, `CMD:`,
 `OK?` prefixes — all accepted); engine operations are per-project; an
 error never kills the session and always says what to do next.
+
+Run budgets: `RUN <n>` = stop after n scored generations; `RUN FOR <secs>`
+= time budget that only burns while the engine runs (paused time excluded);
+both = whichever comes first. `BUDGET` shows the in-flight budget.
+`SCORE <path> [ON <pid>]` scores an arbitrary file through the full
+pipeline with no engine. `FUZZY <n> [ON <pid>]` is opt-in prompt diversity:
+each generation's prompt is seeded with a random one of the top n scored
+iterations (plus the last 10 scored outcomes as memory) instead of the
+champion — off by default, runtime only.
 
 Full grammar, alias table, and session semantics: [`docs/KAI.md`](docs/KAI.md).
 
@@ -677,4 +720,4 @@ measurement of the real workload, not by headline multipliers.
 
 ---
 
-*Manual is the complete reference as of KAISEN 0.1.1-alpha.*
+*Manual is the complete reference as of KAISEN 0.1.2-alpha.*

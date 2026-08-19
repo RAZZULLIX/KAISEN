@@ -183,7 +183,12 @@ class DashboardServer:
         for pid, eng in self.engines.items():
             st = eng.state
             best = (st.best or {}) if st else {}
-            out.append({
+            snap = None
+            try:
+                snap = eng.snapshot()
+            except Exception:
+                snap = None
+            row = {
                 "project_id": pid,
                 "name": eng.project.name if eng.project else pid,
                 "engine_state": eng.engine_state,
@@ -193,7 +198,13 @@ class DashboardServer:
                 "best_metrics": dict(best.get("metrics") or {}),
                 "multi": getattr(eng, "_multi", 1),
                 "workers": len(getattr(getattr(eng, "pool", None), "_procs", {}) or {}),
-            })
+            }
+            if snap:
+                row["spec_revision"] = snap.get("spec_revision")
+                row["autofix"] = snap.get("autofix")
+                row["valid_rate"] = snap.get("valid_rate")
+                row["fuzzy_top_n"] = snap.get("fuzzy_top_n")
+            out.append(row)
         return out
 
     def _orch(self):
@@ -236,6 +247,7 @@ class DashboardServer:
         r.add_put("/api/projects/{pid}/spec", self._api_project_spec_update)
         r.add_get("/api/projects/{pid}/best", self._api_project_best)
         r.add_post("/api/projects/{pid}/smoke", self._api_project_smoke)
+        r.add_post("/api/projects/{pid}/score", self._api_project_score)
         r.add_post("/api/projects/{pid}/pipeline-suggest", self._api_project_pipeline_suggest)
         r.add_post("/api/swarm/start", self._api_swarm_start)
         r.add_get("/api/swarm", self._api_swarm_list)
@@ -256,6 +268,7 @@ class DashboardServer:
         r.add_post("/api/engine/start", self._api_engine_start)
         r.add_post("/api/engine/stop", self._api_engine_stop)
         r.add_post("/api/engine/pause", self._api_engine_pause)
+        r.add_post("/api/engine/fuzzy", self._api_engine_fuzzy)
         r.add_get("/api/active", self._api_active)
         r.add_post("/api/active/custom_code", self._api_custom_code)
         # ── Legacy-shape endpoints (the original dashboard UI speaks these) ──
@@ -639,6 +652,48 @@ class DashboardServer:
                 suggest_orch.record_outcome(last_sid["v"], "suggest", "win")
         return result
 
+    async def _api_project_score(self, request):
+        """Score an arbitrary source file through the project's full
+        build+verify+score pipeline — no engine, no LLM run, no ceremony.
+        Writes an audit copy + result.json under runs/score_<id>/ and
+        returns the metrics.  Works for temp projects too (resolves via the
+        project's own root)."""
+        pid = request.match_info["pid"]
+        data = await request.json()
+        path = str(data.get("path", "") or "").strip()
+        if not path:
+            return _json({"ok": False, "error": "path is required (the source file to score)"}, 400)
+        try:
+            p = self._registry_for(pid)[0]
+        except KeyError:
+            return _json({"error": "project not found"}, 404)
+        cand = Path(path)
+        if not cand.is_absolute():
+            cand = (p.path / path).resolve()
+        if not cand.is_file():
+            return _json({"ok": False, "error": f"file not found: {cand}"}, 404)
+        import shutil
+        import uuid
+        from .pipeline import run_pipeline
+        from .languages import ext_from_lang
+        workdir = p.path / "runs" / f"score_{uuid.uuid4().hex[:8]}"
+        workdir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(cand, workdir / f"scored_source{ext_from_lang(p.spec.get('language', 'c'))}")
+        result = await asyncio.to_thread(run_pipeline, p, cand, workdir)
+        save_json(workdir / "result.json", {
+            "path": str(cand), "ok": bool(result.get("ok")),
+            "stage": result.get("stage"), "outcome": result.get("outcome"),
+            "metrics": result.get("metrics"), "timings": result.get("timings"),
+        })
+        if result.get("ok"):
+            return _json({"ok": True, "metrics": result.get("metrics"),
+                          "timings": result.get("timings"),
+                          "stage": "done", "gen_dir": str(workdir),
+                          "score_details": result.get("score_details")})
+        return _json({"ok": False, "error": result.get("reason") or "score failed",
+                      "stage": result.get("stage"), "outcome": result.get("outcome"),
+                      "metrics": result.get("metrics"), "gen_dir": str(workdir)}, 400)
+
     async def _api_project_pipeline_suggest(self, request):
         """'AI, build my pipeline': suggest a full pipeline for an existing
         project from its baseline + goal. The user validates, then applies."""
@@ -867,7 +922,7 @@ class DashboardServer:
             if not baseline.exists():
                 return {"ok": False, "error": f"baseline file not found: {baseline.name}"}
             res = run_pipeline(tp, baseline, tmp / p.id / "smoke")
-            return {
+            out = {
                 "ok": bool(res.get("ok")),
                 "stage": res.get("stage"),
                 "outcome": res.get("outcome"),
@@ -876,6 +931,27 @@ class DashboardServer:
                 "stdout_tail": (res.get("stdout_tail") or "")[:1500],
                 "stderr_tail": (res.get("stderr_tail") or "")[:1500],
             }
+            # Persist the outcome independent of the HTTP response — a smoke
+            # that outlives the client read timeout must still land somewhere
+            # the operator can read later (project dir, capped history).
+            try:
+                rows = load_json(p.path / "smoke_results.json", []) or []
+                rows.append({
+                    "time": time.time(),
+                    "project_id": p.id,
+                    "ok": out["ok"],
+                    "stage": out["stage"],
+                    "outcome": out["outcome"],
+                    "metrics": res.get("metrics"),
+                    "timings": res.get("timings"),
+                })
+                save_json(p.path / "smoke_results.json", rows[-50:])
+            except Exception:
+                pass
+            print(f"[KAISEN] smoke {p.id}: "
+                  f"{'PASS' if out['ok'] else 'FAIL'} stage={out['stage']} "
+                  f"metrics={res.get('metrics')}")
+            return out
         except Exception as e:
             return {"ok": False, "error": str(e)}
         finally:
@@ -1286,6 +1362,21 @@ class DashboardServer:
             started = True
         self._selected_project_id = pid
         return _json({"ok": True, "active_id": pid, "started": started})
+
+    async def _api_engine_fuzzy(self, request):
+        """Per-engine prompt-diversity knob (KAI FUZZY): 0 = champion always;
+        N > 0 = random top-N scored basis per generation.  Runtime only."""
+        data = await request.json()
+        pid = str(data.get("project_id") or "") if isinstance(data, dict) else ""
+        eng = self._engine_for(pid or None)
+        if eng is None:
+            return _json({"ok": False, "error": "no engine running"}, 400)
+        try:
+            n = int(data.get("top_n", 0))
+        except (TypeError, ValueError):
+            return _json({"ok": False, "error": "top_n must be a number"}, 400)
+        n = eng.set_fuzzy(n)
+        return _json({"ok": True, "project_id": eng.project.id, "top_n": n})
 
     async def _api_engine_stop(self, request):
         data = await request.json() if request.can_read_body else {}

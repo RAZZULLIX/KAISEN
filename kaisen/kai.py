@@ -58,7 +58,7 @@ import requests
 from .util import load_json, save_json
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-__version__ = "0.1.1-alpha"
+__version__ = "0.1.2-alpha"
 _RUNS_FILE = REPO_ROOT / "kai_runs.json"   # persistent run goals (gitignored)
 
 
@@ -160,10 +160,19 @@ BARE command lines, never prefixed with OK. Commands (case-insensitive):
   RUN [<n>] [FOR <secs>] [ON <pid>] [WITH <k>]
                              start evolving NOW (background).
                              No goal = run FOREVER until STOP. <n> = stop
-                             after n generations; FOR <secs> = time budget;
-                             WITH <k> = drive k LLM pipelines in parallel.
+                             after n SCORED generations; FOR <secs> = time
+                             budget (paused time excluded — only burns while
+                             the engine runs); WITH <k> = k LLM pipelines.
+                             Both given? The run ends at whichever comes first.
+  BUDGET                      in-flight run's budget: scored so far + time left
   FORGE [<n>] [TIER <tiny|small|large>] [ON <pid>] [GOAL <words...>]
                              n parallel drafts, each pipeline-scored
+  SCORE <path> [ON <pid>]     score any file through build+verify+score —
+                             no engine, no run, no ceremony (audit in runs/)
+  FUZZY <n> [ON <pid>]        opt-in diversity: seed each prompt with a random
+                             one of the top N scored iterations instead of the
+                             champion (0 = off; also feeds the mule its own
+                             recent outcomes). Resets on engine restart.
   ESTIMATE <in> [<out>]      per-server cost/time for a call of that size
   WAIT [<secs>]               block until the in-flight run finishes
   PAUSE | RESUME | STOP [ON <pid>]
@@ -218,8 +227,11 @@ ALIASES: Dict[str, List[str]] = {
     "SPEC": ["SPEC", "DESCRIBE", "SHOW", "INSPECT", "INFO"],
     "RUN": ["RUN", "ITERATE", "EVOLVE", "OPTIMIZE", "GO"],
     "FORGE": ["FORGE", "SMITH", "DRAFTS"],
+    "SCORE": ["SCORE", "EVAL", "TESTFILE"],
+    "FUZZY": ["FUZZY", "VARY", "DIVERSE"],
     "PAUSE": ["PAUSE", "HALT", "FREEZE"],
     "WAIT": ["WAIT", "SYNC", "AWAIT", "JOIN"],
+    "BUDGET": ["BUDGET", "TIME", "REMAINING", "LEFT"],
     "SERVERS": ["SERVERS", "LLM", "BACKENDS"],
     "MODELS": ["MODELS", "SCOREBOARD", "RANKINGS"],
     "AUTOFIX": ["AUTOFIX", "FIXER"],
@@ -324,13 +336,31 @@ class KaiSession:
         lines = ["OK"]
         eng_pid = act.get("project_id")
         eng = act.get("engine_state", "down")
-        lines.append(f"ENGINE {eng} gen={st.get('generation', '-')} paused={st.get('paused', '-')} project={eng_pid or '-'}")
+        entry = self._engine_entry(eng_pid) if eng_pid else None
+        extras = []
+        vr = (entry or {}).get("valid_rate") or {}
+        if vr.get("valid_rate") is not None:
+            extras.append(f"valid={vr['valid_rate'] * 100:.0f}%")
+        af = (entry or {}).get("autofix") or {}
+        if af:
+            extras.append(f"autofix={af['max_tries']}/{af['repair_max']}")
+        if extras:
+            extras = " (" + " ".join(extras) + ")"
+        else:
+            extras = ""
+        lines.append(f"ENGINE {eng} gen={st.get('generation', '-')} paused={st.get('paused', '-')} project={eng_pid or '-'}{extras}")
+        if (entry or {}).get("spec_revision"):
+            lines[-1] += f" spec={entry['spec_revision']}"
         best = st.get("best") or {}
         if best:
             lines.append(f"BEST fitness={best.get('fitness')} metrics: " +
                          " ".join(f"{k}={v}" for k, v in (best.get('metrics') or {}).items()))
         if self._run_goal:
-            lines.append("RUN " + self._run_progress(self._run_goal, self._engine_entry(self._run_goal["pid"])) + " (in flight — WAIT/STOP)")
+            goal = self._run_goal
+            prog = self._run_progress(goal, self._engine_entry(goal["pid"]))
+            if goal["ts_deadline"]:
+                prog += f", {max(0.0, goal['ts_deadline'] - time.time()):.0f}s left"
+            lines.append("RUN " + prog + " (in flight — WAIT/BUDGET/STOP)")
         if self.project:
             spec = self.client.call("GET", f"/api/projects/{self.project}/spec", read_timeout=10.0).get("spec")
             if spec:
@@ -375,27 +405,48 @@ class KaiSession:
         return "\n".join(lines)
     def cmd_run(self, arg: str) -> str:
         """Start the sidecar. KAISEN evolves FOREVER by default; goals are
-        optional flags: RUN <n> (stop after n generations), RUN FOR <secs>
-        (stop after a time budget), RUN WITH <k> (drive k LLM pipelines in
-        parallel). Always returns immediately — use WAIT to synchronize,
-        STATUS to watch, STOP to end."""
+        optional flags: RUN <n> = stop after n scored generations,
+        RUN FOR <secs> = time budget (paused time excluded — the budget
+        only burns while the engine runs), RUN WITH <k> = k parallel LLM
+        pipelines.  When BOTH a count and a budget are given, the run ends
+        at whichever comes first.  Always returns immediately — use WAIT to
+        synchronize, STATUS/BUDGET to watch, STOP to end."""
         tokens = arg.split()
         gen_target: Optional[int] = None
         budget: Optional[float] = None
         multi_k: Optional[int] = None
         pid: Optional[str] = None
-        # One pass: flags may appear in any order and the gen count must
-        # not shadow an ON <pid> that follows it.
-        for i, t in enumerate(tokens):
+        # One pass: flags may appear in any order; the budget value must
+        # NOT also parse as a generation count ("RUN FOR 21600" = 21600s
+        # budget, not 21600 generations).
+        i = 0
+        while i < len(tokens):
+            t = tokens[i]
             u = t.upper().rstrip(":,s")
-            if u in ("FOR", "BUDGET", "TIME") and i + 1 < len(tokens) and tokens[i + 1].isdigit():
-                budget = float(tokens[i + 1])
-            elif u in ("WITH", "USING") and i + 1 < len(tokens) and tokens[i + 1].isdigit():
-                multi_k = max(1, int(tokens[i + 1]))
-            elif u == "ON" and i + 1 < len(tokens):
-                pid = tokens[i + 1].strip().lower()
-            elif t.isdigit() and gen_target is None:
+            if u in ("FOR", "BUDGET", "TIME"):
+                if i + 1 < len(tokens) and tokens[i + 1].isdigit():
+                    budget = float(tokens[i + 1])
+                    i += 2
+                    continue
+                i += 1
+                continue
+            if u in ("WITH", "USING"):
+                if i + 1 < len(tokens) and tokens[i + 1].isdigit():
+                    multi_k = max(1, int(tokens[i + 1]))
+                    i += 2
+                    continue
+                i += 1
+                continue
+            if u == "ON":
+                if i + 1 < len(tokens):
+                    pid = tokens[i + 1].strip().lower()
+                    i += 2
+                    continue
+                i += 1
+                continue
+            if t.isdigit() and gen_target is None:
                 gen_target = int(t)
+            i += 1
         pid = pid or self._need_project()
 
         sw = self.client.call("POST", "/api/engine/switch", {"project_id": pid}, read_timeout=60.0)
@@ -423,13 +474,14 @@ class KaiSession:
             "start_best": start_best,
         }
         self._save_run_goal()
-        desc = (f"{gen_target} generations" if gen_target else "forever")
+        desc_parts = []
+        desc_parts.append(f"{gen_target} generations" if gen_target else "forever")
         if budget:
-            desc += f" (budget {budget:.0f}s)"
+            desc_parts.append(f"budget {budget:.0f}s")
         if multi_k:
-            desc += f" with {multi_k} LLMs"
-        return (f"OK running {desc} on {pid} in the background — WAIT to synchronize, "
-                f"STATUS to watch, STOP to end")
+            desc_parts.append(f"with {multi_k} LLMs")
+        return (f"OK running {', '.join(desc_parts)} on {pid} in the background — WAIT to synchronize, "
+                f"STATUS/BUDGET to watch, STOP to end")
 
     def _hist_len(self, pid: Optional[str] = None) -> int:
         path = f"/api/iterations?project_id={pid}" if pid else "/api/iterations"
@@ -459,7 +511,11 @@ class KaiSession:
             if e.get("project_id") == pid:
                 return {"generation": e.get("generation", 0),
                         "paused": e.get("paused", False),
-                        "best": {"fitness": e.get("best_fitness")}}
+                        "best": {"fitness": e.get("best_fitness")},
+                        "spec_revision": e.get("spec_revision"),
+                        "autofix": e.get("autofix"),
+                        "valid_rate": e.get("valid_rate"),
+                        "fuzzy_top_n": e.get("fuzzy_top_n")}
         return {"generation": 0, "paused": False, "best": {}}
 
     def _run_summary(self, goal: Dict[str, Any], done: bool) -> str:
@@ -505,13 +561,36 @@ class KaiSession:
                 self._run_goal = None
                 self._save_run_goal()
                 return self._run_summary(goal, done=True)
-            if st.get("paused") or time.time() >= deadline:
+            if st.get("paused"):
+                # Paused time does not burn the wall-clock budget — slide the
+                # deadline forward so the remaining budget survives the pause.
+                if goal["ts_deadline"]:
+                    goal["ts_deadline"] += 2.0
+                    self._save_run_goal()
+                break
+            if time.time() >= deadline:
                 break
             time.sleep(2.0)
         st = self._engine_entry(goal["pid"])
         state = "paused externally" if st.get("paused") else "still running"
         return (f"OK {state} — " + self._run_progress(goal, st)
                 + f", best fitness {(st.get('best') or {}).get('fitness')} — WAIT again or STOP")
+
+    def cmd_budget(self, arg: str) -> str:
+        """Show the session's in-flight run budget: generations scored so far
+        vs target, and time remaining (paused time excluded via WAIT)."""
+        goal = self._run_goal
+        if not goal:
+            raise KaiError("no run in progress — RUN first (STOP ended the last one?)")
+        done = max(0, self._hist_len(goal["pid"]) - goal["start_hist"])
+        parts = []
+        if goal["gen_target"]:
+            parts.append(f"{done}/{goal['gen_target']} generations scored")
+        else:
+            parts.append("forever (no generation limit)")
+        if goal["ts_deadline"]:
+            parts.append(f"{max(0.0, goal['ts_deadline'] - time.time()):.0f}s remaining")
+        return f"OK budget on {goal['pid']}: " + ", ".join(parts)
 
     def cmd_pause(self, arg: str) -> str:
         body: Dict[str, Any] = {"paused": True}
@@ -559,6 +638,45 @@ class KaiSession:
                 f"metrics: {' '.join(f'{k}={v}' for k, v in (res.get('metrics') or {}).items()) or '-'}\n"
                 f"PATH {res.get('source_path')}")
         return head + "\n" + (res.get("code") or "")
+
+    def cmd_fuzzy(self, arg: str) -> str:
+        """Opt-in prompt diversity (KAI FUZZY <n>): n = 0 keeps the champion
+        as the prompt basis (default); n > 0 seeds each generation's prompt
+        with a RANDOM one of the top n scored iterations.  Also feeds the
+        mule its own recent outcomes.  Runtime only — resets on restart."""
+        tokens = arg.split()
+        n = 0
+        for t in tokens:
+            if t.isdigit():
+                n = int(t)
+                break
+        pid = self._parse_on(arg) or self._need_project()
+        res = self.client.call("POST", "/api/engine/fuzzy",
+                               {"project_id": pid, "top_n": n}, read_timeout=30.0)
+        if not res.get("ok"):
+            raise KaiError(res.get("error", "fuzzy failed"))
+        eff = int(res.get("top_n", 0))
+        state = f"ON (top {eff})" if eff else "OFF (champion only)"
+        return f"OK {pid} fuzzy prompt basis: {state}"
+
+    def cmd_score(self, arg: str) -> str:
+        """Score an arbitrary file through the project's full
+        build+verify+score pipeline — no engine, no run, no ceremony.
+        Returns metrics + timings; the audit copy lands under runs/score_*."""
+        tokens = arg.split()
+        if not tokens:
+            raise KaiError("SCORE <path> [ON <pid>] — the source file to score")
+        path = tokens[0]
+        pid = self._parse_on(" ".join(tokens[1:])) or self._need_project()
+        res = self.client.call("POST", f"/api/projects/{pid}/score",
+                               {"path": path}, read_timeout=600.0)
+        if not res.get("ok"):
+            raise KaiError(res.get("error", "score failed"))
+        metrics = res.get("metrics") or {}
+        timings = res.get("timings") or {}
+        parts = " ".join(f"{k}={v}" for k, v in metrics.items())
+        tstr = f" ({', '.join(f'{k}={v:.1f}s' for k, v in timings.items())})" if timings else ""
+        return f"OK {pid} scored {path}: {parts}{tstr} — audit: {res.get('gen_dir')}"
 
     def cmd_smoke(self, arg: str) -> str:
         pid = self._parse_on(arg) or arg.strip() or self._need_project()
@@ -944,8 +1062,14 @@ class KaiSession:
                 return self.cmd_run(rest)
             if cmd == "FORGE":
                 return self.cmd_forge(rest)
+            if cmd == "SCORE":
+                return self.cmd_score(rest)
+            if cmd == "FUZZY":
+                return self.cmd_fuzzy(rest)
             if cmd == "WAIT":
                 return self.cmd_wait(rest)
+            if cmd == "BUDGET":
+                return self.cmd_budget(rest)
             if cmd == "PAUSE":
                 return self.cmd_pause(rest)
             if cmd == "RESUME":

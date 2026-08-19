@@ -55,6 +55,10 @@ class FakeEngine:
         self.set_multi_calls.append(n)
         return n
 
+    def set_fuzzy(self, n):
+        self.fuzzy_top_n = n
+        return n
+
 
 def _live_server(tmp_cfg, registry, mutate=None):
     """(server, base_url) for a live DashboardServer on an ephemeral port.
@@ -354,6 +358,61 @@ def test_engine_multi_scoped_to_pid(api):
     assert r.json()["multi"] == 5
     assert srv.engines["b-proj"]._multi == 5
     assert srv.engines["a-proj"]._multi == 2  # untouched
+
+
+def test_engine_fuzzy_endpoint(api):
+    srv, base = api
+    _seed_engines(srv, ["a-proj"])
+    r = requests.post(base + "/api/engine/fuzzy", json={"project_id": "a-proj", "top_n": 4},
+                      timeout=5)
+    assert r.status_code == 200 and r.json() == {"ok": True, "project_id": "a-proj", "top_n": 4}
+    assert srv.engines["a-proj"].fuzzy_top_n == 4
+
+
+def test_score_endpoint_scores_file(api, tmp_path):
+    """SCORE any file: full build+verify+score pipeline, no engine needed."""
+    srv, base = api
+    spec = _spec("score-ep")
+    spec["steps"]["build"] = {"program": "gcc",
+                              "args": ["-O2", "{candidate}", "-o", "{artifact}"],
+                              "timeout": 60}
+    spec["steps"]["score"] = [{
+        "program": "python3",
+        "args": ["-c", "import time; print('ms=1.2')"],
+        "timeout": 60,
+        "parse": [{"type": "regex", "pattern": "(?P<ms>[\\d.]+)"}],
+    }]
+    requests.post(base + "/api/projects", json={"id": "score-ep", "spec": spec}, timeout=5)
+    src = tmp_path / "anywhere.c"
+    src.write_text("int main(void){return 0;}")
+    r = requests.post(base + "/api/projects/score-ep/score",
+                      json={"path": str(src)}, timeout=120)
+    d = r.json()
+    assert d["ok"] is True
+    assert d["metrics"] == {"ms": 1.2}
+    assert "score_" in d["gen_dir"]
+
+
+def test_score_endpoint_kai_command(api, tmp_path):
+    srv, base = api
+    spec = _spec("score-kai")
+    spec["steps"]["build"] = {"program": "gcc",
+                              "args": ["-O2", "{candidate}", "-o", "{artifact}"],
+                              "timeout": 60}
+    spec["steps"]["score"] = [{
+        "program": "python3",
+        "args": ["-c", "import time; print('ms=3.4')"],
+        "timeout": 60,
+        "parse": [{"type": "regex", "pattern": "(?P<ms>[\\d.]+)"}],
+    }]
+    requests.post(base + "/api/projects", json={"id": "score-kai", "spec": spec}, timeout=5)
+    src = tmp_path / "cand.c"
+    src.write_text("int main(void){return 0;}")
+    body = f"PROJECT score-kai\nSCORE {src}"
+    r = requests.post(base + "/kai", data=body.encode(), timeout=120)
+    assert r.status_code == 200
+    assert "OK score-kai scored" in r.text
+    assert "ms=3.4" in r.text
 
 
 def test_engine_stop_removes_from_pool(api):

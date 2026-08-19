@@ -5,6 +5,61 @@ All notable changes to KAISEN are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.2-alpha] — 2026-08-19
+
+Second field-test release: the operator loop made first-class, budget and
+staleness correctness, and opt-in diversity — all from real campaign pain.
+
+### Added
+
+- **`SCORE <path> [ON <pid>]`** (KAI + `POST /api/projects/{pid}/score`):
+  score any file through the project's full build+verify+score pipeline with
+  no engine and no run — the operator writes a candidate, the harness scores
+  it, the result lands as an audit copy + `result.json` under `runs/score_*`.
+- **`FUZZY <n> [ON <pid>]`** (KAI + `POST /api/engine/fuzzy`): opt-in prompt
+  diversity — each generation is seeded with a random one of the top N scored
+  iterations instead of the champion, and the prompt also carries the mule's
+  own last 10 scored outcomes with delta vs champion.  Default off; runtime
+  only (resets on restart).
+- **`BUDGET`** KAI command: in-flight run's budget at a glance (scored so far
+  vs target + time remaining).
+- **Two-stage scoring** (`stage: screen|confirm` on score steps): the
+  confirm metric — not the noisy screen — is what selects the champion;
+  early-abort never kills a confirm benchmark.  GUI-safe (spec field passes
+  through untouched).
+- **Smoke outcomes persisted** to `projects/<id>/smoke_results.json` (capped
+  history) and the daemon log — a smoke that outlives the HTTP read timeout
+  is still readable afterwards.
+- **Per-generation diff summary**: `runs/gen_NNNN/diff.json` with line-level
+  diff counts against `data.baseline_source` for every scored generation.
+- **Valid-rate telemetry**: STATUS/API show rolling valid-rate and per-outcome
+  counts — a toxic run is visible at a glance.
+- **Baseline drift guard**: `data.baseline_source` hash recorded in state.json;
+  a change since the last run is logged loudly (outcome
+  `baseline_source_changed`) instead of scoring against a stale reference.
+- **Retention policy**: opt-in `engine.retention {enabled, keep_last,
+  keep_best}` prunes old `runs/gen_*` dirs (champion + in-flight always kept).
+- **Autofix knobs declarative**: project spec `engine.autofix {tries, repair}`
+  participates in the cap chain (KAI override > spec > config) and STATUS
+  shows the active policy.
+
+### Fixed
+
+- **`RUN FOR <secs>` is a time budget only** — no longer also parses as
+  "21600 generations".  `RUN <n>` = generations, `RUN FOR <secs>` = time,
+  both = whichever comes first.  Paused time no longer burns the wall-clock
+  budget (WAIT slides the deadline while the engine is paused).
+- **Spec changes apply at the next generation**: engine and workers re-read
+  `project.json` per generation, so step timeout bumps take effect without a
+  restart; STATUS shows the active `spec_revision`.
+- **Engine switch uses the temp registry** for temp projects (workers resolve
+  the project's own root) — temp runs no longer leak into `projects/`.
+
+### Changed
+
+- `engine.autofix` and `engine.retention` are validated spec fields;
+  `smoke_results.json` and `runs/score_*` audit dirs are gitignored.
+
 ## [0.1.1-alpha] — 2026-08-18
 
 First field-test release.  Feedback from real runs (compressor-speedup task,

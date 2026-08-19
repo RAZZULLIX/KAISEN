@@ -28,6 +28,7 @@ class ProjectState:
         self.data.setdefault("llm_paused", False)
         self.data.setdefault("active", False)
         self.data.setdefault("baseline_code_path", None)
+        self.data.setdefault("baseline_source_hash", None)  # drift guard
 
     # -- accessors --------------------------------------------------------
 

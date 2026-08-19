@@ -319,6 +319,7 @@ def run_pipeline(
             return bad
         emit("verify", {"index": i, "status": "done"})
 
+    confirm: Dict[str, Any] = {}
     for i, step in enumerate(steps.get("score", []) or []):
         step = _materialize_inline(step, project, "score", i)
         cmd = expand_command(step, project, candidate, artifact, workdir)
@@ -327,6 +328,13 @@ def run_pipeline(
         if not ok:
             return _fail("score", "guardrail_denied", reason, timings=timings)
         emit("score", {"index": i, "status": "running"})
+
+        # Two-stage scoring: a step tagged stage "confirm" is the robust
+        # measurement that selection uses; screen steps are the cheap screen.
+        # Early-abort only applies to SCREEN steps — never kill a confirm
+        # benchmark early on a live telemetry guess.
+        is_confirm = str((step.get("stage") or "screen")).lower() == "confirm"
+        step_abort = {} if is_confirm else abort_rules
 
         samples = [0]
 
@@ -341,7 +349,7 @@ def run_pipeline(
             samples[0] += 1
             if samples[0] < 3:
                 return  # cold-start noise: don't kill on the first samples
-            for key, rule in abort_rules.items():
+            for key, rule in step_abort.items():
                 if key not in live:
                     continue
                 try:
@@ -371,8 +379,11 @@ def run_pipeline(
             )
         combined = (res.get("stdout") or "") + "\n" + (res.get("stderr") or "")
         step_metrics = parse_metrics(combined, step.get("parse", []))
+        if is_confirm:
+            confirm.update(step_metrics)
         score_details.append({
             "index": i,
+            "stage": "confirm" if is_confirm else "screen",
             "exit": res.get("returncode"),
             "seconds": round(timings[f"score{i}"], 3),
             "max_rss_bytes": res.get("max_rss_bytes"),
@@ -414,6 +425,7 @@ def run_pipeline(
         "artifact": artifact,
         "timings": timings,
         "score_details": score_details,
+        "confirm_metrics": confirm,
         "build_fixes": build_fixes,
         "stdout_tail": "",
         "stderr_tail": "",

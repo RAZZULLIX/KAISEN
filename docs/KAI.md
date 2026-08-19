@@ -49,7 +49,10 @@ deliberately tolerant, because LLMs decorate everything:
 | `PROJECT <id>` | select the session project (must exist) |
 | `STATUS` | engine + pool overview, per-project |
 | `SPEC [id]` | the project's spec: steps, metrics, goal |
-| `RUN [<n>] [FOR <secs>] [WITH <k>] [ON <pid>]` | start evolution (forever by default), background |
+| `RUN [<n>] [FOR <secs>] [WITH <k>] [ON <pid>]` | start evolution (forever by default), background. `<n>` = stop after n SCORED generations; `FOR <secs>` = time budget (paused time excluded — only burns while the engine runs); both = whichever comes first |
+| `BUDGET` | the in-flight run's budget: scored so far vs target + time remaining |
+| `SCORE <path> [ON <pid>]` | score any file through the project's pipeline — no engine, no run (audit copy under `runs/score_*`) |
+| `FUZZY <n> [ON <pid>]` | opt-in prompt diversity: random top-N scored basis per generation; also feeds the prompt the last 10 scored outcomes. 0 = off (default). Runtime only |
 | `WAIT [<secs>]` | block until the in-flight run finishes (or snapshot) |
 | `PAUSE` / `RESUME` / `STOP [ON <pid>]` | engine controls |
 | `BEST [id]` | champion source + metrics — resolves real and temp projects (via `/api/projects/{pid}/best`) |

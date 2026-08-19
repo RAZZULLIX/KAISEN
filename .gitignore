@@ -18,6 +18,7 @@ projects/*/results.csv
 projects/*/memos/
 projects/*/lessons.txt
 projects/*/keywords.txt
+projects/*/smoke_results.json
 
 # legacy / old harness data (kept locally, not published)
 legacy/
