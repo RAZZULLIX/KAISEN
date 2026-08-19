@@ -6,6 +6,11 @@ Layout: .kaisen_snapshots/
   <project_id>/<snap_id>/…   — full project copy minus runs/best/scratch
   global/<snap_id>/…         — config.json + ui_prefs.json copies
   meta.json per snapshot: {created, reason, kind}
+
+Note: seen_hashes.json is DELIBERATELY not part of a snapshot — reverting
+a project to an earlier state does NOT reset the visited set, so the engine
+never re-evaluates code it has already scored (the memory that a candidate
+was tried survives the undo of everything else).
 """
 
 from __future__ import annotations

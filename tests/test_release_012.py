@@ -12,8 +12,10 @@ from kaisen.config import FrameworkConfig
 from kaisen.engine import ProjectEngine
 from kaisen.kai import KaiSession
 from kaisen.llm import ModelOrchestrator
+from kaisen.memory import ProjectMemory
 from kaisen.pipeline import run_pipeline
 from kaisen.projects import ProjectRegistry, validate_spec
+from kaisen.skills import semantic_hash, semantic_hash_file
 from kaisen.workers import _setup_build_cache
 
 
@@ -291,6 +293,65 @@ def test_spec_reload_picks_up_timeouts(tmp_path):
     (project.path / "project.json").write_text(json.dumps(spec2))
     project.reload()
     assert project.spec["steps"]["build"]["timeout"] == 99
+
+
+# ----------------------------------------------------------------------
+# memory correctness: language-aware hashing + keyword counter
+# ----------------------------------------------------------------------
+
+def test_semantic_hash_language_aware():
+    """On python, // is floor division, not a comment — hashes must differ."""
+    assert semantic_hash("x = a // b", "python") != semantic_hash("x = a", "python")
+    # and the C normalizer's comment strip is still intact for C itself
+    assert semantic_hash("x = a // comment", "c") == semantic_hash("x = a", "c")
+
+
+def test_semantic_hash_file_infers_language(tmp_path):
+    p = tmp_path / "code.py"
+    p.write_text("x = a // b")
+    assert semantic_hash_file(p) == semantic_hash("x = a // b", "python")
+
+
+def test_engine_dedup_uses_project_language(tmp_path):
+    """Engine dedup must hash with the project language, not the C default."""
+    eng = _make_engine(tmp_path, spec={
+        "id": "pydedup", "name": "pydedup", "language": "python", "artifact_name": "program",
+        "steps": {"build": {"program": "python3", "args": [], "timeout": 60}, "verify": [], "score": []},
+        "metrics": {"ms": {"direction": "lower"}},
+    })
+    g1 = eng._make_gen_dir(1)
+    g2 = eng._make_gen_dir(2)
+    assert eng._dedup_check("x = a\n", 1, g1) is False
+    # semantically distinct under python normalizer — must NOT be a duplicate
+    assert eng._dedup_check("x = a // b\n", 2, g2) is False
+
+
+def test_keyword_counts_filters_stopwords(tmp_path):
+    registry = ProjectRegistry(tmp_path / "projects")
+    project = registry.create("kw", {
+        "id": "kw", "name": "kw", "language": "c", "artifact_name": "program",
+        "steps": {"build": {"program": "gcc", "args": [], "timeout": 60}, "verify": [], "score": []},
+        "metrics": {"ms": {"direction": "lower"}},
+    })
+    mem = ProjectMemory(project)
+    (project.path / "lessons.txt").write_text("the and simd unroll the cache_line simd")
+    counts = mem.keyword_counts(limit=10)
+    assert "simd" in counts and counts["simd"] == 2
+    assert "the" not in counts and "and" not in counts
+
+
+def test_keyword_counts_user_allowlist(tmp_path):
+    registry = ProjectRegistry(tmp_path / "projects")
+    project = registry.create("kw2", {
+        "id": "kw2", "name": "kw2", "language": "c", "artifact_name": "program",
+        "steps": {"build": {"program": "gcc", "args": [], "timeout": 60}, "verify": [], "score": []},
+        "metrics": {"ms": {"direction": "lower"}},
+    })
+    mem = ProjectMemory(project)
+    (project.path / "keywords.txt").write_text("simd\nbranchless\n")
+    (project.path / "lessons.txt").write_text("simd simd branchless cache the and")
+    counts = mem.keyword_counts(limit=10)
+    assert set(counts) == {"simd", "branchless"}
 
 
 # ----------------------------------------------------------------------

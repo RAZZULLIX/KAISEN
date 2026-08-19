@@ -606,7 +606,11 @@ class ProjectEngine:
         return None
 
     def _dedup_check(self, code: str, gen: int, gen_dir: Path) -> bool:
-        h = skills_mod.semantic_hash(code)
+        # The project language matters: semantic_hash defaults to the C
+        # normalizer, which treats `//` as a comment — on python (and other
+        # hash-comment languages) floor division would be stripped before
+        # hashing, silently discarding distinct candidates as duplicates.
+        h = skills_mod.semantic_hash(code, self._code_lang)
         seen_file = self.project.path / "seen_hashes.json"
         seen = set(load_json(seen_file, []) or [])
         if h in seen:

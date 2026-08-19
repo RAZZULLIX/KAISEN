@@ -341,13 +341,21 @@ def normalize_code(code: str, language: str = "c") -> str:
 
 
 def semantic_hash(code: str, language: str = "c") -> str:
+    """Content hash through the language-aware normalizer.  Callers MUST pass
+    the project language — the default 'c' treats `//` as a comment, so on
+    hash-comment languages (python, shell, ruby, …) floor division would be
+    stripped before hashing and distinct candidates could collide."""
     return hashlib.sha256(normalize_code(code, language).encode("utf-8")).hexdigest()
 
 
-def semantic_hash_file(path: str | Path) -> str:
+def semantic_hash_file(path: str | Path, language: Optional[str] = None) -> str:
+    """Hash a file's content with the language inferred from its extension
+    (falls back to the raw byte hash when unreadable or unknown)."""
+    from .languages import lang_from_ext
+    lang = language or lang_from_ext(Path(path).suffix) or "c"
     try:
         with open(path, "r", encoding="utf-8", errors="ignore") as f:
-            return semantic_hash(f.read())
+            return semantic_hash(f.read(), lang)
     except Exception:
         return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 

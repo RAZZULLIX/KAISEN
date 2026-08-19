@@ -19,6 +19,40 @@ MEMOS_DIR = "memos"
 FAILURE_KEYWORDS = ("fail", "error", "timeout", "rejected", "skip", "crash",
                     "violat", "no_metrics", "no_code", "cancelled")
 
+# Stopwords for the keyword counter: English function words + generic
+# code tokens.  Filtering these out is what makes the line read as
+# "technique frequency" instead of prose word count.  Hardcoded by design —
+# the counter must never cost an LLM call.
+_STOPWORDS = {
+    "the", "and", "for", "int", "void", "return", "char", "float", "double",
+    "long", "short", "unsigned", "signed", "const", "static", "struct", "if",
+    "else", "while", "do", "switch", "case", "break", "continue", "include",
+    "define", "endif", "ifdef", "ifndef", "size_t", "uint", "bool", "true",
+    "false", "null", "this", "that", "with", "from", "was", "are", "but",
+    "not", "have", "has", "had", "all", "can", "will", "would", "should",
+    "could", "then", "than", "there", "their", "they", "his", "her", "him",
+    "she", "you", "your", "its", "out", "into", "over", "under", "about",
+    "also", "very", "just", "get", "got", "put", "set", "one", "two", "three",
+    "first", "second", "third", "new", "old", "use", "used", "using", "way",
+    "thing", "things", "much", "many", "more", "most", "some", "any", "each",
+    "every", "only", "same", "different", "other", "another", "such", "no",
+    "yes", "end", "file", "data", "code", "test", "tests", "make", "made",
+    "run", "runs", "running", "time", "times", "line", "lines", "value",
+    "values", "result", "results", "add", "added", "change", "changed",
+    "changes", "try", "tries", "patch", "bit", "bits", "byte", "bytes",
+    "loop", "loops", "function", "functions", "compiler", "compile",
+    "compiled", "using", "inside", "call", "calls", "called", "check",
+    "checking", "better", "best", "worse", "worst", "fast", "faster",
+    "slow", "slower", "big", "small", "large", "larger", "smaller",
+    "much", "little", "less", "least", "great", "good", "bad", "well",
+    "here", "there", "where", "what", "which", "who", "whom", "whose",
+    "how", "why", "when", "while", "was", "were", "been", "being", "am",
+    "is", "are", "be", "been", "did", "does", "doing", "done", "own",
+    "mine", "ours", "theirs", "hers", "self", "off", "on", "in", "at",
+    "by", "to", "of", "as", "or", "nor", "so", "yet", "up", "down",
+}
+
+
 
 class ProjectMemory:
     def __init__(self, project: Project, state: Any = None):
@@ -88,9 +122,16 @@ class ProjectMemory:
 
     # -- keyword counters --------------------------------------------------
     def keyword_counts(self, limit: int = 20) -> Dict[str, int]:
-        """Count occurrences of keywords across memory artifacts — lets the
-        model see how often a technique failed without reading everything."""
+        """Count occurrences of technique-signal tokens across lessons and
+        recent memos — lets the model see how often a technique came up
+        without reading everything.  A user-supplied keywords.txt (if
+        present) names the exact tokens to track; otherwise a hardcoded
+        stopword filter removes prose noise.  No LLM calls — deterministic
+        and cheap."""
         counter: Counter = Counter()
+        # User-supplied technique names (keywords.txt) act as an explicit
+        # allowlist when present — the reader is cheap and deterministic.
+        allowed = {w.lower() for w in self.load_keywords() if w.strip()}
         for path in (self.lessons_path,):
             if not path.exists():
                 continue
@@ -99,12 +140,18 @@ class ProjectMemory:
             except Exception:
                 continue
             words = re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", text)
-            counter.update(words)
+            if allowed:
+                counter.update(w for w in words if w.lower() in allowed)
+            else:
+                counter.update(w for w in words if w.lower() not in _STOPWORDS)
         if self.memos_dir.exists():
             for p in list(self.memos_dir.iterdir())[-10:]:
                 try:
                     words = re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", p.read_text(encoding="utf-8"))
-                    counter.update(words)
+                    if allowed:
+                        counter.update(w for w in words if w.lower() in allowed)
+                    else:
+                        counter.update(w for w in words if w.lower() not in _STOPWORDS)
                 except Exception:
                     pass
         return dict(counter.most_common(limit))

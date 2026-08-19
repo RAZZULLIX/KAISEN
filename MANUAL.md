@@ -558,6 +558,10 @@ config) first. Settings → Snapshots: list by reason/date, restore with
 one click. KAI: `SNAPSHOT LIST|TAKE|RESTORE <id> [ON <pid>]`. Stored in
 `.kaisen_snapshots/` (gitignored, pruned automatically).
 
+Restoring a snapshot does **not** reset `seen_hashes.json` — the visited
+set is deliberately excluded so code already scored is never re-evaluated
+(the memory of what was tried survives the undo of everything else).
+
 ---
 
 ## 16. Notes
