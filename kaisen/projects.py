@@ -115,6 +115,9 @@ def validate_spec(spec: Dict[str, Any]) -> List[str]:
                         errors.append("engine.autofix.repair: must be an integer >= 0 (0 = LLM repair off)")
                 except (TypeError, ValueError):
                     errors.append("engine.autofix.repair: must be an integer >= 0 (0 = LLM repair off)")
+    bc = eng.get("build_cache")
+    if bc is not None and not isinstance(bc, bool):
+        errors.append("engine.build_cache: must be boolean")
     retention = eng.get("retention")
     if retention is not None:
         if not isinstance(retention, dict):

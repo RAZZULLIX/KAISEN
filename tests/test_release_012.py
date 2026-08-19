@@ -1,6 +1,8 @@
 """0.1.2-alpha: RUN budget semantics, BUDGET/SCORE/FUZZY commands, two-stage
 scoring, baseline drift, retention, valid-rate, diff summary, spec knobs."""
 import json
+import os
+import shutil
 import time
 from pathlib import Path
 
@@ -12,6 +14,7 @@ from kaisen.kai import KaiSession
 from kaisen.llm import ModelOrchestrator
 from kaisen.pipeline import run_pipeline
 from kaisen.projects import ProjectRegistry, validate_spec
+from kaisen.workers import _setup_build_cache
 
 
 # ----------------------------------------------------------------------
@@ -288,3 +291,136 @@ def test_spec_reload_picks_up_timeouts(tmp_path):
     (project.path / "project.json").write_text(json.dumps(spec2))
     project.reload()
     assert project.spec["steps"]["build"]["timeout"] == 99
+
+
+# ----------------------------------------------------------------------
+# build cache (opt-in ccache integration)
+# ----------------------------------------------------------------------
+
+def test_build_cache_setup_masquerade_and_env(monkeypatch, tmp_path):
+    bin_dir = tmp_path / "fakebin"
+    bin_dir.mkdir()
+    fake = bin_dir / "ccache"
+    fake.write_text("#!/bin/sh\nexec \"$@\"\n")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.delenv("CCACHE_DIR", raising=False)
+    monkeypatch.delenv("CCACHE_BASEDIR", raising=False)
+    monkeypatch.delenv("CCACHE_MAXSIZE", raising=False)
+    registry = ProjectRegistry(tmp_path / "projects")
+    spec = {
+        "id": "cacheproj", "name": "cacheproj", "language": "c", "artifact_name": "program",
+        "steps": {"build": {"program": "gcc", "args": ["-O2", "{candidate}", "-o", "{artifact}"], "timeout": 60},
+                  "verify": [], "score": []},
+        "metrics": {"ms": {"direction": "lower"}},
+        "engine": {"build_cache": True, "build_cache_max_size": "1G"},
+    }
+    project = registry.create("cacheproj", spec)
+    _setup_build_cache(project)
+    assert os.environ["CCACHE_DIR"] == str(project.path / ".kaisen_cache")
+    assert os.environ["CCACHE_BASEDIR"] == str(project.path)
+    assert os.environ["CCACHE_MAXSIZE"] == "1G"
+    masq = project.path / ".kaisen_cache" / "bin"
+    assert (masq / "gcc").is_symlink() and (masq / "g++").is_symlink()
+    assert str(masq) in os.environ["PATH"]
+
+
+def test_build_cache_off_by_default_noop(monkeypatch, tmp_path):
+    monkeypatch.delenv("CCACHE_DIR", raising=False)
+    monkeypatch.delenv("CCACHE_BASEDIR", raising=False)
+    registry = ProjectRegistry(tmp_path / "projects")
+    spec = {
+        "id": "nocache", "name": "nocache", "language": "c", "artifact_name": "program",
+        "steps": {"build": {"program": "gcc", "args": [], "timeout": 60}, "verify": [], "score": []},
+        "metrics": {"ms": {"direction": "lower"}},
+    }
+    project = registry.create("nocache", spec)
+    before_path = os.environ.get("PATH", "")
+    _setup_build_cache(project)
+    assert os.environ.get("CCACHE_DIR") is None
+    assert os.environ.get("PATH", "") == before_path
+
+
+def test_build_cache_missing_ccache_graceful(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+    registry = ProjectRegistry(tmp_path / "projects")
+    spec = {
+        "id": "no-cc", "name": "no-cc", "language": "c", "artifact_name": "program",
+        "steps": {"build": {"program": "gcc", "args": [], "timeout": 60}, "verify": [], "score": []},
+        "metrics": {"ms": {"direction": "lower"}},
+        "engine": {"build_cache": True},
+    }
+    project = registry.create("no-cc", spec)
+    _setup_build_cache(project)  # must not raise
+    assert "not installed" in capsys.readouterr().out
+
+
+@pytest.mark.skipif(shutil.which("ccache") is None, reason="real ccache not installed")
+def test_build_cache_one_shot_build_still_works(tmp_path):
+    """One-shot compile+link build steps fall through uncached — no breakage."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    shutil.copy(shutil.which("ccache"), bin_dir / "ccache")
+    registry = ProjectRegistry(tmp_path / "projects")
+    spec = {
+        "id": "cache-one", "name": "cache-one", "language": "c", "artifact_name": "program",
+        "steps": {"build": {"program": "gcc", "args": ["-O2", "{candidate}", "-o", "{artifact}"], "timeout": 60},
+                  "verify": [],
+                  "score": [{"program": "python3", "args": ["-c", "import time; print('ms=1.0')"],
+                             "timeout": 30,
+                             "parse": [{"type": "regex", "pattern": "(?P<ms>[\\d.]+)"}]}]},
+        "metrics": {"ms": {"direction": "lower"}},
+        "engine": {"build_cache": True},
+    }
+    project = registry.create("cache-one", spec)
+    os.environ["PATH"] = f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"
+    _setup_build_cache(project)
+    src = tmp_path / "b.c"
+    src.write_text("int main(void){return 0;}")
+    res = run_pipeline(project, src, tmp_path / "w")
+    assert res["ok"] is True
+
+
+@pytest.mark.skipif(shutil.which("ccache") is None, reason="real ccache not installed")
+def test_build_cache_real_cache_hit(tmp_path):
+    """With real ccache: two -c compile phases of the same source share
+    objects (the link step is not cached by ccache — by design)."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    shutil.copy(shutil.which("ccache"), bin_dir / "ccache")
+    registry = ProjectRegistry(tmp_path / "projects")
+    build_py = """#!/usr/bin/env python3
+import os, subprocess, sys
+c, a = sys.argv[1], sys.argv[2]
+obj = os.path.join(os.path.dirname(a), 'obj.o')
+subprocess.run(['gcc', '-O2', '-c', c, '-o', obj], check=True)
+subprocess.run(['gcc', obj, '-o', a], check=True)
+"""
+    spec = {
+        "id": "cachehit", "name": "cachehit", "language": "c", "artifact_name": "program",
+        "steps": {"build": {"program": "harness/build.py", "args": ["{candidate}", "{artifact}"], "timeout": 60},
+                  "verify": [],
+                  "score": [{"program": "python3", "args": ["-c", "import time; print('ms=1.0')"],
+                             "timeout": 30,
+                             "parse": [{"type": "regex", "pattern": "(?P<ms>[\\d.]+)"}]}]},
+        "metrics": {"ms": {"direction": "lower"}},
+        "engine": {"build_cache": True},
+    }
+    project = registry.create("cachehit", spec)
+    (project.path / "harness" / "build.py").write_text(build_py)
+    (project.path / "harness" / "build.py").chmod(0o755)
+    os.environ["PATH"] = f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"
+    _setup_build_cache(project)
+    src = tmp_path / "a.c"
+    src.write_text("int main(void){return 0;}")
+    work1 = tmp_path / "w1"
+    work2 = tmp_path / "w2"
+    run_pipeline(project, src, work1)
+    import subprocess
+    env = dict(os.environ)
+    run_pipeline(project, src, work2)
+    s1 = subprocess.run(["ccache", "-s"], env=env, capture_output=True, text=True)
+    out1 = s1.stdout
+    assert "Hits:" in out1
+    hits_line = next(l for l in out1.splitlines() if l.strip().startswith("Hits:"))
+    assert int(hits_line.split()[1]) >= 1

@@ -174,7 +174,7 @@ projects/<id>/
 | `steps.score` | list of score commands; must emit parseable metrics. A score step may declare `stage: "screen"|"confirm"` — the CONFIRM step's metric is what selects the champion (robust measurement); screen steps are cheap filters (§6) |
 | `metrics` | `{key: {direction: lower\|higher, weight: float, unit?: str, constraint?: float}}` — at least one required. A `constraint` is a HARD gate: violating it rejects the candidate outright (outcome `constraint_violated`) — no fitness weighting can compensate. Enforce "without changing the output" here, not in a prompt |
 | `telemetry` | `{enabled, progress_token, live_fields}` — harness progress protocol (§6) |
-| `engine` | `{workers, multi, autofix, retention}` — startup sizing (project > config > 1/1); `autofix: {tries, repair}` sets per-project compile-loop caps (KAI override > spec > config); `retention: {enabled, keep_last, keep_best}` opt-in pruning of old `runs/gen_*` dirs (§8) |
+| `engine` | `{workers, multi, autofix, retention, build_cache}` — startup sizing (project > config > 1/1); `autofix: {tries, repair}` sets per-project compile-loop caps (KAI override > spec > config); `retention: {enabled, keep_last, keep_best}` opt-in pruning of old `runs/gen_*` dirs (§8); `build_cache: true` routes the build through a per-project ccache masquerade (`CCACHE_DIR` = `projects/<id>/.kaisen_cache`) so unchanged translation units reuse across generations — off by default, needs ccache on PATH (§6) |
 | `select.hysteresis` | champion replacement threshold; 1 = any improvement, 1.1 = must beat the champion by 10% (values < 1 are clamped to 1) |
 | `guardrails` | `{enabled, allow_extra, deny_extra}` — extra command rules |
 | `prompts` | `{generation_dir, goal, study, lesson}` — prompt templates |
@@ -247,6 +247,15 @@ so a timeout bump lands without a restart. STATUS shows the active
 `spec_revision`. Harness programs run in temp copies; a SMOKE result is
 persisted to `projects/<id>/smoke_results.json` and the daemon log, so a
 smoke that outlives the client timeout is still readable afterwards.
+
+**Build caching (opt-in)**: `engine.build_cache: true` makes the build step
+run through a per-project ccache masquerade — the worker prepends a
+`gcc/g++/clang` symlink dir (`projects/<id>/.kaisen_cache/bin`) to PATH and
+sets `CCACHE_DIR`/`CCACHE_BASEDIR`/`CCACHE_MAXSIZE`, so unchanged
+translation units reuse across generations instead of paying a full rebuild
+for a one-literal change.  Requires `ccache` on PATH; falls back to plain
+builds with a warning otherwise.  Off by default — keep it off for
+non-deterministic toolchains (`cache: false` escape).
 
 ---
 

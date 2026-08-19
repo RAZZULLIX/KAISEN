@@ -42,6 +42,16 @@ staleness correctness, and opt-in diversity — all from real campaign pain.
 - **Autofix knobs declarative**: project spec `engine.autofix {tries, repair}`
   participates in the cap chain (KAI override > spec > config) and STATUS
   shows the active policy.
+- **Opt-in build caching**: `engine.build_cache: true` routes the build
+  step through a per-project ccache masquerade (`CCACHE_DIR` =
+  `projects/<id>/.kaisen_cache`), reusing unchanged translation units across
+  generations — roughly an order of magnitude fewer compile seconds per
+  generation.  caches the compile (`-c`) phase (links are not cached by
+  ccache — by design); the bundled demo harness now splits compile+link so it
+  benefits out of the box.  Requires ccache on PATH; falls back to uncached
+  builds with a warning.  Off by default (`cache: false` escape for
+  non-deterministic toolchains).  Validated with a real ccache direct-hit
+  test and a one-shot fallback test.
 
 ### Fixed
 

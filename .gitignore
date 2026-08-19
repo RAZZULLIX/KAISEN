@@ -10,6 +10,7 @@ kai_runs.json
 
 # runtime artifacts
 projects/*/.kaisen_scripts/
+projects/*/.kaisen_cache/
 projects/*/runs/
 projects/*/best/
 projects/*/state.json

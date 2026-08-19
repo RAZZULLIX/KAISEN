@@ -28,6 +28,43 @@ from .config import get_config
 WORKER_START_TIMEOUT = 15.0
 
 
+def _setup_build_cache(project: Project) -> None:
+    """Opt-in ccache integration for the build step.  When the project
+    spec sets engine.build_cache: true and ccache is on PATH, the worker
+    routes compiler invocations through a per-project masquerade dir so
+    unchanged translation units are reused across generations (keyed on
+    preprocessed source + flags).  Graceful fallback: no ccache -> plain
+    builds with a one-time warning.  Off by default."""
+    spec = project.spec
+    enabled = bool((spec.get("engine") or {}).get("build_cache"))
+    if not enabled:
+        return
+    import shutil
+    ccache = shutil.which("ccache")
+    if not ccache:
+        print(f"[KAISEN] worker: engine.build_cache is on but ccache is not installed — builds run uncached")
+        return
+    cache_dir = project.path / ".kaisen_cache"
+    masq = cache_dir / "bin"
+    try:
+        masq.mkdir(parents=True, exist_ok=True)
+        for name in ("gcc", "g++", "cc", "clang", "clang++"):
+            link = masq / name
+            if not link.exists():
+                os.symlink(ccache, link)
+    except OSError:
+        return
+    os.environ["CCACHE_DIR"] = str(cache_dir)
+    os.environ["CCACHE_MAXSIZE"] = str(
+        (spec.get("engine") or {}).get("build_cache_max_size") or "10G")
+    # BASEDIR makes cache keys path-independent so objects reuse across
+    # machines/checkouts; the compiler still sees the real paths.
+    os.environ["CCACHE_BASEDIR"] = str(project.path)
+    path = os.environ.get("PATH", "")
+    if str(masq) not in path:
+        os.environ["PATH"] = str(masq) + os.pathsep + path
+
+
 def _worker_main(
     worker_id: int,
     project_id: str,
@@ -40,13 +77,11 @@ def _worker_main(
     from pathlib import Path
     from .pipeline import run_pipeline
     from .projects import ProjectRegistry
-    from .util import load_json
 
     # The registry root is passed through: the worker must resolve the
     # project from the SAME root the engine was configured with (custom
     # roots, temp roots, tests) — never from the framework default.
     registry = ProjectRegistry(Path(registry_root))
-    project = registry.require(project_id)
 
     # Quiet mode / affinity: pin this worker to specific cores and/or lower
     # its priority so a busy score job can't drown the dashboard or LLMs.
@@ -96,6 +131,10 @@ def _worker_main(
             break
         emit("starting", {"generation": job.get("generation"), "gen_dir": job.get("workdir")})
         try:
+            # Fresh Project per job: spec changes (timeouts, engine knobs,
+            # build_cache) apply at the NEXT generation without a restart.
+            project = registry.require(project_id)
+            _setup_build_cache(project)
             result = run_pipeline(
                 project,
                 job["candidate"],
