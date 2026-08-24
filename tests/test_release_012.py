@@ -15,7 +15,7 @@ from kaisen.llm import ModelOrchestrator
 from kaisen.memory import ProjectMemory
 from kaisen.pipeline import run_pipeline
 from kaisen.projects import ProjectRegistry, validate_spec
-from kaisen.skills import semantic_hash, semantic_hash_file
+from kaisen.skills import extract_function_names, semantic_hash, semantic_hash_file
 from kaisen.workers import _setup_build_cache
 
 
@@ -304,6 +304,34 @@ def test_semantic_hash_language_aware():
     assert semantic_hash("x = a // b", "python") != semantic_hash("x = a", "python")
     # and the C normalizer's comment strip is still intact for C itself
     assert semantic_hash("x = a // comment", "c") == semantic_hash("x = a", "c")
+
+
+def test_extract_function_names_ignores_control_flow():
+    """The edit-scope guard must not treat `if`/`while`/`switch`/`for` headers
+    (or the variables inside them) as function names."""
+    code = '''
+void compute(int *a, int n) {
+    if (flag) { a[0] = 1; }
+    else if (flag2) { a[1] = 2; }
+    while (busy) { a[2] = 3; }
+    switch (op) { case 1: break; }
+    for (v : arr) { v += 1; }
+    #define WRAP(x) { (x) }
+}
+int helper(int x) { return x; }
+'''
+    names = extract_function_names(code, "c")
+    assert names == {"compute", "helper"}
+    assert "if" not in names and "flag" not in names and "busy" not in names
+    assert "op" not in names and "v" not in names and "WRAP" not in names
+
+
+def test_extract_function_names_ignores_control_flow_js():
+    """Same guard in the fallback branch (javascript/TS/Java/…)."""
+    names = extract_function_names(
+        "function foo() { if (flag) { return 1; } while (busy) { } }",
+        "javascript")
+    assert names == {"foo"}
 
 
 def test_semantic_hash_file_infers_language(tmp_path):

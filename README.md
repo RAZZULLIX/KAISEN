@@ -176,7 +176,7 @@ python -m pytest tests/
 Covers the HTTP API + engine pool scoping, suggest gates, every
 deterministic autofix rule, the KAI grammar, tier routing, chat templates,
 the D language registry, temp-project best resolution, two-stage scoring,
-budget semantics, and the LLM repair flow (217 tests, no network, temp
+budget semantics, and the LLM repair flow (219 tests, no network, temp
 dirs only).
 
 ## Layout

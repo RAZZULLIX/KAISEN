@@ -177,6 +177,26 @@ def ensure_headers(code: str, language: str = "c") -> str:
     return ("\n".join(missing) + "\n\n" + code) if missing else code
 
 
+# Control-flow keywords that can introduce a `(…) {` block that is NOT a
+# function body.  `extract_function_names` must never report these (or the
+# variable after them) as a function name, or the edit-scope guard would
+# misfire on ordinary loops/branches.
+_CONTROL_HEADER_KEYWORDS = frozenset({
+    "if", "else", "while", "for", "switch", "case", "catch", "do",
+    "return", "goto", "sizeof", "typeof", "alignof", "synchronized", "await",
+})
+
+
+def _is_control_header(name: str, prefix: str) -> bool:
+    """True when `name` is actually the subject of a control-flow header —
+    i.e. the token immediately before it (after whitespace) is a keyword like
+    `if`/`while`/`else`/`switch`/`for`/`catch`.  Also a name that IS a
+    keyword can never be a function."""
+    if name in _CONTROL_HEADER_KEYWORDS:
+        return True
+    return bool(re.search(r"\b(?:if|else|while|for|switch|case|catch|do|return|goto|sizeof|typeof|alignof|synchronized|await)\s*$", prefix))
+
+
 def extract_function_names(code: str, language: str = "c") -> set:
     """Best-effort list of top-level function names defined in `code`, used
     by the edit-scope guard.  Heuristic (regex, not a parser) and
@@ -188,18 +208,28 @@ def extract_function_names(code: str, language: str = "c") -> set:
     lang = normalize_lang(language)
     names: set = set()
     if lang in ("c", "cpp", "cuda", "d"):
+        # Preprocessor lines (#define WRAP(x) { … }) are not function
+        # definitions — drop them before matching (consistent with
+        # normalize_code, which also strips preprocessor directives).
+        clean = "\n".join(l for l in code.splitlines() if not l.lstrip().startswith("#"))
         for m in re.finditer(
             r"\b(?:static\s+|inline\s+|extern\s+)*"
             r"(?:[\w:*&<>\s]+?)\s+(\w+)\s*\([^;{}]*?\)\s*\{",
-            code,
+            clean,
         ):
-            names.add(m.group(1))
+            name = m.group(1)
+            if _is_control_header(name, clean[:m.start(1)]):
+                continue
+            names.add(name)
     elif lang == "python":
         for m in re.finditer(r"^\s*(?:async\s+)?def\s+(\w+)\s*\(", code, re.M):
             names.add(m.group(1))
     else:
         for m in re.finditer(r"\b\w+\s+(\w+)\s*\([^;{}]*?\)\s*\{", code):
-            names.add(m.group(1))
+            name = m.group(1)
+            if _is_control_header(name, code[:m.start(1)]):
+                continue
+            names.add(name)
     return names
 
 
