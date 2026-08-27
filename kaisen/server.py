@@ -304,6 +304,7 @@ class DashboardServer:
         r.add_get("/api/projects", self._api_projects_list)
         r.add_get("/api/suggest/status", self._api_suggest_status)
         r.add_post("/api/engine/autofix", self._api_engine_autofix)
+        r.add_post("/api/engine/workers", self._api_engine_workers)
         r.add_post("/api/projects", self._api_projects_create)
         r.add_post("/api/projects/suggest", self._api_projects_suggest)
         r.add_post("/kai", self._api_kai)
@@ -1381,6 +1382,24 @@ class DashboardServer:
         settings = eng.set_autofix_settings(max_tries=tries, repair_max=repair)
         return _json({"ok": True, "project_id": eng.project.id,
                       "settings": settings, "effective": eng._autofix_effective()})
+
+    async def _api_engine_workers(self, request):
+        """Runtime resource knob: resize one engine's worker pool to exactly
+        `count` processes (adds or removes; removing a busy worker kills its
+        in-flight evaluation). POST {"project_id", "count"}."""
+        data = await request.json() if request.can_read_body else {}
+        pid = str(data.get("project_id") or "") if isinstance(data, dict) else ""
+        try:
+            count = int(data.get("count", 0)) if isinstance(data, dict) else 0
+        except (TypeError, ValueError):
+            return _json({"ok": False, "error": "count must be an integer"}, 400)
+        if count < 1:
+            return _json({"ok": False, "error": "count must be >= 1"}, 400)
+        eng = self._engine_for(pid or None)
+        if eng is None:
+            return _json({"ok": False, "error": "no engine running"}, 400)
+        eff = await asyncio.to_thread(eng.set_workers, count)
+        return _json({"ok": True, "project_id": eng.project.id, "workers": eff})
 
     async def _api_custom_code(self, request):
         data = await request.json()

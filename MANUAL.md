@@ -352,9 +352,15 @@ One engine per running project; several engines form the pool.
 - **Outcomes** are recorded per generation in the iteration history:
   `ok` (new best), `valid`, `build_fail`, `verify_fail`, `no_metrics`,
   `no_code`, `llm_repair`, `scope_violation`, `baseline_source_changed`,
-  `protected_data_modified`, `guardrail_denied` — visible in the GUI and
-  via KAI `WAIT`/`STATUS`. Scored generations also get a diff summary
-  (`runs/gen_NNNN/diff.json`) against the baseline for harvesting.
+  `baseline_reeval`, `protected_data_modified`, `guardrail_denied` —
+  visible in the GUI and via KAI `WAIT`/`STATUS`. Scored generations also
+  get a diff summary (`runs/gen_NNNN/diff.json`) against the baseline for
+  harvesting.
+- **Baseline re-evaluation** — when `data/baseline_source` changes
+  mid-run, the engine detects the hash change (`baseline_source_changed`),
+  queues ONE re-evaluation through the real pipeline, and forces the
+  result to become the champion (`baseline_reeval`), so selection never
+  compares against a champion measured on the stale baseline.
 
 ---
 
@@ -690,6 +696,10 @@ The GUI itself is an HTTP client; everything is available over
 - `POST /api/engine/switch|start|stop|pause` — pool controls
   (all take `project_id`)
 - `POST /api/engine/multi` — parallel pipelines per project
+- `POST /api/engine/workers` — runtime worker-count control:
+  `{"project_id", "count"}` resizes one engine's pool (adds idle workers,
+  or removes workers — removing a busy worker kills its in-flight
+  evaluation); `STATUS` shows the current count
 - `POST /api/active/custom_code`, `POST /api/queue/custom_code` —
   inject code as a generation
 - `GET /api/iterations?project_id=` — generation history

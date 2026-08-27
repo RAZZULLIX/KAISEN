@@ -377,6 +377,8 @@ class KaiSession:
         af = (entry or {}).get("autofix") or {}
         if af:
             extras.append(f"autofix={af['max_tries']}/{af['repair_max']}")
+        if (entry or {}).get("workers") is not None:
+            extras.append(f"workers={entry['workers']}")
         if extras:
             extras = " (" + " ".join(extras) + ")"
         else:
@@ -628,7 +630,8 @@ class KaiSession:
                         "spec_revision": e.get("spec_revision"),
                         "autofix": e.get("autofix"),
                         "valid_rate": e.get("valid_rate"),
-                        "fuzzy_top_n": e.get("fuzzy_top_n")}
+                        "fuzzy_top_n": e.get("fuzzy_top_n"),
+                        "workers": e.get("workers")}
         return {"generation": 0, "paused": False, "best": {}}
 
     def _run_summary(self, goal: Dict[str, Any], done: bool) -> str:

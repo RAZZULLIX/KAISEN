@@ -220,6 +220,9 @@ class ProjectEngine:
         self._last_log: List[Dict[str, Any]] = []
         self._custom_queue: List[Dict[str, Any]] = []
         self._deepwork_last = 0
+        # One baseline re-evaluation is queued per baseline_source change;
+        # this latch prevents re-queueing every generation while it runs.
+        self._baseline_reeval_pending = False
         self._worker_count = worker_count
         self._multi = 1
         # Opt-in fuzzy prompt basis: when > 0, each generation's prompt is
@@ -638,8 +641,9 @@ class ProjectEngine:
     def _check_baseline_source(self) -> None:
         """Detect when data.baseline_source changed since the engine (or the
         previous run) recorded it.  A changed baseline means the stored
-        champion was measured against a different file — warn loudly instead
-        of silently scoring against the wrong reference."""
+        champion was measured against a different file — warn loudly AND
+        re-evaluate the new baseline so selection compares against the
+        right number instead of a stale champion."""
         baseline = (self.project.spec.get("data") or {}).get("baseline_source")
         if not baseline:
             return
@@ -661,6 +665,30 @@ class ProjectEngine:
             self.state.save()
             self._emit_state()
             self._log(f"WARNING: baseline source '{baseline}' changed — comparison point is stale")
+            # Queue ONE re-evaluation of the new baseline (never while one is
+            # already in flight); its result becomes the new champion.
+            if not self._baseline_reeval_pending:
+                self._baseline_reeval_pending = True
+                self._queue_baseline_reeval()
+
+    def _queue_baseline_reeval(self) -> None:
+        """Evaluate the (changed) baseline_source through the real pipeline.
+        The result is forced to become the champion in _apply_result — the
+        stored champion was measured against the OLD baseline and is stale."""
+        baseline = (self.project.spec.get("data") or {}).get("baseline_source")
+        if not baseline:
+            return
+        src = self.project.path / baseline
+        if not src.exists():
+            self._baseline_reeval_pending = False
+            self._log(f"baseline re-evaluation skipped: baseline source missing: {src}")
+            return
+        gen = self.state.next_generation()
+        gen_dir = self._make_gen_dir(gen)
+        candidate = gen_dir / f"candidate{self._code_ext}"
+        shutil.copy2(src, candidate)
+        self._log(f"baseline re-evaluation (gen {gen}): {src.name}")
+        self._submit(gen, str(candidate), gen_dir, baseline=True, baseline_reeval=True)
 
     def _prompt_basis(self, champion_path: str, code: str) -> tuple:
         """(code, path) to seed this generation's prompt.  Default: the
@@ -952,6 +980,11 @@ class ProjectEngine:
         spec = self.project.spec
         schema = spec.get("metrics", {})
         baseline = bool(job and job.get("baseline"))
+        reeval = bool(job and job.get("baseline_reeval"))
+        if reeval:
+            # The queued re-evaluation landed (or failed) — allow the next
+            # baseline change to queue another one.
+            self._baseline_reeval_pending = False
         ok = bool(result.get("ok"))
         metrics = result.get("metrics", {})
         outcome = result.get("outcome", "unknown")
@@ -960,6 +993,8 @@ class ProjectEngine:
             entry = {"generation": gen, "outcome": outcome, "detail": result.get("reason", "")[:800]}
             if baseline and not self.state.best.get("fitness"):
                 entry["detail"] = "BASELINE FAILED: " + entry["detail"]
+            elif reeval:
+                entry["detail"] = "BASELINE RE-EVALUATION FAILED: " + entry["detail"]
             self.state.append_history(entry)
             self.state.save()
             self.results.append({**{"generation": gen, "outcome": outcome}, **metrics})
@@ -1012,6 +1047,12 @@ class ProjectEngine:
         direction = score_type.get("direction", "higher")
         if best_f is None:
             improved = True
+        elif reeval:
+            # Baseline re-evaluation: the champion was measured against the
+            # OLD baseline — the re-evaluated baseline IS the comparison
+            # point by definition, regardless of its fitness vs the stale
+            # champion.
+            improved = True
         elif direction == "lower":
             improved = fitness < float(best_f) / hysteresis
         else:
@@ -1019,8 +1060,9 @@ class ProjectEngine:
 
         entry = {
             "generation": gen,
-            "outcome": "ok" if improved else "valid",
-            "detail": f"fitness={fitness:.5f} " + " ".join(f"{k}={v}" for k, v in metrics.items()),
+            "outcome": "baseline_reeval" if reeval and improved else ("ok" if improved else "valid"),
+            "detail": (("BASELINE RE-EVALUATED " if reeval else "")
+                       + f"fitness={fitness:.5f} " + " ".join(f"{k}={v}" for k, v in metrics.items())),
             "fitness": fitness,
             "metrics": metrics,
         }
@@ -1076,7 +1118,7 @@ class ProjectEngine:
             if (spec.get("skills") or {}).get("lessons", {}).get("enabled"):
                 self._generate_lesson(gen, code or "", metrics, result)
             self._maybe_deepwork()
-            self._log(f"gen {gen}: NEW BEST fitness={fitness:.5f}")
+            self._log(f"gen {gen}: " + ("baseline re-evaluated — " if reeval else "") + f"NEW BEST fitness={fitness:.5f}")
         else:
             self.state.save()
             self.results.append({**{"generation": gen, "outcome": "valid", "fitness": fitness}, **metrics})
@@ -1453,3 +1495,17 @@ class ProjectEngine:
 
     def kill_worker_process(self, worker_id: int) -> bool:
         return self.pool.kill_worker_process(worker_id)
+
+    def set_workers(self, n: int) -> int:
+        """Runtime resource knob: resize the worker pool to exactly `n`
+        processes (adds idle workers, or removes workers — removing a busy
+        worker kills its in-flight evaluation). Returns the effective
+        count."""
+        n = max(1, int(n))
+        self.pool.shrink_to(n)
+        while self.pool.worker_count() < n:
+            self.pool.add_worker()
+        eff = self.pool.worker_count()
+        self._worker_count = eff
+        self._log(f"worker count: {eff}")
+        return eff

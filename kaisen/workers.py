@@ -237,6 +237,27 @@ class WorkerPool:
             alive += 1
         return alive
 
+    def shrink_to(self, n: int) -> int:
+        """Remove workers until the pool holds at most `n` processes
+        (graceful terminate; a busy worker's in-flight evaluation dies).
+        REMOVES only — it never spawns (growth is the caller's job, so the
+        self-heal inside worker_count() cannot fight a shrink). Returns the
+        resulting live count."""
+        n = max(0, int(n))
+        # Remove the excess FIRST, using len(_procs) directly (not
+        # worker_count(), whose self-heal would respawn up to _target).
+        while len(self._procs) > n:
+            for wid in list(self._procs.keys()):
+                if len(self._procs) <= n:
+                    break
+                st = self._workers_state.get(wid) or {}
+                kill = st.get("status") == "running"
+                self.remove_worker(wid, kill=kill)
+        # Then lower the target so a later worker_count() cannot respawn
+        # the removed workers (remove_worker already decremented it).
+        self._target = n
+        return len(self._procs)
+
     def list_workers(self) -> List[Dict[str, Any]]:
         self.worker_count()
         return list(self._workers_state.values())
