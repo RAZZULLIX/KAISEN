@@ -546,7 +546,7 @@ BENCHMARK CONTEXT
 YOUR COMMANDS (plain text, one per line; each MUST be preceded by a "Rationale:" line)
 =================================================================
 - {YELOOK} <query>        → top results / program listings (syntax: "list top 10" or a results-store query)
-- {READ} <folder_number>  → full source of program.c from that folder
+- {READ} <folder_number>  → full source of the program in that folder
 - {PANDAS} result = <expr>→ custom pandas query on the results store
 - {LESSON} <folder>       → read the lesson written for that folder
 - {MEMO} <folder>         → read the deepwork memo for that folder

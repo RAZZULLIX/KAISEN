@@ -350,6 +350,15 @@ class Server:
             }
 
     # -- request -----------------------------------------------------------
+    def _auth_headers(self) -> Dict[str, str]:
+        """JSON headers + the RESOLVED api key (env > secrets > config),
+        omitted entirely when no key is configured.  Never a hardcoded
+        placeholder — the configured key must reach the endpoint."""
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        return headers
+
     def request(self, prompt: str, extra_params: Optional[Dict[str, Any]] = None) -> str:
         t0 = time.time()
         try:
@@ -361,7 +370,7 @@ class Server:
                 payload = _cap_predict(payload, self._global_cfg)
                 resp = requests.post(
                     self.url, json=payload,
-                    headers={"Authorization": "Bearer dummy", "Content-Type": "application/json"},
+                    headers=self._auth_headers(),
                     timeout=(self.connect_timeout, self.timeout),
                 )
                 resp.raise_for_status()
@@ -398,7 +407,7 @@ class Server:
                     payload = {"prompt": prompt, "text": body}
                 resp = requests.post(
                     self.url, json=payload,
-                    headers={"Authorization": "Bearer dummy", "Content-Type": "application/json"},
+                    headers=self._auth_headers(),
                     timeout=(self.connect_timeout, self.timeout),
                 )
                 resp.raise_for_status()
@@ -446,7 +455,7 @@ class Server:
                 payload = _cap_predict(payload, self._global_cfg)
                 resp = requests.post(
                     self.url, json=payload,
-                    headers={"Authorization": "Bearer dummy", "Content-Type": "application/json"},
+                    headers=self._auth_headers(),
                     stream=True,
                     timeout=(self.connect_timeout, self.nodata_timeout),
                 )

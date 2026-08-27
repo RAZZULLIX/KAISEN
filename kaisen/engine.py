@@ -459,7 +459,7 @@ class ProjectEngine:
                         self._emit_state()
                         time.sleep(2.0)
                         continue
-                    extracted = skills_mod.ensure_headers(extracted)
+                    extracted = skills_mod.ensure_headers(extracted, self._code_lang)
                     bad = skills_mod.find_dangerous(extracted, self._code_lang)
                     if bad:
                         self.state.append_history({"generation": gen, "outcome": "rejected_dangerous", "detail": bad})
@@ -576,7 +576,7 @@ class ProjectEngine:
         try:
             return Path(self._champion_path()).read_text(encoding="utf-8")
         except Exception:
-            return "// no champion yet"
+            return ""
 
     def _scope_check(self, code: str) -> Optional[str]:
         """Edit-scope guard: when the spec declares data.edit_scope (a list

@@ -84,6 +84,14 @@ ALLOWED_LAUNCHERS = {
     "cat", "chmod", "chown", "ln", "shutil",
     # D toolchain: dmd/ldc2/gdc compile D sources to native code.
     "dmd", "ldc2", "gdc", "rdmd",
+    # Non-C language toolchains (compilers / runtimes / build systems).
+    # Offline-first: no network-fetching package managers (pip, npm, …).
+    "javac", "java", "go", "rustc", "cargo", "zig", "kotlinc", "swiftc",
+    "scalac", "dart", "ghc", "runghc", "cabal", "dotnet", "csc", "mcs",
+    "mono", "node", "deno", "bun", "ruby", "php", "perl", "lua", "luajit",
+    "Rscript", "R", "tclsh",
+    # Additional build systems.
+    "ninja", "meson", "gradle", "mvn", "ant", "sbt", "bazel",
 }
 # Note: `rm`/`mv`/`chmod`/`chown` remain allowed as launchers for benign use
 # (cleaning a workdir); the denylist regexes above catch destructive forms.

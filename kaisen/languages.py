@@ -15,29 +15,29 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 LANGUAGES: Dict[str, Dict[str, Any]] = {
-    "c":          {"ext": ".c",     "fence": "c",          "kind": "compiled"},
-    "cpp":        {"ext": ".cpp",   "fence": "cpp",        "kind": "compiled"},
-    "cuda":       {"ext": ".cu",    "fence": "cpp",        "kind": "compiled"},
-    "python":     {"ext": ".py",    "fence": "python",     "kind": "interpreted"},
-    "java":       {"ext": ".java",  "fence": "java",       "kind": "compiled"},
-    "javascript": {"ext": ".js",    "fence": "javascript", "kind": "interpreted"},
-    "typescript": {"ext": ".ts",    "fence": "typescript", "kind": "compiled"},
-    "csharp":     {"ext": ".cs",    "fence": "csharp",     "kind": "compiled"},
-    "go":         {"ext": ".go",    "fence": "go",         "kind": "compiled"},
-    "rust":       {"ext": ".rs",    "fence": "rust",       "kind": "compiled"},
-    "kotlin":     {"ext": ".kt",    "fence": "kotlin",     "kind": "compiled"},
-    "swift":      {"ext": ".swift", "fence": "swift",      "kind": "compiled"},
-    "php":        {"ext": ".php",   "fence": "php",        "kind": "interpreted"},
-    "ruby":       {"ext": ".rb",    "fence": "ruby",       "kind": "interpreted"},
-    "r":          {"ext": ".r",     "fence": "r",          "kind": "interpreted"},
-    "zig":        {"ext": ".zig",   "fence": "zig",        "kind": "compiled"},
-    "scala":      {"ext": ".scala", "fence": "scala",      "kind": "compiled"},
-    "dart":       {"ext": ".dart",  "fence": "dart",       "kind": "compiled"},
-    "haskell":    {"ext": ".hs",    "fence": "haskell",    "kind": "compiled"},
-    "lua":        {"ext": ".lua",   "fence": "lua",        "kind": "interpreted"},
-    "perl":       {"ext": ".pl",    "fence": "perl",       "kind": "interpreted"},
-    "shell":      {"ext": ".sh",    "fence": "bash",       "kind": "interpreted"},
-    "d":          {"ext": ".d",     "fence": "d",          "kind": "compiled"},
+    "c":          {"ext": ".c",     "fence": "c",          "kind": "compiled",    "toolchain": "gcc"},
+    "cpp":        {"ext": ".cpp",   "fence": "cpp",        "kind": "compiled",    "toolchain": "g++"},
+    "cuda":       {"ext": ".cu",    "fence": "cpp",        "kind": "compiled",    "toolchain": "nvcc"},
+    "python":     {"ext": ".py",    "fence": "python",     "kind": "interpreted", "toolchain": ""},
+    "java":       {"ext": ".java",  "fence": "java",       "kind": "compiled",    "toolchain": "javac"},
+    "javascript": {"ext": ".js",    "fence": "javascript", "kind": "interpreted", "toolchain": ""},
+    "typescript": {"ext": ".ts",    "fence": "typescript", "kind": "compiled",    "toolchain": "tsc"},
+    "csharp":     {"ext": ".cs",    "fence": "csharp",     "kind": "compiled",    "toolchain": "csc (or dotnet build)"},
+    "go":         {"ext": ".go",    "fence": "go",         "kind": "compiled",    "toolchain": "go build"},
+    "rust":       {"ext": ".rs",    "fence": "rust",       "kind": "compiled",    "toolchain": "rustc"},
+    "kotlin":     {"ext": ".kt",    "fence": "kotlin",     "kind": "compiled",    "toolchain": "kotlinc"},
+    "swift":      {"ext": ".swift", "fence": "swift",      "kind": "compiled",    "toolchain": "swiftc"},
+    "php":        {"ext": ".php",   "fence": "php",        "kind": "interpreted", "toolchain": ""},
+    "ruby":       {"ext": ".rb",    "fence": "ruby",       "kind": "interpreted", "toolchain": ""},
+    "r":          {"ext": ".r",     "fence": "r",          "kind": "interpreted", "toolchain": ""},
+    "zig":        {"ext": ".zig",   "fence": "zig",        "kind": "compiled",    "toolchain": "zig build-exe"},
+    "scala":      {"ext": ".scala", "fence": "scala",      "kind": "compiled",    "toolchain": "scalac"},
+    "dart":       {"ext": ".dart",  "fence": "dart",       "kind": "compiled",    "toolchain": "dart compile exe"},
+    "haskell":    {"ext": ".hs",    "fence": "haskell",    "kind": "compiled",    "toolchain": "ghc"},
+    "lua":        {"ext": ".lua",   "fence": "lua",        "kind": "interpreted", "toolchain": ""},
+    "perl":       {"ext": ".pl",    "fence": "perl",       "kind": "interpreted", "toolchain": ""},
+    "shell":      {"ext": ".sh",    "fence": "bash",       "kind": "interpreted", "toolchain": ""},
+    "d":          {"ext": ".d",     "fence": "d",          "kind": "compiled",    "toolchain": "dmd or ldc2"},
 }
 
 # Friendly aliases -> canonical id.
@@ -80,6 +80,12 @@ def ext_from_lang(lang: Optional[str]) -> str:
 
 def fence_from_lang(lang: Optional[str]) -> str:
     return str(lang_info(lang)["fence"])
+
+
+def toolchain_from_lang(lang: Optional[str]) -> str:
+    """Primary compiler/toolchain for a language ('' = interpreted: the
+    build step validates and copies instead of compiling)."""
+    return str(lang_info(lang).get("toolchain", ""))
 
 
 def lang_from_ext(ext: Optional[str]) -> Optional[str]:

@@ -36,7 +36,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from .guardrails import _scan_denylist, check_command
+from .guardrails import ALLOWED_LAUNCHERS, _scan_denylist, check_command
 from .util import load_json, save_json
 
 MAX_ROUNDS = 8
@@ -206,7 +206,10 @@ def _referenced_programs(spec: Dict[str, Any]) -> List[str]:
             items = steps.get(stage, []) or []
         for st in items:
             p = (st or {}).get("program")
-            if p and p not in ("gcc", "cc", "g++", "clang", "make", "dmd", "ldc2", "gdc", "rdmd"):
+            # Bare system launchers (gcc, node, rustc, go, make, …) are the
+            # guardrail allowlist, not project files — any other program
+            # must be supplied inside files{}.
+            if p and p not in ALLOWED_LAUNCHERS:
                 progs.append(p)
     return progs
 
@@ -234,7 +237,7 @@ def validate_structure(spec: Dict[str, Any]) -> List[str]:
     except (TypeError, ValueError):
         errors.append("select.hysteresis must be numeric")
     if not (spec.get("data") or {}).get("baseline_source"):
-        errors.append("data.baseline_source is required (the single C file to improve)")
+        errors.append("data.baseline_source is required (the single source file to improve)")
     files = spec.get("files") or {}
     if not isinstance(files, dict) or not files:
         errors.append("files: the LLM must supply harness scripts + baseline in files{}")
@@ -301,14 +304,14 @@ def _guardrail_scan_spec(spec: Dict[str, Any], project_dir: Path) -> List[str]:
     errs: List[str] = []
     steps = spec.get("steps") or {}
     from .languages import ext_from_lang
-    subs = {"candidate": f"candidate{ext_from_lang((spec.get('language') or 'c'))}", "artifact": "program.so", "workdir": "smoke", "project_dir": str(project_dir)}
+    subs = {"candidate": f"candidate{ext_from_lang((spec.get('language') or 'c'))}", "artifact": "program", "workdir": "smoke", "project_dir": str(project_dir)}
 
     for stage in ("build", "verify", "score"):
         items = [steps.get("build")] if stage == "build" and steps.get("build") else steps.get(stage, []) or []
         for i, st in enumerate(items):
             prog = str(st.get("program", ""))
-            if prog in ("gcc", "cc", "g++", "clang", "dmd", "ldc2", "gdc", "rdmd"):
-                # bare compiler launcher — allowlist covers it
+            if prog in ALLOWED_LAUNCHERS:
+                # bare launcher — the guardrail allowlist covers it
                 continue
             p = Path(prog)
             resolved = p if p.is_absolute() else (project_dir / p).resolve()
@@ -329,7 +332,7 @@ def ensure_harness_ready(root: Path, spec: Dict[str, Any]) -> None:
     guarantee a python shebang + +x so the model can never trip on
     'Exec format error'."""
     for prog in _referenced_programs(spec):
-        if prog in ("gcc", "cc", "g++", "clang", "make", "dmd", "ldc2", "gdc", "rdmd"):
+        if prog in ALLOWED_LAUNCHERS:
             continue
         safe, why = _safe_rel_path(prog)
         if not safe:
@@ -475,9 +478,10 @@ def _smoke_run(spec: Dict[str, Any], data_file: Optional[Dict[str, str]]) -> Tup
     try:
         from .pipeline import run_pipeline
         from .projects import Project
+        from .languages import ext_from_lang as _ext
         _write_project_files(tmp, spec, data_file)
         project = Project(tmp)
-        candidate = tmp / str((spec.get("data") or {}).get("baseline_source", "original.c"))
+        candidate = tmp / str((spec.get("data") or {}).get("baseline_source", f"original{_ext(spec.get('language'))}"))
         if not candidate.exists():
             notes.append(f"smoke run FAILED: the baseline file '{candidate.name}' is missing — your JSON MUST include the complete program in files as \"{candidate.name}\"")
             return {"ok": False, "stage": "baseline", "reason": f"baseline program file missing from files: {candidate.name}"}, notes
@@ -501,6 +505,14 @@ def _smoke_run(spec: Dict[str, Any], data_file: Optional[Dict[str, str]]) -> Tup
 # ---------------------------------------------------------------------------
 # the suggest loop
 
+
+def needs_driver(language: str, kind: str, code: str) -> bool:
+    """Should the harness generate a driver entry point for the user's
+    program?  Only COMPILED languages can "compile the candidate together
+    with a driver main" — the flow is meaningless (and was historically a
+    hardcoded C/C++ driver) for interpreted languages, which the harness
+    scripts simply run or import."""
+    return kind == "compiled" and bool(str(code or "").strip()) and not re.search(r"\bmain\s*\(", str(code or ""))
 
 
 def suggest_project(
@@ -642,10 +654,12 @@ def suggest_project(
     clarify_analysis = lambda q: ("Here is the analysis you need:\n" + analysis_json +
                                   "\nAnswer the original request with the python code block only.")
 
-    # Library-style user programs (no main): the harness needs a driver
-    # main — generated here and compiled together with the candidate.
+    # Library-style user programs (no main) in COMPILED languages: the
+    # harness needs a driver entry point — generated here and compiled
+    # together with the candidate (same language).  Interpreted programs
+    # need no driver: the harness runs/imports them directly.
     user_code = bool(code.strip())
-    no_main = user_code and not re.search(r"\bmain\s*\(", baseline_code)
+    no_main = needs_driver(lang, kind, baseline_code)
     driver_code: Optional[str] = None
     if no_main:
         def parse_c(raw: str):
@@ -746,9 +760,13 @@ def suggest_project(
         if not parse_rules:
             # The model forgot the PARSE lines: the score contract prints
             # `key=value` lines — synthesize the default rules from the
-            # declared metric keys instead of failing the step.
+            # declared metric keys instead of failing the step.  The
+            # pattern MUST be anchored on "key=" — a bare "(?P<key>\d+)"
+            # matches ANY number in the output, and parse_metrics lets the
+            # LAST match win, so every metric would silently bind the same
+            # last number (e.g. a binary size) instead of its own line.
             for key in (metrics or {}).keys():
-                parse_rules.append({"type": "regex", "pattern": f"(?P<{key}>[\\\\d.]+)"})
+                parse_rules.append({"type": "regex", "pattern": f"{re.escape(key)}=(?P<{key}>[\\\\d.]+)"})
         return {"script": script, "metrics": metrics, "parse": parse_rules}, ""
 
     score = run_step("score", "Write the score step",

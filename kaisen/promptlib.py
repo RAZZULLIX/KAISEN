@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from .languages import fence_from_lang, normalize_lang
+from .languages import ext_from_lang, fence_from_lang, normalize_lang, toolchain_from_lang
 
 
 def detect_tier(server: Optional[Dict[str, Any]] = None) -> str:
@@ -199,9 +199,11 @@ project will evolve THIS file, keeping its interface):
 CRITICAL:
 - Derive summary and entry_contract from THIS code, not from your
   imagination. Read what it actually does and how it is invoked.
-- If the file has no main() (a library/kernel source file), the harness
-  will supply main() itself — describe the exact function signature(s)
-  and semantics in entry_contract so the harness can call them.
+- If the file has no main entry point (a library/kernel source file), the
+  harness may add an entry point (compiled languages) or call the
+  functions directly (interpreted languages) — describe the exact function
+  signature(s) and semantics in entry_contract so the harness can invoke
+  them.
 - You MUST NOT change the interface in entry_contract: the candidates
   keep the same signatures, only internals may change.
 """
@@ -271,37 +273,71 @@ OUTPUT:"""
 
 def step_driver_program(tier: str, analysis: str, language: str) -> str:
     """STEP 2b — the candidate is a LIBRARY file (no main): write the
-    driver main() that exercises it. Compiles together with the candidate."""
+    driver entry point that exercises it. The build step compiles/links it
+    TOGETHER with the candidate, so it must be written in the SAME language
+    as the candidate (never a hardcoded C/C++ driver)."""
     fence = fence_from_lang(language)
+    driver_file = f"harness/driver{ext_from_lang(language)}"
     strict = "Reply with ONLY one code block, tagged ```%s. Nothing outside." % fence if tier in ("tiny", "small") else "Reply with one code block, tagged ```%s." % fence
     return f"""You are the DRIVER step of a project builder. The candidate file is a
-LIBRARY source file with NO main() — it only defines the function(s) in the
-entry contract. Write harness/driver.{'c' if language == 'c' else 'cpp'}: a
-main() that drives those functions. It will be compiled TOGETHER with the
-candidate (the build step links both).
+LIBRARY source file with NO main entry point — it only defines the
+function(s) in the entry contract. Write {driver_file}: a complete
+{language} program whose main entry point drives those functions. The build
+step combines it WITH the candidate, so:
+- use the SAME language ({language}) as the candidate file,
+- call the functions with EXACTLY the entry contract's signatures
+  (declare/call them precisely as the contract describes),
+- use ONLY the standard library — NO external crates/packages (rand,
+  rayon, num, gmp, boost, … are NOT installed and NOT downloadable: the
+  build machine has only the bare {language} toolchain, no package
+  manager, no network).  If you need pseudo-random inputs, implement a
+  tiny deterministic generator (xorshift/LCG) inline with std only;
+  no files, no network.
+
+HOW IT LINKS (read this — the build step follows the SAME rule):
+- The build step copies the candidate file to candidate{ext_from_lang(language)} in
+  the SAME directory as this driver, then compiles/links them together.
+- If the {language} compiler accepts multiple source files in one
+  invocation (C/C++/CUDA/D/Go/Java/Kotlin/Swift/Scala/Haskell/Zig...), the
+  build passes both files and you call the entry-contract functions
+  directly.
+- If the {language} compiler takes ONE entry file (Rust/rustc), the build
+  compiles THIS driver only, so you must declare the candidate as a module
+  of the same directory — `mod candidate;` (file candidate{ext_from_lang(language)}) —
+  and call its functions as `candidate::<function>(...)`.
 
 ANALYSIS (read the entry_contract carefully — use EXACTLY those signatures):
 {analysis}
 
 WHAT THE DRIVER MUST DO:
-- mode 0 (default, argv[1] is "0"): benchmark — deterministic input of AT
-  LEAST 1<<20 elements (the kernel must dominate, process overhead is
-  huge otherwise), loop rounds until a wall-clock budget (~5 s) elapses,
-  then print the metric line(s) the analysis declares (e.g. time_ms=...,
-  the AVERAGE per call measured INSIDE the driver) plus a
-  KAISEN_PROGRESS rounds=... line with fflush(stdout).
-- mode 1 (argv[1] is "1"): verify — call the function(s) and compare
-  against a simple scalar reference computed IN the driver, print "OK"
-  or "FAIL", exit non-zero on FAIL. Test a DENSE SWEEP: at least 1000
-  points spanning the FULL input range (e.g. -20..20 in 0.04 steps, plus
-  a few extreme values), NOT a handful of hand-picked values — report
-  the MAX error.
-  IMPORTANT: SIMD FMA kernels reorder float math — use a RELATIVE
-  tolerance of at least 1e-5 (fabs(got - ref) <= 1e-5 * (1 + fabs(ref))).
+- CLI CONTRACT (the python harness invokes this driver as a program):
+  * NO argument, or an argument that is NOT "1" and NOT a number ->
+    benchmark mode (below);
+  * FIRST argument "1" -> verify mode (below);
+  * FIRST argument a NUMBER (including "0") -> compute the entry-contract
+    function for that input and print the result as ONE line (the python
+    verifier compares these lines against its own reference), then exit 0.
+- benchmark mode: a FIXED deterministic input set of AT LEAST 1<<20
+  elements within a BOUNDED range the naive baseline handles FAST (each
+  call microseconds-to-milliseconds; e.g. inputs in 0..1_000_000 — NEVER
+  full-range random 64-bit values, which make a naive O(n√n) baseline
+  take hours). Loop rounds until a wall-clock budget of AT MOST ~5 s
+  elapses (the score step has a hard timeout — the ENTIRE benchmark mode
+  must finish within a few seconds), then print the metric line(s)
+  the analysis declares (e.g. time_ms=..., the AVERAGE per call measured
+  INSIDE the driver) plus a KAISEN_PROGRESS rounds=... line, flushing
+  output after each progress line.
+- verify mode: call the function(s) and compare against a simple scalar
+  reference computed IN the driver, print "OK" or "FAIL", exit non-zero
+  on FAIL.  Test a sweep spanning the FULL input range (a few extreme
+  values, small inputs, and points spread across the range), NOT a
+  handful of hand-picked values — report the MAX error.
+  CRITICAL: the ENTIRE verify run must finish in a few SECONDS even for
+  the naive baseline — scale the number of points (a few dozen to a few
+  hundred) and the largest input to the function's speed.
+  IMPORTANT: optimized math reorders float operations — use a RELATIVE
+  tolerance of at least 1e-5 (abs(got - ref) <= 1e-5 * (1 + abs(ref))).
   Never require bit-exact equality: FMA vs scalar differs in the last bits.
-- Use ONLY the standard library; no files, no network.
-- The function(s) come from the CANDIDATE file: declare their exact
-  prototypes at the top of the driver.
 
 RULES:
 - {strict}
@@ -313,14 +349,29 @@ def step_build_script(tier: str, language: str, kind: str, with_driver: bool = F
     """STEP 3 — build.py: candidate -> artifact."""
     strict = "Reply with ONLY one python code block. Nothing outside." if tier in ("tiny", "small") else "Reply with one python code block."
     if kind == "compiled":
-        driver_part = " Compile the candidate file TOGETHER WITH harness/driver.c (or .cpp) in the same command." if with_driver else ""
-        toolchain = {"c": "gcc", "cpp": "g++", "cuda": "nvcc", "d": "dmd or ldc2"}.get(language, "gcc/g++/nvcc")
+        toolchain = toolchain_from_lang(language) or f"the {language} compiler"
+        if with_driver:
+            driver_part = (f" The candidate is a LIBRARY file: copy it to "
+                           f"harness/candidate{ext_from_lang(language)} (the SAME directory as "
+                           f"harness/driver{ext_from_lang(language)}), then compile the DRIVER as the "
+                           f"entry point together with the candidate per the {language} rules — "
+                           f"multi-input compilers (gcc, g++, javac, go build, ghc, swiftc, kotlinc, "
+                           f"scalac, zig): pass BOTH files in one command; single-entry compilers "
+                           f"(rustc): compile ONLY the driver, which declares the candidate as "
+                           f"`mod candidate;`.")
+        else:
+            driver_part = ""
         how = (f"compile the candidate {language} file (argv[1]) into the artifact (argv[2]) with the "
-               f"project toolchain ({toolchain}). Use -O2 (plus -arch=native for CUDA).{driver_part} "
+               f"{language} toolchain ({toolchain}). Use the language's standard optimization flags "
+               f"(e.g. -O2/-O3 for gcc/g++/clang, -O or -C opt-level=3 for rustc, -O2 for zig, release "
+               f"mode for go/dart, defaults for javac/ghc/swiftc; NOTE: --release is a CARGO flag, "
+               f"NOT a rustc flag).{driver_part} "
                "Always write the compiler's stderr to YOUR stderr (success AND failure). Exit non-zero on failure.")
     else:
         how = ("validate the candidate (argv[1]) — e.g. py_compile / node --check — then copy it to the "
-               "artifact path (argv[2]). Exit non-zero on failure.")
+               "artifact path (argv[2]) as an EXECUTABLE script: prepend a shebang line if missing "
+               "(#!/usr/bin/env python3, node, ruby, …) and chmod +x, so harness steps can run the "
+               "artifact directly (e.g. subprocess.run([artifact, arg])). Exit non-zero on failure.")
     return f"""You are the BUILD step of a project builder. Write build.py (python3, stdlib only).
 
 CONTRACT:
@@ -339,9 +390,11 @@ def step_verify_script(tier: str, analysis: str, language: str, data_note: str =
                        with_driver: bool = False) -> str:
     """STEP 4 — verify.py: prove correctness."""
     strict = "Reply with ONLY one python code block. Nothing outside." if tier in ("tiny", "small") else "Reply with one python code block."
-    driver_rule = ("\n- THE ARTIFACT IS A STANDALONE EXECUTABLE (driver main inside it). Run it with "
-                   "subprocess.run([artifact, '1']) for verify mode. Mode '0' (or no args) "
-                   "benchmarks for seconds and never prints OK. NEVER use ctypes/CDLL on it — "
+    driver_rule = ("\n- THE ARTIFACT IS A STANDALONE EXECUTABLE (driver main inside it). Its FIRST "
+                   "argument is: '1' = verify (prints \"OK\"/\"FAIL\" after an internal dense sweep); "
+                   "a NUMBER (including 0) = it prints the function's result for that input as one "
+                   "line — compare those lines against your reference; no argument = benchmark "
+                   "(runs seconds, never prints OK). NEVER use ctypes/CDLL on it — "
                    "it is not a shared library.") if with_driver else ""
     return f"""You are the VERIFY step of a project builder. Write verify.py (python3, stdlib +
 numpy if needed) that proves a candidate artifact is CORRECT for the goal.
@@ -351,6 +404,8 @@ ANALYSIS:
 
 CONTRACT:
 - argv: [verify.py, artifact]
+- The artifact is a single executable/script (the build step made it
+  runnable): run it with subprocess.run([artifact, arg...]).
 - Run the artifact against a deterministic reference and a REPRESENTATIVE,
   SMALL test set (seconds even for a naive baseline).
 - Print ONLY "OK" on success; explain failures on stderr; exit non-zero.
@@ -370,10 +425,10 @@ def step_score_script(tier: str, analysis: str, data_note: str = "", with_driver
     """STEP 5 — score.py + metric declarations + parse rules."""
     strict = "Code block first, then METRICS JSON and PARSE lines — nothing else." if tier in ("tiny", "small") else "Code block first, then METRICS JSON and PARSE lines."
     driver_rule = ("\n- THE ARTIFACT IS A STANDALONE EXECUTABLE, not a shared library: run it with "
-                   "subprocess.run([artifact, '0']); NEVER use ctypes/CDLL on it. It loops "
-                   "internally for ~5 s and prints its metric line(s) — capture stdout and parse "
-                   "the metric FROM ITS OUTPUT. NEVER time the subprocess call (startup overhead "
-                   "dwarfs the kernel).") if with_driver else ""
+                   "subprocess.run([artifact]) (NO arguments — no-args means benchmark mode); NEVER "
+                   "use ctypes/CDLL on it. It loops internally for ~5 s and prints its metric "
+                   "line(s) — capture stdout and parse the metric FROM ITS OUTPUT. NEVER time the "
+                   "subprocess call (startup overhead dwarfs the kernel).") if with_driver else ""
     return f"""You are the SCORE step of a project builder. Write score.py (python3) that
 measures EXACTLY what the goal wants to optimize — nothing else.
 
@@ -390,6 +445,11 @@ CONTRACT:
 - argv: [score.py, artifact]
 - Deterministic benchmark: the same fixed workload every run. Loop rounds
   until a wall-clock budget (~5-15 s) elapses, count completed rounds.
+- The artifact is a single executable/script (the build step made it
+  runnable): run it with subprocess.run([artifact, arg...]). If the
+  artifact can never be executed (zero completed rounds), that is a
+  FAILURE, not a zero metric — print a clear error to stderr and exit
+  non-zero.
 - While running, print live updates every 0.5-2 s, ALWAYS with flush=True:
   KAISEN_PROGRESS <key>=<value> <key>=<value>
 - At the end print ONE final line per metric: <key>=<value>

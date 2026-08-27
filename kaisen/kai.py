@@ -283,6 +283,7 @@ class KaiSession:
         # A session carries EITHER one single-project goal (RUN) or a list of
         # them (RUN ALL) — never both.
         self._baseline_code: Optional[str] = None
+        self._baseline_lang: Optional[str] = None
         self._last_spec: Optional[Dict[str, Any]] = None
         self._last_temp: bool = False
         self._run_goal: Optional[Dict[str, Any]] = None
@@ -1061,13 +1062,15 @@ class KaiSession:
     def cmd_baseline(self, arg: str, lines: List[str]) -> str:
         """Stage the starting program: BASELINE [lang] + code lines + END.
         GOAL then uses it as the baseline to improve (no code = the AI
-        writes the baseline from scratch)."""
+        writes the baseline from scratch).  The staged language is
+        remembered and forwarded to the project builder — a staged python
+        baseline must never silently become a C project."""
         code = "\n".join(lines)
         if not code.strip():
             raise KaiError("BASELINE needs code lines ending with END")
         self._baseline_code = code
-        lang = arg.strip() or None
-        return f"OK baseline staged ({len(code)} chars" + (f", lang {lang}" if lang else "") + ") — GOAL <words> next"
+        self._baseline_lang = arg.strip() or None
+        return f"OK baseline staged ({len(code)} chars" + (f", lang {self._baseline_lang}" if self._baseline_lang else "") + ") — GOAL <words> next"
 
     def cmd_goal(self, arg: str) -> str:
         goal = arg.strip()
@@ -1082,6 +1085,8 @@ class KaiSession:
         body: Dict[str, Any] = {"goal": goal}
         if self._baseline_code:
             body["code"] = self._baseline_code
+        if self._baseline_lang:
+            body["language"] = self._baseline_lang
         res = self.client.call("POST", "/api/projects/suggest", body, read_timeout=3600.0)
         if not res.get("ok"):
             raise KaiError(res.get("error", "suggest failed"))

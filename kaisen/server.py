@@ -1838,11 +1838,14 @@ class DashboardServer:
 
         # Reachability is probed ONCE per activation: servers with unknown
         # state get a single background probe; the next poll reflects it.
+        # The probe MUST mark the SAME orchestrator the gate above reads —
+        # probing a different orchestrator's server objects would never
+        # latch this view's `online`, so every poll would re-probe forever.
         for sv in llm.get("servers", []):
             sid = sv["id"]
             if sid in active_ids and sv.get("online") is None and sid not in self._probe_inflight:
                 self._probe_inflight.add(sid)
-                asyncio.create_task(self._probe_server(sid))
+                asyncio.create_task(self._probe_server(sid, eng.orchestrator))
 
 
         # The pill's status mirrors the pool: green 'generating' when ANY
@@ -1866,10 +1869,13 @@ class DashboardServer:
             "engines": self._engines_summary(),
         })
 
-    async def _probe_server(self, sid: str) -> None:
-        """One background reachability check; result lands in the next poll."""
+    async def _probe_server(self, sid: str, orch) -> None:
+        """One background reachability check; result lands in the next poll.
+        `orch` is the orchestrator whose snapshot the polling handler reads —
+        the probe must mark ITS server objects or the online gate never
+        latches (and every poll re-probes)."""
         try:
-            await asyncio.to_thread(self._orch().check_health, sid)
+            await asyncio.to_thread(orch.check_health, sid)
         except Exception:
             pass
         finally:
