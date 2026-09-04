@@ -31,6 +31,7 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -279,19 +280,27 @@ def _lint_scripts(files: Dict[str, str]) -> List[str]:
         last_err = "no candidate compiled"
         ok = False
         for cand in candidates:
-            with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as f:
+            # encoding="utf-8" is MANDATORY: text-mode temp files default to
+            # the locale codec (cp1252 "charmap" on Windows), which cannot
+            # encode model output like narrow no-break space (\u202f).
+            with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False,
+                                             encoding="utf-8") as f:
                 f.write(cand)
                 tmp = f.name
             try:
+                # sys.executable (not "python3"): Windows installs python.exe.
                 res = subprocess.run(
-                    ["python3", "-m", "py_compile", tmp],
-                    capture_output=True, text=True, timeout=60,
+                    [sys.executable, "-m", "py_compile", tmp],
+                    capture_output=True, timeout=60,
                 )
                 if res.returncode == 0:
                     ok = True
                     files[path] = cand
                     break
-                last_err = (res.stderr or res.stdout)[-800:]
+                last_err = ((res.stderr or b"") + (b"\n" if res.stderr and res.stdout else b"")
+                            + (res.stdout or b"")).decode("utf-8", "replace")[-800:]
+            except Exception as e:
+                last_err = f"py_compile could not run: {e}"
             finally:
                 Path(tmp).unlink(missing_ok=True)
         if not ok:
@@ -850,6 +859,12 @@ def suggest_project(
                 errs += [str(e)]
             finally:
                 shutil.rmtree(tmp, ignore_errors=True)
+        # Repair-section defaults: a gate failure skips the smoke run
+        # entirely, so stage/notes/reason must exist even when no smoke
+        # ran (stage None = nothing to target -> full-spec repair below).
+        stage: Optional[str] = None
+        notes: List[str] = []
+        reason = ""
         if not errs:
             prog(stage="smoke", round=round_no, raw_label=f"Round {round_no} — smoke run (build → verify → score)…")
             res, notes = _smoke_run(spec, data_file)
@@ -882,8 +897,14 @@ def suggest_project(
         # ---- Targeted repair: re-run ONLY the responsible step, with the
         # real smoke error as feedback. One small job per repair — the
         # model never has to re-emit the whole spec.
-        fix_feedback = "\n".join((notes[-1].splitlines() if notes else [reason])[:10])
-        prog(stage="repair", round=round_no, raw_label=f"Round {round_no} — repairing the {stage} step…")
+        if notes:
+            fix_feedback = "\n".join(notes[-1].splitlines()[:10])
+        elif reason:
+            fix_feedback = reason[:1000]
+        else:
+            # Gate failure (no smoke run): the gate errors ARE the feedback.
+            fix_feedback = "\n".join(errs[:10])
+        prog(stage="repair", round=round_no, raw_label=f"Round {round_no} — repairing the {stage or 'spec'} step…")
         repaired = False
         if stage in ("build", "baseline") and not user_baseline:
             fixed_b = run_step("baseline", "Fix the baseline program",

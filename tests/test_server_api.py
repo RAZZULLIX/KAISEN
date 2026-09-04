@@ -521,10 +521,18 @@ def test_snapshots_list_shape(api):
     assert "snapshots" in r.json()
 
 
-def test_active_without_engine_is_400(api):
+def test_no_engine_read_endpoints_are_clean_200(api):
+    """Regression: with no engine running, the dashboard's polled read
+    endpoints must answer 200 (the welcome state is NORMAL, not an error)
+    — previously /api/active, /api/state and /api/workers spammed 400s."""
     _, base = api
     r = requests.get(base + "/api/active", timeout=5)
-    assert r.status_code == 400
+    assert r.status_code == 200
+    assert r.json().get("no_engine") is True
+    for ep in ("/api/state", "/api/workers", "/api/llm/live",
+               "/api/model/status", "/api/debug/logs"):
+        rr = requests.get(base + ep, timeout=5)
+        assert rr.status_code == 200, f"{ep} must not 400 without an engine"
 
 
 # ----------------------------------------------------------------------

@@ -18,6 +18,7 @@ Result shape:
 from __future__ import annotations
 
 import os
+import sys
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -220,13 +221,13 @@ def run_pipeline(
             elif not res["ok"]:
 
                 # Custom fixer script (user-authored, per-project).
-                # Contract: python3 <fixer> <candidate> <artifact>
-                # <project_dir> <workdir> -- <build_command...>; it runs
-                # the build itself, applies its own fixes, rebuilds, and
-                # exits 0 once the artifact exists (else non-zero with
-                # the failure on stderr).
+                # Contract: <current interpreter> <fixer> <candidate>
+                # <artifact> <project_dir> <workdir> -- <build_command...>;
+                # it runs the build itself, applies its own fixes, rebuilds,
+                # and exits 0 once the artifact exists (else non-zero with
+                # diagnostics on stderr)
                 fpath = project.resolve_program(mode[1])
-                fix_cmd = ["python3", str(fpath), str(candidate),
+                fix_cmd = [sys.executable, str(fpath), str(candidate),
                            str(artifact_path), str(project.path), str(workdir),
                            "--"] + list(cmd)
                 ok_cmd, why = check_command(fix_cmd, project=spec, project_dir=project.path)

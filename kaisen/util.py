@@ -8,9 +8,10 @@ import hashlib
 import json
 import os
 import signal
-import select
 import subprocess
+import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -101,10 +102,47 @@ def get_process_tree_rss_bytes(proc: subprocess.Popen) -> int:
         return 0
 
 
-def kill_process_tree(proc: subprocess.Popen) -> None:
+def kill_pid_tree(pid: int) -> bool:
+    """Kill pid and its whole process tree (harness + candidate children).
+    Returns True when the kill landed."""
+    if os.name == "posix":
+        try:
+            os.killpg(os.getpgid(pid), signal.SIGKILL)
+            return True
+        except Exception:
+            pass
+        try:
+            os.kill(pid, signal.SIGKILL)
+            return True
+        except Exception:
+            return False
+    # Windows: taskkill /T kills the whole tree (Win7+).
     try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        r = subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
+                           capture_output=True, timeout=10)
+        if r.returncode == 0:
+            return True
     except Exception:
+        pass
+    if psutil is not None:
+        try:
+            p = psutil.Process(pid)
+            for child in p.children(recursive=True):
+                try:
+                    child.kill()
+                except psutil.NoSuchProcess:
+                    pass
+            p.kill()
+            return True
+        except Exception:
+            pass
+    return False
+
+
+def kill_process_tree(proc: subprocess.Popen) -> None:
+    if proc is None or getattr(proc, "pid", None) is None:
+        return
+    if not kill_pid_tree(proc.pid):
         try:
             proc.kill()
         except Exception:
@@ -137,33 +175,9 @@ def run_subprocess(
     start = time.time()
     max_rss = 0
     live: Dict[str, str] = {}
-    out_parts: List[bytes] = []
-    err_parts: List[bytes] = []
-    try:
-        proc = subprocess.Popen(
-            cmd,
-            cwd=str(cwd) if cwd else None,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            stdin=subprocess.DEVNULL,
-            start_new_session=True,
-            env=env,
-            bufsize=0,
-        )
-    except Exception as e:
-        return {
-            "ok": False, "returncode": None, "stdout": "", "stderr": str(e),
-            "timed_out": False, "mem_exceeded": False,
-            "seconds": time.time() - start, "max_rss_bytes": 0,
-        }
-
-    fds: Dict[int, str] = {}
-    line_bufs: Dict[str, bytes] = {}
-    for name, pipe in (("out", proc.stdout), ("err", proc.stderr)):
-        if pipe is not None:
-            fd = pipe.fileno()
-            fds[fd] = name
-            line_bufs[name] = b""
+    out_lines: List[bytes] = []
+    err_lines: List[bytes] = []
+    readers_done = {"out": threading.Event(), "err": threading.Event()}
 
     def scan_line(line: bytes) -> None:
         if not progress_token:
@@ -178,45 +192,77 @@ def run_subprocess(
             if key:
                 live[key] = val
 
-    def drain(timeout_s: float = 0.0) -> None:
-        while fds:
+    def _reader(pipe, sink: List[bytes], flag: str) -> None:
+        # One reader thread per pipe: no 64KiB pipe-fill deadlock on ANY
+        # platform. (select() on pipes is POSIX-only; on Windows the old
+        # drain loop could never see readiness and deadlocked as soon as a
+        # chatty child filled the buffer.)
+        buf = b""
+        try:
+            while True:
+                chunk = os.read(pipe.fileno(), 65536)
+                if not chunk:
+                    break
+                buf += chunk
+                *lines, buf = buf.split(b"\n")
+                for line in lines:
+                    scan_line(line)
+                    sink.append(line + b"\n")
+        except OSError:
+            pass
+        finally:
+            if buf:
+                sink.append(buf)
+            readers_done[flag].set()
+
+    try:
+        popen_kwargs: Dict[str, Any] = dict(
+            cwd=str(cwd) if cwd else None,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
+            env=env,
+            bufsize=0,
+        )
+        # Windows cannot exec a .py by path (no shebang): route it through
+        # the running interpreter. POSIX keeps direct exec (shebang + bit).
+        if os.name != "posix" and cmd:
+            _p0 = Path(cmd[0])
             try:
-                ready, _, _ = select.select(list(fds), [], [], timeout_s)
-            except (OSError, ValueError):
-                return
-            if not ready:
-                return
-            for fd in ready:
-                try:
-                    chunk = os.read(fd, 65536)
-                except (OSError, BlockingIOError):
-                    continue
-                name = fds.get(fd)
-                if name is None:
-                    continue
-                if chunk:
-                    line_bufs[name] += chunk
-                    *lines, line_bufs[name] = line_bufs[name].split(b"\n")
-                    for line in lines:
-                        scan_line(line)
-                        if name == "out":
-                            out_parts.append(line + b"\n")
-                        else:
-                            err_parts.append(line + b"\n")
-                else:
-                    # EOF on this pipe.
-                    fds.pop(fd, None)
-                    try:
-                        os.close(fd)
-                    except OSError:
-                        pass
+                if _p0.suffix.lower() == ".py" and _p0.is_file():
+                    cmd = [sys.executable, *cmd]
+            except Exception:
+                pass
+        if os.name == "posix":
+            # Own session => kill_pid_tree can SIGKILL the whole group.
+            popen_kwargs["start_new_session"] = True
+        else:
+            # New process group so taskkill /T (tree kill) works cleanly.
+            popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        proc = subprocess.Popen(cmd, **popen_kwargs)
+    except Exception as e:
+        return {
+            "ok": False, "returncode": None, "stdout": "", "stderr": str(e),
+            "timed_out": False, "mem_exceeded": False,
+            "seconds": time.time() - start, "max_rss_bytes": 0,
+        }
+
+    threads = []
+    for name, pipe in (("out", proc.stdout), ("err", proc.stderr)):
+        if pipe is not None:
+            t = threading.Thread(
+                target=_reader,
+                args=(pipe, out_lines if name == "out" else err_lines, name),
+                daemon=True,
+            )
+            t.start()
+            threads.append(t)
 
     timed_out = False
     mem_exceeded = False
     aborted = False
     try:
         while True:
-            drain()
             rss = get_process_tree_rss_bytes(proc)
             if rss > max_rss:
                 max_rss = rss
@@ -227,40 +273,43 @@ def run_subprocess(
                 except RunAbort:
                     aborted = True
                     kill_process_tree(proc)
-                    drain(2.0)
                     break
                 except Exception:
                     pass
             exited = proc.poll() is not None
-            if exited and not fds:
+            if exited and all(ev.is_set() for ev in readers_done.values()):
                 break
             if timeout is not None and elapsed > timeout:
                 timed_out = True
                 kill_process_tree(proc)
-                drain(2.0)
                 break
             if memory_limit_bytes is not None and rss > memory_limit_bytes:
                 mem_exceeded = True
                 kill_process_tree(proc)
-                drain(2.0)
                 break
             time.sleep(poll_interval)
     except Exception:
         kill_process_tree(proc)
-        drain(2.0)
     finally:
+        # Let the readers flush whatever the (killed) child left in the pipes.
+        for ev in readers_done.values():
+            try:
+                ev.wait(2.0)
+            except Exception:
+                pass
         try:
             proc.wait(timeout=5)
         except Exception:
             pass
-        for fd in list(fds):
+        for pipe in (proc.stdout, proc.stderr):
             try:
-                os.close(fd)
-            except OSError:
+                if pipe is not None:
+                    pipe.close()
+            except Exception:
                 pass
 
-    stdout = "".join(p.decode("utf-8", "replace") for p in out_parts)
-    stderr = "".join(p.decode("utf-8", "replace") for p in err_parts)
+    stdout = "".join(p.decode("utf-8", "replace") for p in out_lines)
+    stderr = "".join(p.decode("utf-8", "replace") for p in err_lines)
     return {
         "ok": proc.returncode == 0,
         "returncode": proc.returncode,

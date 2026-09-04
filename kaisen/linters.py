@@ -46,6 +46,23 @@ def _which(name: str) -> Optional[str]:
     _TOOL_CACHE[name] = candidates[0]
     return candidates[0]
 
+def _run_tool(cmd: List[str], input_bytes: Optional[bytes] = None, timeout: int = 60) -> Tuple[bool, str]:
+    """Run a toolchain binary; returns (ok, message).  Never raises:
+    a missing binary reports 'not found' (the message goes back to the
+    model as step feedback), and output is decoded UTF-8 with replacement
+    — locale codecs (cp1252 "charmap" on Windows) must not break
+    validation of non-ASCII compiler messages."""
+    exe = cmd[0]
+    if shutil.which(exe) is None:
+        return False, f"{exe} not found — install the toolchain to validate this language"
+    try:
+        r = subprocess.run(cmd, input=input_bytes, capture_output=True, timeout=timeout)
+    except Exception as e:
+        return False, f"{exe} could not run: {e}"
+    msg = (r.stderr or b"").decode("utf-8", "replace")
+    if not msg.strip():
+        msg = (r.stdout or b"").decode("utf-8", "replace")
+    return r.returncode == 0, msg.strip()
 
 def _pyflakes_issues(code: str) -> str:
     """pyflakes diagnostics as text (undefined names, unused imports…)."""
@@ -91,10 +108,7 @@ def autofix_python(path: str | Path) -> Tuple[bool, List[str]]:
     if ruff:
         try:
             before = path.read_text(encoding="utf-8")
-            subprocess.run(
-                [ruff, "check", "--fix", "--select", "F401,F841", "--quiet", str(path)],
-                capture_output=True, text=True, timeout=60,
-            )
+            _run_tool([ruff, "check", "--fix", "--select", "F401,F841", "--quiet", str(path)], timeout=60)
             if path.read_text(encoding="utf-8") != before:
                 fixed = True
                 notes.append("ruff: removed unused imports/variables")
@@ -115,8 +129,7 @@ def lint_shell(path: str | Path) -> List[str]:
     bash = _which("bash")
     if not bash:
         return []
-    r = subprocess.run([bash, "-n", str(path)], capture_output=True, text=True, timeout=30)
-    out = ((r.stderr or "") + (r.stdout or "")).strip()
+    _ok, out = _run_tool([bash, "-n", str(path)], timeout=30)
     return [l for l in out.splitlines() if l.strip()][:6]
 
 
@@ -124,8 +137,7 @@ def lint_javascript(path: str | Path) -> List[str]:
     node = _which("node")
     if not node:
         return []
-    r = subprocess.run([node, "--check", str(path)], capture_output=True, text=True, timeout=30)
-    out = ((r.stderr or "") + (r.stdout or "")).strip()
+    _ok, out = _run_tool([node, "--check", str(path)], timeout=30)
     return [l for l in out.splitlines() if l.strip()][:6]
 
 
@@ -146,37 +158,34 @@ def syntax_check(language: str, code: str) -> tuple:
     if lang in ("ruby", "r", "lua", "perl", "haskell", "php", "java", "go", "rust", "zig", "kotlin", "swift", "scala", "dart", "csharp"):
         return True, ""  # no cheap universal probe; structural gates cover these
     if lang == "shell":
-        r = subprocess.run(["bash", "-n"], input=code, capture_output=True, text=True, timeout=30)
-        return r.returncode == 0, (r.stderr or r.stdout or "").strip()[:400]
+        ok, msg = _run_tool(["bash", "-n"], input_bytes=code.encode("utf-8"), timeout=30)
+        return ok, msg[:400]
     if lang in ("javascript", "typescript"):
-        r = subprocess.run(["node", "--check"], input=code, capture_output=True, text=True, timeout=30)
-        return r.returncode == 0, (r.stderr or r.stdout or "").strip()[:400]
+        ok, msg = _run_tool(["node", "--check"], input_bytes=code.encode("utf-8"), timeout=30)
+        return ok, msg[:400]
     if lang in ("c", "cpp"):
         ext = ".c" if lang == "c" else ".cpp"
-        f = _tempfile.NamedTemporaryFile("w", suffix=ext, delete=False)
+        f = _tempfile.NamedTemporaryFile("w", suffix=ext, delete=False, encoding="utf-8")
         f.write(code)
         f.close()
         try:
-            r = subprocess.run(["g++" if lang == "cpp" else "gcc", "-fsyntax-only", "-x", "c++" if lang == "cpp" else "c", f.name],
-                               capture_output=True, text=True, timeout=60)
-            msg = (r.stderr or r.stdout or "").strip()
+            ok, msg = _run_tool(
+                ["g++" if lang == "cpp" else "gcc", "-fsyntax-only",
+                 "-x", "c++" if lang == "cpp" else "c", f.name], timeout=60)
             # strip temp-path noise from the message
-            msg = msg.replace(f.name, "program")
-            return r.returncode == 0, msg[:600]
+            return ok, msg.replace(f.name, "program")[:600]
         finally:
             Path(f.name).unlink(missing_ok=True)
     if lang == "cuda":
-        f = _tempfile.NamedTemporaryFile("w", suffix=".cu", delete=False)
+        f = _tempfile.NamedTemporaryFile("w", suffix=".cu", delete=False, encoding="utf-8")
         f.write(code)
         f.close()
         try:
             out = _tempfile.NamedTemporaryFile(suffix=".o", delete=False)
             out.close()
-            r = subprocess.run(["nvcc", "-arch=native", "-c", f.name, "-o", out.name],
-                               capture_output=True, text=True, timeout=120)
-            msg = (r.stderr or r.stdout or "").strip().replace(f.name, "program")
+            ok, msg = _run_tool(["nvcc", "-arch=native", "-c", f.name, "-o", out.name], timeout=120)
             Path(out.name).unlink(missing_ok=True)
-            return r.returncode == 0, msg[:600]
+            return ok, msg.replace(f.name, "program")[:600]
         finally:
             Path(f.name).unlink(missing_ok=True)
     return True, ""

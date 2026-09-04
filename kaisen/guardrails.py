@@ -25,7 +25,7 @@ disables everything.
 from __future__ import annotations
 
 import re
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, Dict, List, Tuple
 
 from .config import FrameworkConfig, get_config
@@ -116,11 +116,26 @@ def _resolve_executable(parts: List[str], project_dir: Path) -> Tuple[bool, str]
     if not parts:
         return False, "empty command"
     exe = parts[0]
+    p = Path(exe)
     # Absolute path inside the project dir is trusted (user-authored harness).
-    if exe.startswith("/") or exe.startswith("./") or exe.startswith("../"):
-        p = Path(exe)
+    # Path.is_absolute covers POSIX "/..." and Windows "C:\..."; the
+    # PureWindowsPath check keeps drive paths recognized on every OS so a
+    # spec scans identically cross-platform.
+    if p.is_absolute() or PureWindowsPath(exe).is_absolute():
         try:
             resolved = p.resolve()
+            proj_resolved = project_dir.resolve()
+            if resolved == proj_resolved or proj_resolved in resolved.parents:
+                return True, ""
+        except Exception:
+            pass
+        return False, f"denied: executable outside project directory: {exe}"
+    # Relative path with a separator (./x, ../x, harness/build.py): resolve
+    # against the PROJECT dir — matching what the pipeline does at execution
+    # time (Project.resolve_program) — never against the process CWD.
+    if "/" in exe or "\\" in exe:
+        try:
+            resolved = (project_dir / p).resolve()
             proj_resolved = project_dir.resolve()
             if resolved == proj_resolved or proj_resolved in resolved.parents:
                 return True, ""
@@ -177,7 +192,7 @@ def check_command(
     else:
         # Framework-level command with no project context: enforce launcher
         # allowlist only (python/gcc/etc. — all benign in the framework core).
-        if parts and parts[0].startswith(("/", "./", "../")):
+        if parts and (Path(parts[0]).is_absolute() or PureWindowsPath(parts[0]).is_absolute()):
             return True, ""
         if parts and Path(parts[0]).name in ALLOWED_LAUNCHERS:
             return True, ""

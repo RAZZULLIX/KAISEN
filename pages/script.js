@@ -243,6 +243,7 @@ function showWelcome(show) {
 async function fetchState() {
   try {
     const [wRes, sRes] = await Promise.all([api('/api/workers'), api('/api/state')]);
+    if (wRes.no_engine || sRes.no_engine) return; // no engine — loadActive() owns the welcome state
     showWelcome(false);
     renderWorkers(wRes.workers || {}, wRes.schema || {}, wRes.telemetry || {}, sRes.best_metrics || {});
     document.getElementById('kpi-gen').textContent = sRes.generation ?? '--';
@@ -1003,8 +1004,12 @@ function startIterationPolling() {
 
 
 async function loadActive() {
+  let snap = null;
   try {
-    const snap = await api('/api/active');
+    const s = await api('/api/active');
+    if (!s.no_engine) snap = s; // no_engine = clean "no engine" signal (200, not an error)
+  } catch (e) { /* no engine running — same path as below */ }
+  if (snap) {
     activeProjectId = snap.project_id;
     setProjectTabVisible(true);
     metricSchema = snap.metrics_schema || {};
@@ -1014,21 +1019,21 @@ async function loadActive() {
     document.getElementById('dash-breadcrumbs').textContent = `PROJECT · ${snap.project_id.toUpperCase()}`;
     if (settingsTab === 'servers' && currentView === 'config') { renderServers(snap.llm); loadModelStats(); }
     if (iterationsData.length) { renderIterations(); renderBestFromRows(); }
-  } catch (e) {
-    metricSchema = {};
-    showWelcome(true);
-    document.getElementById('dash-project-title').textContent = 'No active project';
-    document.getElementById('dash-breadcrumbs').textContent = 'PROJECT';
-    setProjectTabVisible(!!settingsProjectId);
-    if (settingsTab === 'project' && !settingsProjectId) switchSettingsTab('general');
-    // No engine running (fresh install): still show the server registry
-    // from config.json so Settings → LLM Servers works pre-launch.
-    if (settingsTab === 'servers' && currentView === 'config') {
-      try {
-        const c = await api('/api/config');
-        renderServers(c.llm || {});
-      } catch (e2) { console.warn('servers fallback failed', e2); }
-    }
+    return;
+  }
+  metricSchema = {};
+  showWelcome(true);
+  document.getElementById('dash-project-title').textContent = 'No active project';
+  document.getElementById('dash-breadcrumbs').textContent = 'PROJECT';
+  setProjectTabVisible(!!settingsProjectId);
+  if (settingsTab === 'project' && !settingsProjectId) switchSettingsTab('general');
+  // No engine running (fresh install): still show the server registry
+  // from config.json so Settings → LLM Servers works pre-launch.
+  if (settingsTab === 'servers' && currentView === 'config') {
+    try {
+      const c = await api('/api/config');
+      renderServers(c.llm || {});
+    } catch (e2) { console.warn('servers fallback failed', e2); }
   }
 }
 

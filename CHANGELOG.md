@@ -5,6 +5,59 @@ All notable changes to KAISEN are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.3-alpha] — 2026-09-04
+
+Windows compatibility release + field-crash fixes from user reports.
+
+### Fixed
+
+- **Suggest crash on gate failure** (`UnboundLocalError: notes`): when a
+  validation gate failed BEFORE the smoke run, the repair section read
+  `stage`/`notes`/`reason`, which only exist after a smoke run — the whole
+  suggest flow died (hit in the wild with gpt-oss replies carrying
+  `<|channel|>` reasoning tokens that trip JSON extraction). The variables
+  now default before the branch; gate errors become the repair feedback.
+- **charmap codec crash on non-ASCII model output**: lint/autofix wrote
+  candidate code to temp files without an explicit encoding — under a
+  non-UTF-8 locale (cp1252 "charmap" on Windows) characters like U+202F
+  (narrow no-break space, which gpt-oss emits) raised
+  `UnicodeEncodeError` ("Suggest failed: 'charmap' codec can't encode
+  character '\u202f'"). All temp-file writes are now explicit UTF-8 and all
+  toolchain output decodes as UTF-8 with replacement.
+- **400 spam in the dashboard console**: with no engine running,
+  `/api/active`, `/api/state` and `/api/workers` (polled every 2 s) — plus
+  `/api/llm/live`, `/api/model/status`, `/api/debug/logs` — returned 400.
+  No-engine is a NORMAL state: all read endpoints now answer 200 with
+  `no_engine: true` / empty payloads, and the frontend treats it as the
+  welcome state instead of an error.
+
+### Added
+
+- **Windows process supervision**: `run_subprocess` no longer drains pipes
+  with `select()` (POSIX-only — on Windows it deadlocks as soon as a child
+  fills the 64 KiB pipe buffer); each pipe now has its own reader thread on
+  every OS. Live-telemetry (`KAISEN_PROGRESS`) parsing is unchanged.
+- **Cross-platform tree kill**: timeouts, aborts and worker kills now take
+  down the whole harness + candidate tree (`taskkill /T` with psutil
+  fallback on Windows, process-group SIGKILL elsewhere).
+- **Windows path recognition in guardrails**: drive paths (`C:\…`) are
+  recognized as absolute on every OS (in-project trusted, out-of-project
+  denied — never falling through to the bare-launcher allowlist), and
+  relative programs with separators resolve against the PROJECT dir at scan
+  time, matching execution-time resolution.
+- `.py` step programs run through the active interpreter on non-POSIX hosts;
+  the custom-fixer invocation uses `sys.executable` (not hardcoded
+  `python3`); the file-open endpoint falls back to `os.startfile`.
+- Regression tests: `tests/test_windows_compat.py` — no-deadlock drain of
+  >64 KiB output, tree kill on timeout, guardrail path policy (POSIX +
+  Windows drive paths), the suggest gate-failure path, and U+202F linting
+  under a forced ASCII locale.
+
+### Changed
+
+- Frontend `loadActive`/`fetchState` handle the clean no-engine response
+  (welcome picker + config-based server registry pre-launch).
+
 ## [0.1.2-alpha] — 2026-08-19
 
 Second field-test release: the operator loop made first-class, budget and

@@ -1490,6 +1490,10 @@ class DashboardServer:
         return _json({"ok": True, "state": eng.engine_state, "project_id": eng.project.id})
 
     async def _api_active(self, request):
+        if self.engine is None:
+            # No engine: report cleanly (200) instead of 400 spam — the
+            # dashboard's loadActive() shows the welcome picker on no_engine.
+            return _json({"no_engine": True})
         eng = self._require_engine()
         snap = eng.snapshot()
         snap["engines"] = self._engines_summary()
@@ -1696,6 +1700,9 @@ class DashboardServer:
     # legacy-shape endpoints (original dashboard UI)
     # ------------------------------------------------------------------ #
     async def _api_workers_legacy(self, request):
+        if self.engine is None:
+            # No engine: report cleanly (200) instead of 400 spam.
+            return _json({"no_engine": True})
         eng = self._require_engine()
         spec = eng.project.spec
         # Which LLM served each generation (for the Model Routed card).
@@ -1731,6 +1738,9 @@ class DashboardServer:
         })
 
     async def _api_state_legacy(self, request):
+        if self.engine is None:
+            # No engine: report cleanly (200) instead of 400 spam.
+            return _json({"no_engine": True})
         eng = self._require_engine()
         st = eng.state
         best = st.best
@@ -1902,6 +1912,10 @@ class DashboardServer:
 
 
     async def _api_llm_live_legacy(self, request):
+        if self.engine is None:
+            # No engine: report cleanly (200) instead of 400 spam — this is
+            # polled every 150 ms while the live-output modal is open.
+            return _json({"mode": "live", "generating": False, "tps": 0, "sessions": []})
         eng = self._require_engine()
         gen = request.query.get("gen")
         if gen:
@@ -1949,6 +1963,8 @@ class DashboardServer:
             "sessions": sessions,
         })
     async def _api_debug_logs_legacy(self, request):
+        if self.engine is None:
+            return _json({"logs": []})
         eng = self._require_engine()
         return _json({"logs": eng._last_log[-100:]})
 
@@ -2032,12 +2048,17 @@ class DashboardServer:
         path = request.match_info.get("path", "")
         import subprocess
         try:
-            subprocess.Popen(["xdg-open", path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if os.name == "posix":
+                subprocess.Popen(["xdg-open", path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            else:
+                os.startfile(path)  # type: ignore[attr-defined]
             return _json({"ok": True})
         except Exception as e:
             return _json({"ok": False, "error": str(e)})
 
     async def _api_model_status_legacy(self, request):
+        if self.engine is None:
+            return _json({"is_busy": False, "llm_read_timeout": float(self.cfg.llm.get("read_timeout", 1200))})
         eng = self._require_engine()
         timeout = float(self.cfg.llm.get("read_timeout", 1200))
         return _json({"is_busy": eng.orchestrator.is_busy, "llm_read_timeout": timeout})

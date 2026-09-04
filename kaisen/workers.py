@@ -348,10 +348,7 @@ class WorkerPool:
         pid = st.get("child_pid")
         if not pid or st.get("status") != "running":
             return False
-        try:
-            # The harness runs in its own session/process group — kill the
-            # whole tree (harness + candidate program).
-            os.killpg(int(pid), signal.SIGKILL)
-            return True
-        except (ProcessLookupError, OSError):
-            return False
+        from .util import kill_pid_tree
+        # The harness runs in its own session/process group — kill the
+        # whole tree (harness + candidate program).
+        return kill_pid_tree(int(pid))
