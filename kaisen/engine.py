@@ -205,6 +205,9 @@ class ProjectEngine:
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._state = STATE_STOPPED
+        # Non-empty when start() was refused (e.g. missing toolchain) —
+        # surfaced via snapshot()/API so the UI can show WHY it won't run.
+        self._startup_error = ""
         self._active_generations = 0  # producers inside LLM request -> submit
         self._running = False
         self._producer_threads: List[Any] = []
@@ -269,9 +272,11 @@ class ProjectEngine:
         if self.engine_state == STATE_RUNNING:
             return
         self._stop.clear()
+        self._refresh_spec()
+        if not self._preflight_toolchain():
+            return  # stays stopped; error surfaced via snapshot/API/UI
         self._set_state(STATE_PAUSED if paused else STATE_RUNNING)
         self._running = True
-        self._refresh_spec()
         self.project.ensure_dirs()
         self.state.data["active"] = True
         self.state.data["started_at"] = self.state.data.get("started_at") or time.time()
@@ -628,6 +633,24 @@ class ProjectEngine:
     # ======================================================================
     # spec freshness / baseline drift / fuzzy basis / retention
     # ======================================================================
+
+    def _preflight_toolchain(self) -> bool:
+        """Refuse to start when a compiled language has no usable toolchain
+        on this host — halting here beats burning generations of build_fail
+        (e.g. gcc missing on a Windows box).  Interpreted languages always
+        pass: the engine's own interpreter is the toolchain."""
+        from .languages import find_toolchain, toolchain_candidates
+        lang = self.project.spec.get("language") or ""
+        cands = toolchain_candidates(lang)
+        if cands and not find_toolchain(lang):
+            msg = (f"no {lang} toolchain on PATH (tried: {', '.join(cands)}) — "
+                   f"install a compiler for this project's language, then start again")
+            self._startup_error = msg
+            self.state.data["active"] = False
+            self._log("preflight failed — " + msg)
+            return False
+        self._startup_error = ""
+        return True
 
     def _refresh_spec(self) -> None:
         """Re-read project.json so spec changes (timeouts, metrics, engine
@@ -1462,6 +1485,7 @@ class ProjectEngine:
             "project_name": self.project.name,
             "state": self.state.snapshot(),
             "engine_state": self.engine_state,
+            "engine_error": self._startup_error,
             "generating": self.is_generating,
             "metrics_schema": schema,
             "metric_goodness": goodness,

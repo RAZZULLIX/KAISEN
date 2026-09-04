@@ -30,6 +30,22 @@ Windows compatibility release + field-crash fixes from user reports.
   No-engine is a NORMAL state: all read endpoints now answer 200 with
   `no_engine: true` / empty payloads, and the frontend treats it as the
   welcome state instead of an error.
+- **Demo build crash when no C compiler is installed** (field report: box
+  without gcc — every generation `build_fail` with a raw
+  `FileNotFoundError` traceback instead of a readable error): the demo
+  harness now resolves the compiler as `gcc → cc → clang`, and a missing
+  toolchain exits with an OS-specific install hint (Miniconda/MSYS2 on
+  Windows) instead of an unhandled traceback.
+- **Toolchain preflight at engine start**: a compiled-language project no
+  longer starts when its toolchain is absent from PATH — the engine stays
+  stopped and surfaces the actionable error (dashboard fleet row + modal
+  on play/resume) instead of burning generations of build_fail.
+- **Garbled generation-list rows when details contain quotes** (every
+  Python traceback does: `File "…"`): `escapeHtml` now escapes quotes too,
+  so `title="…"` attributes can no longer break out of the markup.
+- **Windows artifact naming**: MinGW gcc appends `.exe` to extensionless
+  `-o` targets; on Windows the `{artifact}` token for compiled projects
+  now carries the suffix so build, verify and score agree on one file.
 
 ### Added
 

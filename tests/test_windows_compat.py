@@ -19,6 +19,11 @@ E-1  — suggest repair loop: a GATE failure skips the smoke run entirely;
 E-2  — _lint_scripts under a non-UTF-8 locale: model output containing
        U+202F (narrow no-break space) must not crash the temp-file write
        ('charmap' codec can't encode character '\\u202f').
+W-5  — toolchain preflight: start() on a compiled-language project with NO
+       compiler on PATH must halt (stopped + actionable error), not burn
+       generations of build_fail.
+W-6  — Windows artifact naming: MinGW appends .exe to extensionless -o
+       targets, so the {artifact} token must carry it there.
 """
 import os
 import subprocess
@@ -277,3 +282,74 @@ def test_lint_scripts_survives_narrow_nbsp_under_ascii_locale():
                        capture_output=True, env=env, timeout=120)
     assert r.returncode == 0, f"crashed under ASCII locale: {r.stderr.decode('utf-8', 'replace')[-800:]}"
     assert b"ERRS:[]" in r.stdout
+
+
+# ----------------------------------------------------------------------
+# W-5 — toolchain preflight: start() halts when the compiler is missing
+#      (field report: Windows box without gcc — every one of 11 generations
+#      build_failed with a raw FileNotFoundError traceback).
+# W-6 — .exe artifact suffix on Windows (MinGW appends .exe to extensionless
+#      -o targets; build/verify/score must agree on one file).
+# ----------------------------------------------------------------------
+
+def _make_preflight_engine(tmp_path):
+    from kaisen.config import FrameworkConfig
+    from kaisen.engine import ProjectEngine
+    from kaisen.llm import ModelOrchestrator
+    from kaisen.projects import ProjectRegistry
+
+    cfg = FrameworkConfig(tmp_path / "config.json")
+    registry = ProjectRegistry(tmp_path / "projects")
+    spec = {
+        "id": "pre", "name": "pre", "language": "c", "artifact_name": "program",
+        "steps": {
+            "build": {"program": "gcc", "args": ["-O2", "{candidate}", "-o", "{artifact}"], "timeout": 60},
+            "verify": [], "score": [],
+        },
+        "metrics": {"ms": {"direction": "lower"}},
+    }
+    project = registry.create("pre", spec)
+    return ProjectEngine(project, orchestrator=ModelOrchestrator(cfg),
+                         registry=registry, worker_count=0)
+
+
+def test_preflight_halts_without_toolchain(tmp_path, monkeypatch):
+    """A C project on a box without gcc/cc/clang must NOT start: it stays
+    stopped with an actionable error instead of burning generations of
+    build_fail."""
+    import shutil
+    eng = _make_preflight_engine(tmp_path)
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    eng.start()
+    assert eng.engine_state == "stopped"
+    assert eng.pool.worker_count() == 0
+    err = eng.snapshot()["engine_error"]
+    assert "no c toolchain on PATH" in err
+    for cand in ("gcc", "cc", "clang"):
+        assert cand in err
+
+
+def test_preflight_passes_with_toolchain(tmp_path, monkeypatch):
+    """With a compiler present, start proceeds exactly as before."""
+    import shutil
+    eng = _make_preflight_engine(tmp_path)
+    monkeypatch.setattr(shutil, "which",
+                        lambda name: "/usr/bin/gcc" if name == "gcc" else None)
+    try:
+        eng.start(paused=True)
+        assert eng.engine_state == "paused"
+        assert eng.snapshot()["engine_error"] == ""
+    finally:
+        eng.stop()
+
+
+def test_artifact_basename_windows_exe_suffix():
+    """MinGW gcc appends .exe to extensionless -o targets: on Windows a
+    compiled artifact must carry the suffix so build/verify/score agree on
+    one file; interpreted artifacts and explicit-extension names stay as-is."""
+    from kaisen.languages import artifact_basename
+    assert artifact_basename("program", "c", os_name="posix") == "program"
+    assert artifact_basename("program", "c", os_name="nt") == "program.exe"
+    assert artifact_basename("program", "python", os_name="nt") == "program"
+    assert artifact_basename("program.bin", "c", os_name="nt") == "program.bin"
+    assert artifact_basename("program", None, os_name="nt") == "program.exe"

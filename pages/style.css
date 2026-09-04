@@ -586,6 +586,7 @@ img.footer-mark { height: 14px; width: 14px; object-fit: cover; border-radius: 3
 .fleet-stat { font-size: 12px; color: var(--muted); white-space: nowrap; }
 .fleet-stat b { color: var(--text2); font-weight: 600; }
 .fleet-metrics { color: var(--muted); font-family: monospace; }
+.fleet-error { font-size: 12px; color: var(--danger); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 340px; }
 .fleet-actions { margin-left: auto; display: flex; gap: 8px; }
 .fleet-empty { height: auto; padding: 28px 0; }
 

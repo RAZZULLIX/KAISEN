@@ -11,8 +11,10 @@ spec-defined commands).  What needs a registry:
 
 from __future__ import annotations
 
+import os
+import shutil
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 LANGUAGES: Dict[str, Dict[str, Any]] = {
     "c":          {"ext": ".c",     "fence": "c",          "kind": "compiled",    "toolchain": "gcc"},
@@ -55,6 +57,55 @@ ALIASES = {
 
 # Compiler-message fixer family: gcc/nvcc "did you forget / did you mean".
 C_COMPILER_FAMILY = {"c", "cpp", "cc", "cxx", "cuda"}
+# Ordered acceptable binaries per compiled language (first hit on PATH wins).
+# Mirrors what harness build scripts actually invoke, including common
+# fallbacks (cc/clang for C) — preflight must match that reality.
+TOOLCHAIN_CANDIDATES: Dict[str, Tuple[str, ...]] = {
+    "c":          ("gcc", "cc", "clang"),
+    "cpp":        ("g++", "c++", "clang++"),
+    "cuda":       ("nvcc",),
+    "java":       ("javac",),
+    "typescript": ("tsc",),
+    "csharp":     ("dotnet", "csc", "mcs"),
+    "go":         ("go",),
+    "rust":       ("rustc",),
+    "kotlin":     ("kotlinc",),
+    "swift":      ("swiftc",),
+    "zig":        ("zig",),
+    "scala":      ("scalac",),
+    "dart":       ("dart",),
+    "haskell":    ("ghc", "runghc"),
+    "d":          ("dmd", "ldc2", "gdc"),
+}
+
+
+def toolchain_candidates(lang: Optional[str]) -> Tuple[str, ...]:
+    """Acceptable toolchain binaries for a language.  Empty tuple =
+    interpreted (nothing to check — the engine's own interpreter suffices)."""
+    return TOOLCHAIN_CANDIDATES.get(normalize_lang(lang), ())
+
+
+def find_toolchain(lang: Optional[str]) -> Optional[str]:
+    """First toolchain binary for `lang` present on PATH (None = missing)."""
+    for name in toolchain_candidates(lang):
+        if shutil.which(name):
+            return name
+    return None
+
+
+def artifact_basename(artifact_name: str, lang: Optional[str], os_name: str = os.name) -> str:
+    """Real on-disk name of a built artifact.
+
+    Windows compilers (MinGW gcc & co.) append .exe to extensionless -o
+    targets, so compiled languages get the explicit suffix there — build,
+    verify and score all receive the same {artifact} token and agree on one
+    file.  Interpreted artifacts and names that already carry an extension
+    are left as-is."""
+    if os_name == "posix" or Path(artifact_name).suffix:
+        return artifact_name
+    if lang_info(lang).get("kind") == "compiled":
+        return artifact_name + ".exe"
+    return artifact_name
 
 
 def normalize_lang(lang: Optional[str]) -> str:

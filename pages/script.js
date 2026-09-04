@@ -99,7 +99,9 @@ function changeScoreType() {
 function escapeHtml(text) {
   const div = document.createElement('div');
   div.textContent = text;
-  return div.innerHTML;
+  // innerHTML escapes only & < > — add quotes so the result is safe inside
+  // double-quoted attributes (title="...") as well as in text content.
+  return div.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 function systemAlert(message) {
   const modal = document.getElementById('system-modal');
@@ -498,9 +500,16 @@ async function handleLlmControl(action) {
       llmControlState = 'stopped';
     } else if (action === 'pause') {
       await api('/api/override/llm_pause', { method: 'POST', body: 'true' });
-      llmControlState = 'pausing';
     } else if (action === 'play') {
-      await api('/api/llm/resume', { method: 'POST' });
+      const r = await api('/api/llm/resume', { method: 'POST' });
+      if (r && r.error) {
+        // start was refused (e.g. missing toolchain) — keep the button state
+        // honest and tell the user why instead of pretending it ran.
+        updateLlmButtons();
+        updateStatusPill();
+        systemAlert(r.error);
+        return;
+      }
       llmControlState = 'running';
     }
     llmPressTracked = true;
@@ -642,6 +651,7 @@ function renderFleet(engines) {
       <span class="fleet-stat">best <b>${escapeHtml(best)}</b>${metricBits ? ' <span class="fleet-metrics">' + metricBits + '</span>' : ''}</span>
       <span class="fleet-stat">multi <b>${escapeHtml(String(e.multi != null ? e.multi : 1))}</b></span>
       <span class="fleet-stat">nw <b>${escapeHtml(String(e.workers != null ? e.workers : 0))}</b></span>
+      ${e.engine_error ? `<span class="fleet-error" title="${escapeHtml(e.engine_error)}">${escapeHtml(e.engine_error)}</span>` : ''}
       <span class="fleet-actions">
         <button class="btn btn-sm" onclick="switchProject('${id}')">Select</button>
         <button class="btn btn-sm" onclick="fleetTogglePause('${id}', ${paused ? 'false' : 'true'})">${paused ? 'Resume' : 'Pause'}</button>
@@ -654,7 +664,8 @@ function renderFleet(engines) {
 async function fleetTogglePause(id, paused) {
   const wantPause = paused === true || paused === 'true';
   try {
-    await api('/api/engine/pause', { method: 'POST', body: JSON.stringify({ project_id: id, paused: wantPause }) });
+    const r = await api('/api/engine/pause', { method: 'POST', body: JSON.stringify({ project_id: id, paused: wantPause }) });
+    if (r && r.error) { systemAlert(r.error); return; }
     toast(wantPause ? 'Engine paused' : 'Engine resumed');
   } catch (e) {
     console.error('Pause toggle failed', e);

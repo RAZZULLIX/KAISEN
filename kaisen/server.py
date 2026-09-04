@@ -262,6 +262,7 @@ class DashboardServer:
                 "best_metrics": dict(best.get("metrics") or {}),
                 "multi": getattr(eng, "_multi", 1),
                 "workers": len(getattr(getattr(eng, "pool", None), "_procs", {}) or {}),
+                "engine_error": getattr(eng, "_startup_error", ""),
             }
             if snap:
                 row["spec_revision"] = snap.get("spec_revision")
@@ -1363,6 +1364,9 @@ class DashboardServer:
         data = await request.json() if request.can_read_body else {}
         multi = int(data.get("multi", 1)) if isinstance(data, dict) else 1
         eng.start(multi=multi)
+        err = getattr(eng, "_startup_error", "")
+        if err and eng.engine_state == "stopped":
+            return _json({"ok": False, "state": eng.engine_state, "error": err})
         return _json({"ok": True})
     async def _api_engine_autofix(self, request):
         """Per-engine compile-loop knobs (KAI AUTOFIX): deterministic
@@ -1487,6 +1491,10 @@ class DashboardServer:
             eng.request_pause()
         else:
             eng.request_resume()
+        err = getattr(eng, "_startup_error", "")
+        if not paused and err and eng.engine_state == "stopped":
+            return _json({"ok": False, "state": eng.engine_state,
+                          "project_id": eng.project.id, "error": err})
         return _json({"ok": True, "state": eng.engine_state, "project_id": eng.project.id})
 
     async def _api_active(self, request):
@@ -2103,6 +2111,9 @@ class DashboardServer:
     async def _api_llm_resume_legacy(self, request):
         eng = self._require_engine()
         eng.request_resume()
+        err = getattr(eng, "_startup_error", "")
+        if err and eng.engine_state == "stopped":
+            return _json({"ok": False, "state": eng.engine_state, "error": err})
         return _json({"ok": True, "state": eng.engine_state})
 
     async def _api_override_status_legacy(self, request):

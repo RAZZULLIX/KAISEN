@@ -25,6 +25,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from .guardrails import check_command
 from .projects import Project, expand_command
+from .languages import artifact_basename
 from .scores import parse_metrics
 from .util import format_bytes, run_subprocess, RunAbort
 
@@ -155,8 +156,8 @@ def run_pipeline(
     build_fixes: List[str] = []
     if build_step:
         build_step = _materialize_inline(build_step, project, "build", 0)
-        artifact_path = workdir / str(spec.get("artifact_name", "program"))
-        # The build program receives the target artifact path as {artifact}.
+        artifact_path = workdir / artifact_basename(
+            str(spec.get("artifact_name", "program")), spec.get("language"))
         cmd = expand_command(build_step, project, candidate, artifact_path, workdir)
         ok, reason = check_command(cmd, project=spec, project_dir=project.path)
         if not ok:
