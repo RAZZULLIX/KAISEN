@@ -188,6 +188,7 @@ BARE command lines, never prefixed with OK. Commands (case-insensitive):
   CANDIDATE [lang]            queue code into evolution: lines until END
   SNAPSHOT [LIST|TAKE|RESTORE <id>] [ON <pid>]
   SERVERS                     LLM servers + active set
+  TOOLCHAINS                  per-language toolchain availability on this OS
   GOAL <words...> [TEMP]     AI designs + validates a project (blocking);
                              uses the staged BASELINE as the program.
                              TEMP: the project lands in the temp/ root and
@@ -237,6 +238,7 @@ ALIASES: Dict[str, List[str]] = {
     "BUDGET": ["BUDGET", "TIME", "REMAINING", "LEFT"],
     "SERVERS": ["SERVERS", "LLM", "BACKENDS"],
     "MODELS": ["MODELS", "SCOREBOARD", "RANKINGS"],
+    "TOOLCHAINS": ["TOOLCHAINS", "TOOLS", "COMPILERS", "LANGTOOLS"],
     "AUTOFIX": ["AUTOFIX", "FIXER"],
     "RESUME": ["RESUME", "UNPAUSE", "CONTINUE", "PLAY"],
     "STOP": ["STOP", "KILL", "OFF"],
@@ -989,6 +991,30 @@ class KaiSession:
                          + (f" | rate {r['oneshot_rate']}" if r.get("oneshot_rate") is not None else ""))
         return "\n".join(lines)
 
+    def cmd_toolchains(self, arg: str) -> str:
+        """TOOLCHAINS — per-language toolchain availability on THIS OS:
+        compiled (compiler present?) and interpreted (interpreter present?).
+        OS-aware: the binary probe uses PATH and the install hint matches
+        the running platform (apt/snap/npm on Linux, brew on macOS,
+        winget on Windows).  A missing toolchain means that language's
+        factory projects are skipped at registration on this machine."""
+        lang_filter = arg.strip().lower()
+        from .languages import toolchain_status_all
+        rows = toolchain_status_all()
+        if lang_filter:
+            rows = [r for r in rows if lang_filter in r["id"]]
+        if not rows:
+            return "OK no languages matched"
+        ok_n = sum(1 for r in rows if r["installed"])
+        lines = [f"OK {ok_n}/{len(rows)} toolchains present on {rows[0]['os']} "
+                 f"- {'ok: ' + ', '.join(r['id'] for r in rows if r['installed']) if ok_n else 'none'}"
+                 f" | missing: " + ", ".join(r['id'] for r in rows if not r['installed'])]
+        for r in rows:
+            mark = "OK  " if r["installed"] else "MISS"
+            bin_or = r["binary"] or (r["hint"] or ("-"))
+            lines.append(f"  [{r['kind'][:4]}] {r['id']:12} {mark} {bin_or}")
+        return "\n".join(lines)
+
     def cmd_autofix(self, arg: str) -> str:
         """AUTOFIX [tries <n>] [repair <n|off>] — per-run compile-loop
         knobs for the session's project engine: how many deterministic
@@ -1145,13 +1171,17 @@ class KaiSession:
     def cmd_factory(self, arg: str) -> str:
         """Generate algorithm × language projects (factory self-checks each
         before registering): FACTORY [ALGOS a,b] [LANGS c,python,rust,go]
-        [CASES n]."""
+        [CASES n] [BUILD_TIMEOUT sec] [CASE_TIMEOUT sec] [FORCE]. Timeouts
+        default to per-language empirical values (see factory.LANG_*_TIMEOUT);
+        the hard caps are 2 min build / 10 min execution."""
         from . import factory as FA
         tokens = arg.split()
         algos: Optional[List[str]] = None
         langs: Optional[List[str]] = None
         n_cases = 200
         force = False
+        build_timeout: Optional[float] = None
+        case_timeout: Optional[float] = None
         i = 0
         while i < len(tokens):
             u = tokens[i].upper().rstrip(":,")
@@ -1166,15 +1196,40 @@ class KaiSession:
                     n_cases = max(10, int(tokens[i + 1]))
                 except ValueError as e:
                     raise KaiError("CASES needs an integer") from e
-            elif u == "FORCE":
+            elif u == "BUILD_TIMEOUT" and i + 1 < len(tokens):
+                try:
+                    build_timeout = min(120.0, max(5.0, float(tokens[i + 1])))
+                except ValueError as e:
+                    raise KaiError("BUILD_TIMEOUT needs a number of seconds") from e
+                i += 2
+            elif u == "CASE_TIMEOUT" and i + 1 < len(tokens):
+                try:
+                    case_timeout = min(600.0, max(1.0, float(tokens[i + 1])))
+                except ValueError as e:
+                    raise KaiError("CASE_TIMEOUT needs a number of seconds") from e
+                i += 2
                 # Re-provision existing projects (DELETE + recreate) so a
                 # factory fix reaches already-registered specs. Without it,
                 # existing projects are skipped and keep their old contract.
                 force = True
             else:
                 raise KaiError("FACTORY [ALGOS a,b] [LANGS c,python,rust,go] "
-                               "[CASES n] [FORCE]")
-        report = FA.create_all(algo_keys=algos, langs=langs, n_cases=n_cases)
+                               "[CASES n] [BUILD_TIMEOUT sec] [CASE_TIMEOUT sec] [FORCE]")
+        # No explicit flag? Fall back to the config's factory section
+        # (settable from the GUI settings panel); else per-language table.
+        if build_timeout is None or case_timeout is None:
+            try:
+                cfg = self.client.call("GET", "/api/config", read_timeout=10.0)
+                fcfg = (cfg or {}).get("factory") or {}
+                if build_timeout is None and isinstance(fcfg.get("build_timeout"), (int, float)):
+                    build_timeout = min(120.0, max(5.0, float(fcfg["build_timeout"])))
+                if case_timeout is None and isinstance(fcfg.get("case_timeout"), (int, float)):
+                    case_timeout = min(600.0, max(1.0, float(fcfg["case_timeout"])))
+            except Exception:
+                pass  # config unreachable — per-language empirical defaults
+        report = FA.create_all(algo_keys=algos, langs=langs, n_cases=n_cases,
+                               build_timeout=build_timeout,
+                               case_timeout=case_timeout)
         existing = set()
         try:
             lst = self.client.call("GET", "/api/projects", read_timeout=15.0)
@@ -1186,9 +1241,13 @@ class KaiSession:
         skipped: List[str] = []
         reprovisioned: List[str] = []
         failed: List[str] = []
+        no_toolchain: set = set()
         for row in report:
             pid = row["id"]
             if not row["ok"]:
+                if str(row["error"]).startswith(FA.NO_TOOLCHAIN):
+                    no_toolchain.add(str(pid).rsplit("-", 1)[-1])
+                    continue
                 failed.append(f"{pid}: {row['error'][:120]}")
                 continue
             if pid in existing:
@@ -1219,11 +1278,14 @@ class KaiSession:
                 failed.append(f"{pid}: {str(res.get('error', 'create failed'))[:120]}")
         lines = [f"OK factory: {len(created)} created, "
                  f"{len(reprovisioned)} re-provisioned, "
-                 f"{len(skipped)} skipped (existing), {len(failed)} failed"]
+                 f"{len(skipped)} skipped (existing), {len(failed)} failed, "
+                 f"{len(no_toolchain)} lang(s) without toolchain"]
         if reprovisioned:
             lines.append("REPROVISIONED " + " ".join(reprovisioned))
         if skipped:
             lines.append("SKIPPED " + " ".join(skipped))
+        if no_toolchain:
+            lines.append("NO TOOLCHAIN (skipped): " + " ".join(sorted(no_toolchain)))
         for f in failed[:20]:
             lines.append(f"FAIL {f}")
         return "\n".join(lines)
@@ -1316,6 +1378,8 @@ class KaiSession:
                 return self.cmd_status(rest)
             if cmd == "MODELS":
                 return self.cmd_models(rest)
+            if cmd == "TOOLCHAINS":
+                return self.cmd_toolchains(rest)
             if cmd == "AUTOFIX":
                 return self.cmd_autofix(rest)
             if cmd == "SPEC":

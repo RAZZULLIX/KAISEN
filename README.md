@@ -190,10 +190,13 @@ kaisen/
   kai.py         KAI protocol — the LLM-facing API (stdio + /kai HTTP)
   suggest.py     guarded AI project/pipeline builder
   promptlib.py   tier-aware prompt library (the single source of truth)
-  linters.py     local lint/autofix backends
-  languages.py   23-language registry (extensions, fences, guard patterns)
+  linters.py local lint/autofix backends
+  autofix/ per-compiler fixers, one module per language (c_family, rust, go, …)
+  languages.py 23-language registry (extensions, fences, guard patterns)
+  factory.py     project factory — 25 algos × all 23 languages, self-checked
+  fuzzlib.py     seeded fuzz-case generator (the anti-"fast but wrong" gate)
+  campaign.py    resumable multi-project campaign driver + bug capture
   snapshots.py   project/config revert store
-  ui_prefs.py    appearance standard + defaults
 pages/           the dashboard (single-page, no build step)
 projects/        one directory per project: project.json + harness + data
 ```

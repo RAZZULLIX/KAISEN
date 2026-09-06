@@ -93,6 +93,202 @@ def find_toolchain(lang: Optional[str]) -> Optional[str]:
     return None
 
 
+# Interpreters for the interpreted languages.  The framework treats these
+# as "always available" (the engine's own runtime is the toolchain), but the
+# OS-aware status check reports them so the operator can see what would
+# actually RUN a candidate on this machine.
+INTERPRETER_CANDIDATES: Dict[str, Tuple[str, ...]] = {
+    "python": ("python3", "python"),
+    "javascript": ("node",),
+    "php": ("php",),
+    "ruby": ("ruby",),
+    "r": ("Rscript", "R"),
+    "lua": ("lua", "lua5.4", "lua5.3", "luajit"),
+    "perl": ("perl",),
+    "shell": ("bash",),
+}
+
+
+def _runtime_candidates(lang: str) -> Tuple[str, ...]:
+    """Binaries that must exist for a candidate to build/run on this host:
+    compiled -> the compiler chain; interpreted -> the interpreter."""
+    key = normalize_lang(lang)
+    toolchain = TOOLCHAIN_CANDIDATES.get(key)
+    if toolchain:
+        return toolchain
+    return INTERPRETER_CANDIDATES.get(key, ())
+
+
+def _os_family(os_name: Optional[str] = None) -> str:
+    """One of 'linux' | 'macos' | 'windows' | 'other' — the family the
+    install hint and PATH probe should use.  os_name is injectable for
+    tests; defaults to the running host."""
+    import platform as _plat
+    if os_name and os_name != os.name:
+        # caller passed an explicit family string or 'posix'/'nt'
+        if os_name in ("linux", "macos", "windows"):
+            return os_name
+        if os_name == "nt":
+            return "windows"
+    if _plat.system().lower() == "darwin":
+        return "macos"
+    if os.name == "nt":
+        return "windows"
+    return "linux"
+
+
+# Extra per-OS install dirs to probe (in addition to PATH) — toolchains
+# that land outside PATH (e.g. Apple's Swift in /opt, Homebrew's cellar,
+# snap's /snap/bin already on PATH but harmless to include).  The status
+# check looks here so an installed-but-not-on-PATH compiler is still seen.
+_EXTRA_DIRS: Dict[str, Tuple[str, ...]] = {
+    "linux": ("/opt/swift/usr/bin", "/usr/local/bin", "/usr/bin", "/snap/bin",
+              "/usr/lib/dart/bin"),
+    "macos": ("/opt/homebrew/bin", "/usr/local/bin", "/opt/swift/usr/bin"),
+    "windows": (),
+}
+
+
+def _probe_binary(name: str, os_fam: str) -> Optional[str]:
+    """Locate `name` on PATH, then in the OS's extra install dirs.
+
+    Tolerates unreadable/inaccessible candidate paths (e.g. a toolchain
+    tree that needs elevated perms, like Swift in /opt): a candidate that
+    cannot be stat'd is skipped, never an exception."""
+    hit = shutil.which(name)
+    if hit:
+        return hit
+    for d in _EXTRA_DIRS.get(os_fam, ()):
+        candidate = str(Path(d) / name)
+        try:
+            p = Path(candidate)
+            if p.is_file() or p.is_symlink():
+                return candidate
+        except OSError:
+            continue
+    return None
+
+
+# Per-OS install command.  '' = nothing to install (already present, or no
+# package needed / must be built from source).
+_INSTALL: Dict[str, Dict[str, str]] = {
+    "linux": {
+        "c": "sudo apt install gcc", "cpp": "sudo apt install g++",
+        "cuda": "sudo apt install nvidia-cuda-toolkit",
+        "java": "sudo apt install default-jdk",
+        "typescript": "npm install -g typescript",
+        "csharp": "sudo apt install mono-complete",
+        "go": "sudo apt install golang-go",
+        "rust": "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh",
+        "kotlin": "sudo snap install kotlin --classic",
+        "swift": "see swift.org (Ubuntu tarball)",
+        "zig": "sudo snap install zig --beta",
+        "scala": "sudo apt install scala",
+        "dart": "sudo snap install dart --classic",
+        "haskell": "sudo apt install ghc",
+        "d": "sudo apt install ldc",
+        "python": "sudo apt install python3",
+        "javascript": "sudo apt install nodejs",
+        "php": "sudo apt install php-cli",
+        "ruby": "sudo apt install ruby",
+        "r": "sudo apt install r-base",
+        "lua": "sudo apt install lua5.4",
+        "perl": "sudo apt install perl",
+        "shell": "",
+    },
+    "macos": {
+        "c": "brew install gcc", "cpp": "brew install g++",
+        "cuda": "brew install --cask nvidia-cuda-toolkit",
+        "java": "brew install openjdk",
+        "typescript": "npm install -g typescript",
+        "csharp": "brew install mono",
+        "go": "brew install go",
+        "rust": "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh",
+        "kotlin": "brew install kotlin",
+        "swift": "xcode-select --install",
+        "zig": "brew install zig",
+        "scala": "brew install scala",
+        "dart": "brew install --cask dart",
+        "haskell": "brew install ghc",
+        "d": "brew install ldc",
+        "python": "brew install python",
+        "javascript": "brew install node",
+        "php": "brew install php",
+        "ruby": "brew install ruby",
+        "r": "brew install r",
+        "lua": "brew install lua",
+        "perl": "brew install perl",
+        "shell": "",
+    },
+    "windows": {
+        "c": "winget install BrechtSanders.WinLibs.POSIX.UCRT64",
+        "cpp": "winget install BrechtSanders.WinLibs.POSIX.UCRT64",
+        "cuda": "winget install Nvidia.CUDA",
+        "java": "winget install EclipseAdoptium.Temurin.21.JDK",
+        "typescript": "npm install -g typescript",
+        "csharp": "winget install Microsoft.DotNet.SDK.8",
+        "go": "winget install GoLang.Go",
+        "rust": "winget install Rustlang.Rustup",
+        "kotlin": "winget install JetBrains.Kotlin",
+        "swift": "see swift.org (Windows toolchain)",
+        "zig": "winget install zig.zig",
+        "scala": "winget install Scala.Scala",
+        "dart": "winget install Dart.Dart",
+        "haskell": "winget install Haskell.Stack",
+        "d": "winget install Dlang.DMD",
+        "python": "winget install Python.Python.3.12",
+        "javascript": "winget install OpenJS.NodeJS",
+        "php": "winget install PHP.PHP",
+        "ruby": "winget install RubyInstallerTeam.Ruby",
+        "r": "winget install RProject.R",
+        "lua": "winget install Lua.Lua",
+        "perl": "winget install StrawberryPerl.StrawberryPerl",
+        "shell": "",
+    },
+}
+
+
+def install_hint(lang: Optional[str], os_name: Optional[str] = None) -> str:
+    """Recommended install command for `lang` on the current OS ('' = none)."""
+    key = normalize_lang(lang)
+    fam = _os_family(os_name)
+    return str(_INSTALL.get(fam, {}).get(key, ""))
+
+
+def toolchain_status(lang: Optional[str], os_name: Optional[str] = None) -> Dict[str, Any]:
+    """Per-language toolchain availability on this OS.
+
+    Returns a dict: {id, name, kind, installed, binary, candidates,
+    toolchain, os, hint}.  OS-aware: the binary is probed on PATH then in
+    the OS's extra install dirs, the probe list reflects this platform's
+    candidates, and `hint` is the install command for the current OS
+    family.  `binary` is the first candidate found, or None."""
+    key = normalize_lang(lang)
+    info = lang_info(key)
+    kind = info.get("kind", "compiled")
+    cands = _runtime_candidates(key)
+    fam = _os_family(os_name)
+    binary = next((b for c in cands if (b := _probe_binary(c, fam))), None)
+    return {
+        "id": key,
+        "name": str(info.get("fence", key)),
+        "kind": kind,
+        "installed": binary is not None,
+        "binary": binary,
+        "candidates": list(cands),
+        "toolchain": str(info.get("toolchain", "")),
+        "os": fam,
+        "hint": install_hint(key, os_name),
+    }
+
+
+def toolchain_status_all(os_name: Optional[str] = None,
+                         langs: Optional[list] = None) -> list:
+    """Status for every registered language (or a subset)."""
+    ids = [normalize_lang(l) for l in (langs or LANGUAGES)]
+    return [toolchain_status(i, os_name) for i in ids]
+
+
 def artifact_basename(artifact_name: str, lang: Optional[str], os_name: str = os.name) -> str:
     """Real on-disk name of a built artifact.
 

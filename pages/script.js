@@ -197,7 +197,7 @@ function switchSettingsTab(tab) {
   if (tab === 'project' && projectTabHidden()) tab = 'general';
   settingsTab = tab;
   document.querySelectorAll('#view-config .tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
-  ['general', 'project', 'servers'].forEach(k => {
+  ['general', 'project', 'servers', 'toolchains'].forEach(k => {
     const el = document.getElementById(`cfg-${k}`);
     if (el) el.style.display = k === tab ? 'block' : 'none';
   });
@@ -206,6 +206,7 @@ function switchSettingsTab(tab) {
   if (tab === 'general') loadConfig();
   if (tab === 'project') loadProjectConfig();
   if (tab === 'servers') loadActive();
+  if (tab === 'toolchains') loadToolchains();
 }
 
 function setProjectTabVisible(visible) {
@@ -1890,6 +1891,9 @@ async function loadConfig() {
     document.getElementById('cfg-llm-firsttoken').value = (c.llm.first_token_timeout !== undefined ? c.llm.first_token_timeout : 0);
     document.getElementById('cfg-llm-connect').value = c.llm.connect_timeout;
     document.getElementById('cfg-llm-retries').value = c.llm.max_retries;
+    const f = c.factory || {};
+    document.getElementById('cfg-factory-build').value = (f.build_timeout !== undefined && f.build_timeout !== null ? f.build_timeout : '');
+    document.getElementById('cfg-factory-case').value = (f.case_timeout !== undefined && f.case_timeout !== null ? f.case_timeout : '');
     document.getElementById('cfg-autofix').checked = !!(c.autofix && c.autofix.build_enabled);
     document.getElementById('cfg-tg-token').value = c.telegram.token || '';
     document.getElementById('cfg-tg-chat').value = c.telegram.chat_id || '';
@@ -1983,6 +1987,10 @@ async function saveConfig() {  const body = {
       token: document.getElementById('cfg-tg-token').value,
       chat_id: document.getElementById('cfg-tg-chat').value,
       enabled: !!(document.getElementById('cfg-tg-token').value && document.getElementById('cfg-tg-chat').value),
+    },
+    factory: {
+      build_timeout: (document.getElementById('cfg-factory-build').value === '' ? null : parseFloat(document.getElementById('cfg-factory-build').value)),
+      case_timeout: (document.getElementById('cfg-factory-case').value === '' ? null : parseFloat(document.getElementById('cfg-factory-case').value)),
     },
   };
   try {
@@ -2554,6 +2562,21 @@ async function restoreSnapshot(id) {
     if (r.ok) { toast('Snapshot restored.'); loadSnapshots(); activeSpec = null; loadProjects(); }
     else systemAlert('Restore failed: ' + (r.error || 'unknown'));
   } catch (e) { systemAlert('Restore failed: ' + e.message); }
+}
+async function loadToolchains() {
+  const el = document.getElementById('toolchains-list');
+  if (!el) return;
+  try {
+    const r = await api('/api/toolchains');
+    const rows = r.rows || [];
+    el.innerHTML = rows.map(x => `
+      <div class="snap-row">
+        <span class="snap-reason" style="min-width:120px;">${escapeHtml(x.id)} <span class="muted">(${escapeHtml(x.kind)})</span></span>
+        ${x.installed
+          ? `<span class="snap-time ok-badge">OK — ${escapeHtml(x.binary)}</span>`
+          : `<span class="snap-time miss-badge">MISSING</span><span class="muted" style="font-size:12px;flex:1;">${escapeHtml(x.hint || 'no package available')}</span>`}
+      </div>`).join('');
+  } catch (e) { el.innerHTML = '<div class="muted" style="font-size:12px;">Toolchain status unavailable.</div>'; }
 }
 
 // ------------------------------------------------------------------ //

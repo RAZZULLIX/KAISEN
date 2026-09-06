@@ -179,7 +179,7 @@ projects/<id>/
 | `guardrails` | `{enabled, allow_extra, deny_extra}` — extra command rules |
 | `prompts` | `{generation_dir, goal, study, lesson}` — prompt templates |
 | `skills` | `{analyze, dedup, deepwork, autofix_build, lessons}` — optional brain features (§7, §9) |
-| `data` | `{protected_files: [...]}` — files hashed before every stage; `edit_scope: ["fname", ...]` restricts which functions the LLM may change (§6) |
+| `data` | `{protected_files: [...]}` — files hashed before every stage; `edit_scope: ["fname", ...]` restricts which functions the LLM may change (§6); `max_changed_lines: N` — one-change diff guard: reject any candidate that touches more than N lines vs the champion (guardrail, not prompt; absent/0 = off) (§6) |
 | `scores` | optional multi-score-type support (`types` + `active`) |
 | `files` | (suggest-flow only) harness scripts + baseline bundled at CREATE time |
 
@@ -212,27 +212,44 @@ KAISEN ships a differential fuzz gate for exactly this:
 ### Project factory — algorithm × language campaigns in one command
 
 `FACTORY` (KAI) / `kaisen/factory.py` generates a full campaign: 25
-algorithm families × 4 languages (C, Python, Rust, Go) = 100 projects.
-The original ten (prime counting, popcount, GCD, Fibonacci mod, divisor
-count, Collatz stopping time, range sum, string reverse, palindrome check,
-run-length encoding) are joined by fifteen: integer math (primality,
-integer sqrt, digital root, trailing zero bits, total prime factors, nth
-prime, happy-number steps, modular exponentiation), strings (Levenshtein
-distance, LCS length, longest palindromic substring, KMP prefix function,
-Caesar shift) and lists (maximum subarray sum, count inversions). Every
-project ships a naive baseline, its own build/fuzz/score harness and a
-seeded fuzz gate (string-pair, triple-argument and list problems use the
-`pair_str`, `triple_int` and `intlist` input families). Before
-registration, the factory PROVES each project works: the baseline must
-build, pass its full fuzz gate against the reference, and score — broken
-combinations are reported, never shipped. C builds compile with
+algorithm families × every language in the framework registry
+(§20 — 23 languages: C, C++, CUDA, Python, Java, JavaScript, TypeScript,
+C#, Go, Rust, Kotlin, Swift, PHP, Ruby, R, Zig, Scala, Dart, Haskell,
+Lua, Perl, Shell, D). Languages whose toolchain is missing on THIS
+machine are skipped at registration and reported (`NO TOOLCHAIN (skipped): …`)
+— they are never shipped broken; a machine that has the toolchain gets
+them proven by the same self-check. The original ten problems (prime
+counting, popcount, GCD, Fibonacci mod, divisor count, Collatz stopping
+time, range sum, string reverse, palindrome check, run-length encoding)
+are joined by fifteen: integer math (primality, integer sqrt, digital
+root, trailing zero bits, total prime factors, nth prime, happy-number
+steps, modular exponentiation), strings (Levenshtein distance, LCS
+length, longest palindromic substring, KMP prefix function, Caesar shift)
+and lists (maximum subarray sum, count inversions). Every project ships a
+naive baseline, its own build/fuzz/score harness and a seeded fuzz gate
+(string-pair, triple-argument and list problems use the `pair_str`,
+`triple_int` and `intlist` input families). Before registration, the
+factory PROVES each project works: the baseline must build, pass its full
+fuzz gate against the reference, and score — broken combinations are
+reported, never shipped. C builds compile with
 `-Werror=implicit-function-declaration`, so a missing `#include
 <stdlib.h>` (which makes gcc assume 32-bit returns for `atol` & co.)
 fails the build instead of shipping a binary that truncates large inputs.
 
-    FACTORY                          # everything, 200 cases each
-    FACTORY ALGOS gcd,fib-mod LANGS c,rust CASES 300
-    FACTORY FORCE                    # re-provision existing projects too
+**Timeouts — empirical, overridable.** Each project's build and execution
+timeouts come from trial runs on the machine that provisions it (every
+baseline is built and timed before registration; see
+`factory.LANG_BUILD_TIMEOUT` / `LANG_CASE_TIMEOUT`). Policy caps: **2 min
+max compile, 10 min max execution** — a project can never be given more.
+The user/agent can dictate the expected times two ways:
+
+- KAI: `FACTORY … BUILD_TIMEOUT <s> CASE_TIMEOUT <s>` (per run)
+- GUI → Settings → *Factory timeouts* (persisted in `config.json`
+  `factory`; applies to every future FACTORY run unless a flag overrides)
+
+Blank/null = per-language empirical defaults. Slow-interpreted projects
+(notably shell) also get scaled workloads and fuzz domains so their full
+gates stay inside the caps — measured, not guessed.
 
 ### Campaigns — run every project to N generations, resumably
 
@@ -348,12 +365,33 @@ When a build fails, KAISEN repairs in four guarded stages:
    static SIMD vector initializers, unescaping literal `\n`, rewriting
    `avxintrin.h` → `immintrin.h`. Applied one at a time, rebuilt after
    each; a fix that breaks a working build is reverted.
-2. **Python linter fixes** — pyflakes/ruff-backed repair for Python
+2. **Per-compiler nudges (every language)** — `kaisen/autofix/` is a
+   package with one backend per language, each parsing THAT compiler's
+   own diagnostics and doing exactly what it suggests (the same idea as
+   the gcc fixer, but for every toolchain):
+   - **rustc** — `expected \`;\` … add \`;\` here`, `unclosed delimiter`,
+     `cannot find module or crate \`fmt\`` → `use std::fmt;`.
+   - **go** — `unexpected EOF, expected }` (close the block),
+     `undefined: fmt` → `import "fmt"`.
+   - **bash/sh** — `unexpected EOF while looking for matching \`)\``
+     (close the paren), `unexpected token \`fi\`` / `\`done\``
+     (insert the missing `then` / `do`).
+   - **node (JavaScript/TypeScript)** — `Unexpected end of input`
+     (close the block).
+   - **python (ast)** — `expected ':'` (append it), `expected an
+     indented block` (insert `pass`).
+   - **perl** — `syntax error` with an unbalanced delimiter.
+   All nudge fixes are error-driven: one fix per turn, rebuilt after
+   each, never re-applied, and reverted if a fix breaks a build that
+   previously succeeded. Nothing replaces the compiler — it just does
+   what the compiler told us to do. Languages without a backend (or
+   without a local toolchain) fall through to the raw stderr.
+3. **Python linter fixes** — pyflakes/ruff-backed repair for Python
    candidates.
-3. **Custom fixer** — a project's own script
+4. **Custom fixer** — a project's own script
    (`skills.autofix_build: "harness/fixer.py"`), called with
    `<candidate> <artifact> <project_dir> <workdir> -- <build cmd…>`.
-4. **LLM last-resort repair** — when 1-3 are exhausted and the build
+5. **LLM last-resort repair** — when 1-4 are exhausted and the build
    still fails, up to `llm_repair_max` (default 3) LLM rewrite passes
    with the real compiler error as feedback. Hardcoded guards: the reply
    is danger-scanned and length-capped (30k chars), only the candidate
@@ -369,8 +407,8 @@ turns before giving up (default 5) and how many LLM repair attempts
 engine's runs; `autofix.llm_repair: false` is the global off switch.
 
 Per-project control: `skills.autofix_build` = `true` (default), `false`,
-or a custom fixer path. Non-C/Python languages surface their compiler
-diagnostics through the build stderr without a default fixer.
+or a custom fixer path. The default engages the C-family fixer and the
+per-compiler nudge backends; `false` disables all deterministic repair.
 
 **Declarative + discoverable**: `engine.autofix: {tries, repair}` in
 `project.json` is the spec-level way to set the same knobs; the effective
@@ -413,6 +451,10 @@ One engine per running project; several engines form the pool.
 - **Edit scope** — `data.edit_scope: ["fname", ...]` restricts which
   functions the LLM may change; changes outside the set are rejected with
   outcome `scope_violation` before the pipeline runs (heuristic diff, §6).
+- **One-change diff guard** — `data.max_changed_lines: N` counts how many
+  lines a candidate touches vs the champion and rejects any that exceed N
+  (outcome `diff_violation`). A guardrail, not a prompt: it makes "change
+  ONE value" enforceable instead of just requested. Absent/0 = off.
 - **Fuzzy basis** — `FUZZY <n>` (KAI) or `POST /api/engine/fuzzy` is opt-in
   prompt diversity: each generation's prompt is seeded with a random one of
   the top n scored iterations instead of the champion, plus the last 10
@@ -747,6 +789,8 @@ Complete reference — copy from `config.example.json`:
 | `autofix.build_enabled` | `true` | default for NEW projects |
 | `autofix.llm_repair` | `true` | LLM last-resort repair gate (§7) |
 | `onboarding.done` | `false` | wizard state |
+| `factory.build_timeout` | `null` | max compile time (s) for new FACTORY projects; null = per-language empirical default, cap 120 (§5) |
+| `factory.case_timeout` | `null` | max execution time (s) per fuzz case for new FACTORY projects; null = per-language empirical default, cap 600 (§5) |
 | `debug_logs` | `true` | verbose engine logs |
 
 CLI: `--project ID`, `--no-server`, `--host`, `--port`, `--kai`,
@@ -792,9 +836,13 @@ c, cpp, cuda, python, java, javascript, typescript, csharp, go, rust,
 kotlin, swift, php, ruby, r, zig, scala, dart, haskell, lua, perl,
 shell, **d** — plus aliases (`c++`, `py`, `js`, `cs`, `bash`, `dlang`, …).
 The gcc/nvcc compiler-hint autofixer applies to the C family (c/cpp/cuda);
-Python gets the linter fixer; other languages (including D) surface
+Python gets the linter fixer; every other language has a per-compiler
+nudge backend (rust, go, shell, node, perl — §7) that parses that
+compiler's own diagnostics and does what it suggests; the rest surface
 diagnostics through the build stderr. D uses the `dmd`/`ldc2`/`gdc`/`rdmd`
-toolchain, which is on the guardrail launcher allowlist.
+toolchain, which is on the guardrail launcher allowlist. The project
+factory (§5) covers all 23: baselines exist for every language, and each
+machine provisions only what it can build (preflight skip + report).
 
 ---
 
@@ -831,6 +879,9 @@ The GUI itself is an HTTP client; everything is available over
 - `POST /kai` — the KAI protocol (text in, text out)
 - `GET /api/system`, `GET /api/guardrails`, `GET/POST /api/autofix` —
   health and safety surfaces
+- `GET /api/toolchains` — per-language compiler/interpreter availability
+  on THIS OS (compiled + interpreted, with install hints per platform).
+  KAI: `TOOLCHAINS`; GUI → Settings → **Toolchains** tab.
 
 **Preferred interface for agents: KAI (§10).** It is designed for LLM
 clients: tolerant parsing, compact OK/ERR replies, session state, and

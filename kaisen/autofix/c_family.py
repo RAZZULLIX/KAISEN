@@ -1,5 +1,5 @@
 # Copyright (c) 2026 LABORATORI RAZZULLIX - MIT License. See LICENSE.
-"""Auto-fix build failures from compiler suggestions.
+"""C/C++/CUDA auto-fix: parse gcc's own suggestions and do what it says.
 
 gcc tells us exactly how to fix many "easy" errors:
 
@@ -39,7 +39,7 @@ _AVX_INCLUDE_RE = re.compile(r"#\s*include\s*<(avxintrin|fmaintrin|x86intrin)\.h
 _PRAGMA_AVX2 = "#pragma GCC target(\"avx2,fma\")\n"
 _PRAGMA_AVX512 = "#pragma GCC target(\"avx512f,avx512dq,avx512vl\")\n"
 
- # POSIX feature-test failures: with -std=c11 glibc hides clock_gettime /
+# POSIX feature-test failures: with -std=c11 glibc hides clock_gettime /
 # CLOCK_MONOTONIC unless _GNU_SOURCE (or _POSIX_C_SOURCE) precedes the
 # includes.  LLM-generated C code hits this constantly.
 _POSIX_CLOCK_RE = re.compile(
@@ -104,6 +104,7 @@ def _replace_token(source: str, bad: str, good: str) -> str:
     if not m:
         return source
     return source[:m.start()] + good + source[m.end():]
+
 
 def _add_gnu_source(source: str) -> str:
     """POSIX feature-test fix: #define _GNU_SOURCE must precede every
@@ -239,40 +240,3 @@ def autofix_build(
             return True, applied, result
         result = probe
     return bool(result.get("ok")), applied, result
-
-
-def resolve_mode(spec: Dict[str, Any], default: bool = True):
-    """How autofix runs for a project.
-
-    spec.skills.autofix_build may be:
-      True / absent  -> the built-in default fixer
-      False          -> disabled
-      "path" (str)   -> a CUSTOM fixer script, project-relative
-                        (e.g. "harness/autofix.py"), replacing the default
-                        for this project only.
-    Returns "off" | "default" | "python" | ("custom", path)."""
-    try:
-        af = (spec.get("skills") or {}).get("autofix_build", default)
-    except Exception:
-        af = default
-    if af is None or af is False or af is True:
-        mode = ("off" if af is False else "default")
-    else:
-        af = str(af).strip()
-        if not af or af.lower() in ("default", "builtin", "true"):
-            mode = "default"
-        elif af.lower() in ("off", "false", "none", "no"):
-            mode = "off"
-        else:
-            return ("custom", af)
-    if mode == "default":
-        # The gcc-message fixer only makes sense for the C compiler family.
-        # Python gets its own linter-backed fixer; other languages disable
-        # the default (their diagnostics surface via the build stderr).
-        from .languages import normalize_lang
-        lang = normalize_lang((spec.get("language") or ""))
-        if lang == "python":
-            return "python"
-        if lang not in ("c", "cpp", "cc", "cxx", "cuda"):
-            return "off"
-    return mode

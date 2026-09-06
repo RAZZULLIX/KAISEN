@@ -227,6 +227,7 @@
           <div class="tab active" data-tab="general" role="tab" tabindex="0" onclick="switchSettingsTab('general')">General</div>
           <div class="tab" data-tab="project" role="tab" tabindex="0" style="display: none;" onclick="switchSettingsTab('project')">Active Project</div>
           <div class="tab" data-tab="servers" role="tab" tabindex="0" onclick="switchSettingsTab('servers')">LLM Servers</div>
+          <div class="tab" data-tab="toolchains" role="tab" tabindex="0" onclick="switchSettingsTab('toolchains')">Toolchains</div>
         </div>
         <div class="settings-bar-actions">
           <button class="btn" onclick="showOnboarding()">Setup Wizard</button>
@@ -254,6 +255,12 @@
             <div class="form-row"><label>First-token timeout (s) — 0 = wait forever (default): prefill can take as long as it takes. Set &gt;0 to fail if no token arrives within N s</label><input id="cfg-llm-firsttoken" type="number"></div>
             <div class="form-row"><label>Connect timeout (s)</label><input id="cfg-llm-connect" type="number"></div>
             <div class="form-row"><label>Max retries</label><input id="cfg-llm-retries" type="number"></div>
+          </section>
+          <section class="panel">
+            <div class="panel-header"><div class="panel-title">Factory timeouts</div></div>
+            <div class="form-row"><label>Build timeout (s) — blank = per-language empirical default; cap 120</label><input id="cfg-factory-build" type="number" min="5" max="120" placeholder="auto"></div>
+            <div class="form-row"><label>Case timeout (s) — max execution time for one fuzz case; blank = per-language empirical default; cap 600</label><input id="cfg-factory-case" type="number" min="1" max="600" placeholder="auto"></div>
+            <div style="font-size:12px;color:var(--muted);line-height:1.5;">Defaults come from trial runs on this machine (every baseline built and timed). Global caps: 2 min compile, 10 min execution. Per-run override via KAI: <code>FACTORY BUILD_TIMEOUT &lt;s&gt; CASE_TIMEOUT &lt;s&gt;</code>.</div>
           </section>
           <section class="panel">
             <div class="panel-header"><div class="panel-title">Auto-fix build errors (compiler suggestions)</div></div>
@@ -285,6 +292,15 @@
             <div id="snapshots-list" class="snapshots-list"></div>
           </section>
         </div></div>
+        <div id="cfg-toolchains" class="tab-content" style="display: none;">
+          <section class="panel">
+            <div class="panel-header"><div class="panel-title">Toolchains — per-language compiler/interpreter availability on this OS</div><div class="panel-subtitle">OS-aware: the probe uses this machine's PATH and the install hint matches the running platform (apt/snap on Linux, brew on macOS, winget on Windows). A missing toolchain means that language's FACTORY projects are skipped at registration here. Same info via KAI: <code>TOOLCHAINS</code>.</div></div>
+            <div class="form-row"><label>Actions</label>
+              <button class="btn btn-sm" onclick="loadToolchains()">↻ Refresh</button>
+            </div>
+            <div id="toolchains-list" class="snapshots-list"></div>
+          </section>
+        </div>
         <div id="cfg-project" class="tab-content" style="display: none;">
           <section class="panel">
             <div class="panel-header"><div class="panel-title">Project identity</div></div>

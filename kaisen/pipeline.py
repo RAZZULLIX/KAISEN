@@ -181,27 +181,37 @@ def run_pipeline(
         # build FAILS or its stderr carries hints (warnings with
         # suggestions).  Three modes: off / default fixer / custom
         # per-project fixer script (skills.autofix_build = true|false|path).
-        from .autofix import MAX_FIX_TRIES, autofix_build, parse_hints, resolve_mode
+        from .autofix import MAX_FIX_TRIES, autofix_build, autofix_nudge, parse_hints, resolve_mode
         mode = resolve_mode(spec)
         stderr0 = res.get("stderr") or ""
         _inc0, _mean0 = parse_hints(stderr0)
         if mode != "off" and (not res["ok"] or _inc0 or _mean0):
+
+            def _run(cmd: List[str]) -> Dict[str, Any]:
+                return run_subprocess(
+                    cmd,
+                    timeout=build_step.get("timeout"),
+                    memory_limit_bytes=_mb(build_step.get("memory_limit_mb")),
+                    cwd=project.path,
+                )
+
+            # Compile-loop cap: engine override (KAI AUTOFIX tries <n>)
+            # or the framework default (5).
+            _max_tries = int((context.get("autofix_max_tries")
+                              if context.get("autofix_max_tries") is not None
+                              else MAX_FIX_TRIES))
             if mode == "default":
-                def _run(cmd: List[str]) -> Dict[str, Any]:
-                    return run_subprocess(
-                        cmd,
-                        timeout=build_step.get("timeout"),
-                        memory_limit_bytes=_mb(build_step.get("memory_limit_mb")),
-                        cwd=project.path,
-                    )
-                # Compile-loop cap: engine override (KAI AUTOFIX tries <n>)
-                # or the framework default (5).
-                _max_tries = int((context.get("autofix_max_tries")
-                                  if context.get("autofix_max_tries") is not None
-                                  else MAX_FIX_TRIES))
                 fixed, fixes, last = autofix_build(candidate, cmd, _run,
                                                    apply_on_success=True,
                                                    max_tries=_max_tries)
+                res = last
+                build_fixes = fixes
+                if fixes:
+                    emit("build", {"status": "fixed", "fixes": fixes})
+            elif mode == "nudge":
+                fixed, fixes, last = autofix_nudge(
+                    candidate, cmd, _run, lang=spec.get("language", "c"),
+                    max_tries=_max_tries)
                 res = last
                 build_fixes = fixes
                 if fixes:

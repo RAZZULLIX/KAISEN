@@ -2,8 +2,10 @@
 """Language linters that back the auto-fix layer.
 
 Every tool here is a LOCAL binary or pure-python module (16 GB machines
-included): no network, no service.  The gcc-message fixer stays in
-autofix.py (C/C++/CUDA); this module covers the rest:
+included): no network, no service.  The compiler-message fixers live in
+kaisen/autofix/ (a package, one module per language): c_family.py parses
+gcc's suggestions; rust.py/go.py/shell.py/etc. parse each compiler's own
+diagnostics.  This module covers the static-analysis side:
 
   python  -> ast (syntax) + pyflakes (names) + ruff --fix (unused imports)
   shell   -> bash -n

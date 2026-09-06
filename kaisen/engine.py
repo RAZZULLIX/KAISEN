@@ -15,6 +15,7 @@ paused/stop flags, periodic deepwork + lessons (spec-driven).
 
 from __future__ import annotations
 
+import difflib
 import os
 import random
 import shutil
@@ -45,6 +46,27 @@ STATE_PAUSED = "paused"      # drained, stays stopped until play
 _SESSION_MAX_TEXT = 120_000   # keep the streaming tail, drop the head
 _SESSION_KEEP_DONE = 10       # completed sessions retained in the live view
 _SESSION_KEEP_SECS = 600.0    # completed sessions older than this are pruned
+
+
+def count_changed_lines(base: str, cand: str) -> int:
+    """Count how many lines a candidate touches vs the baseline.
+
+    Line-level diff (difflib).  A "changed" line is one removed, one
+    added, or — for a replaced run — the larger of removed/added, so a
+    single-line edit (swap one line for one line) counts as 1, not 2.
+    Used by the one-change diff guard (P1.13)."""
+    if base == cand:
+        return 0
+    sm = difflib.SequenceMatcher(a=base.splitlines(), b=cand.splitlines())
+    changed = 0
+    for op, a0, a1, b0, b1 in sm.get_opcodes():
+        if op == "replace":
+            changed += max(a1 - a0, b1 - b0)
+        elif op == "delete":
+            changed += a1 - a0
+        elif op == "insert":
+            changed += b1 - b0
+    return changed
 
 
 class Session:
@@ -481,6 +503,13 @@ class ProjectEngine:
                         self._emit_state()
                         self._log(f"gen {gen}: {violation}")
                         continue
+                    violation = self._diff_check(extracted)
+                    if violation:
+                        self.state.append_history({"generation": gen, "outcome": "diff_violation", "detail": violation})
+                        self.state.save()
+                        self._emit_state()
+                        self._log(f"gen {gen}: {violation}")
+                        continue
                     candidate = gen_dir / f"candidate{self._code_ext}"
                     candidate.write_text(extracted, encoding="utf-8")
                     if self._dedup_check(extracted, gen, gen_dir):
@@ -611,6 +640,34 @@ class ProjectEngine:
         if outside:
             return (f"edit scope violated: candidate changes function(s) "
                     f"{sorted(outside)} outside the allowed set {sorted(allowed)}")
+        return None
+
+    def _diff_check(self, code: str) -> Optional[str]:
+        """One-change diff guard (P1.13): when the spec declares
+        data.max_changed_lines (a non-negative int), a candidate that
+        touches more than that many lines vs the champion is rejected
+        before the pipeline.  The *value* of a "change ONE thing" mule is
+        attribution; a whole-file rewrite defeats it.  Line-level
+        (difflib), not literal-level — interpretable, and it forces the
+        model to make a targeted edit.  A guardrail, not a prompt;
+        absent (or 0) = off.  Returns a violation message, or None."""
+        cap = (self.project.spec.get("data") or {}).get("max_changed_lines")
+        if cap is None:
+            return None
+        try:
+            cap = int(cap)
+        except (TypeError, ValueError):
+            return None
+        if cap <= 0:
+            return None
+        champ = self._champion_code()
+        if not champ or champ.startswith("// no champion"):
+            return None
+        changed = count_changed_lines(champ, code)
+        if changed > cap:
+            return (f"diff guard: candidate changes {changed} line(s), "
+                    f"over the {cap}-line single-change limit — make a targeted "
+                    f"edit, or raise data.max_changed_lines")
         return None
 
     def _dedup_check(self, code: str, gen: int, gen_dir: Path) -> bool:

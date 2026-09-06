@@ -122,6 +122,15 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "onboarding": {
         "done": False,
     },
+    # Factory project timeouts (seconds). null = per-language empirical
+    # defaults from trial runs (kaisen/factory.py LANG_*_TIMEOUT); a number
+    # here overrides the table for every new factory project. Hard caps:
+    # 120 s build, 600 s execution. Also settable per run via KAI:
+    # FACTORY BUILD_TIMEOUT <s> CASE_TIMEOUT <s>.
+    "factory": {
+        "build_timeout": None,
+        "case_timeout": None,
+    },
     "debug_logs": True,
 }
 
@@ -222,6 +231,11 @@ class FrameworkConfig:
     @property
     def autofix_build_enabled(self) -> bool:
         return bool(self.data.get("autofix", {}).get("build_enabled", True))
+
+    @property
+    def factory(self) -> Dict[str, Any]:
+        return self.data.setdefault(
+            "factory", {"build_timeout": None, "case_timeout": None})
 
     # ---- secrets (env-first) ----
     @property

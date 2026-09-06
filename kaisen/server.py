@@ -339,6 +339,7 @@ class DashboardServer:
         r.add_get("/api/prefs", self._api_prefs_get)
         r.add_put("/api/prefs", self._api_prefs_set)
         r.add_post("/api/prefs/reset", self._api_prefs_reset)
+        r.add_get("/api/toolchains", self._api_toolchains)
         r.add_post("/api/config-agent", self._api_config_agent)
         r.add_get("/api/projects/{pid}/activate", self._api_project_activate)
         r.add_post("/api/engine/switch", self._api_engine_switch)
@@ -1332,6 +1333,13 @@ class DashboardServer:
     async def _api_prefs_get(self, request):
         from . import ui_prefs
         return _json({"prefs": ui_prefs.load_prefs(), "defaults": ui_prefs.DEFAULTS, "css_vars": ui_prefs.apply_theme_to_css_vars()})
+
+    async def _api_toolchains(self, request):
+        """Per-language toolchain availability on THIS OS (for the GUI
+        Settings panel).  OS-aware: binary probe + matching install hint."""
+        from .languages import toolchain_status_all
+        rows = toolchain_status_all()
+        return _json({"rows": rows})
 
     async def _api_prefs_set(self, request):
         from . import ui_prefs, snapshots

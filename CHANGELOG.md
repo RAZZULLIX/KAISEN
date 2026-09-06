@@ -5,6 +5,138 @@ All notable changes to KAISEN are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [KAISEN 0.1.6-alpha] — 2026-09-06
+
+The factory speaks every language in the registry, and every project's
+timeouts are measured, not guessed.
+
+### Added
+
+- **Factory covers all 23 registry languages.** Baselines now exist for
+  C, C++, CUDA, Python, Java, JavaScript, TypeScript, C#, Go, Rust,
+  Kotlin, Swift, PHP, Ruby, R, Zig, Scala, Dart, Haskell, Lua, Perl,
+  Shell and D. C++/CUDA derive from the C baselines through a verified
+  transform layer (void* casts for the C++ frontend — any transform bug
+  fails the self-check sweep and never ships); JavaScript, Perl and
+  Shell are hand-written and proven by the same gate on this machine;
+  the remaining languages are hand-written against the C reference.
+  Build scripts for all 23 probe the registry's toolchain candidates in
+  order (compiled: first compiler found wins; interpreted: shebang is
+  insured with the first interpreter found; JVM/.NET/TS/Zig emit a small
+  wrapper so the artifact contract — runs directly with argv — holds
+  uniformly). `create_all` now PREFLIGHTS each language: missing
+  toolchain ⇒ skip row reported as `NO TOOLCHAIN (skipped): …`, never a
+  broken registration. A machine that has the toolchain provisions and
+  proves those languages itself.
+- **Empirical per-language timeouts, user-overridable.** Every baseline
+  is built and run on its full workload before registration (the
+  self-check IS the trial run — `check_project` now respects each
+  project's own step timeouts instead of a blanket 1200 s). Measured
+  worst cases feed `factory.LANG_BUILD_TIMEOUT` / `LANG_CASE_TIMEOUT`;
+  policy caps: **2 min max compile, 10 min max execution** per project.
+  Dictate the expected times via KAI (`FACTORY … BUILD_TIMEOUT <s>
+  CASE_TIMEOUT <s>`) or GUI → Settings → *Factory timeouts*
+  (`config.json` `factory.build_timeout` / `factory.case_timeout`,
+  null = per-language empirical default). Slow-interpreted projects get
+  scaled workloads/domains from the same measurements (shell: C-scale
+  workloads measured at 478 s total → scaled to ~80 s; fuzz domains for
+  prime-count/fib-mod/sum-range capped so a full 200-case gate stays
+  inside the verify timeout).
+
+### Fixed
+
+- Workload registry: explicit workloads named only c/rust/go/python —
+  every other language now inherits the C scale, so `make_project` can
+  no longer KeyError on a new language.
+
+
+## [KAISEN 0.1.7-alpha] — 2026-09-06
+
+Auto-fix speaks every compiler's language, no LLM turn needed.
+
+### Added
+
+- **Per-compiler nudge backends (no LLM turn).** `kaisen/autofix/` is
+  now a package with one module per language, each parsing THAT
+  compiler's own diagnostics and doing exactly what it suggests — the
+  same idea as the gcc fixer (parse "did you forget to include…?" /
+  "did you mean…?"), but for every toolchain:
+  - **rustc** — `expected \`;\` … add \`;\` here` (append `;`),
+    `unclosed delimiter` (close the block), `cannot find module or
+    crate \`fmt\`` → `use std::fmt;`.
+  - **go** — `unexpected EOF, expected }` (close the block),
+    `undefined: fmt` → `import "fmt"` (only known stdlib packages).
+  - **bash/sh** — `unexpected EOF while looking for matching \`)\``
+    (close the paren), `unexpected token \`fi\`` / `\`done\`` (insert
+    the missing `then` / `do`).
+  - **node (JavaScript/TypeScript)** — `Unexpected end of input`
+    (close the block).
+  - **python (ast)** — `expected ':'` (append it), `expected an
+    indented block` (insert `pass`).
+  - **perl** — `syntax error` with an unbalanced delimiter (close it).
+  Every fix is error-driven: one fix per turn, rebuilt after each,
+  never re-applied, and reverted if it breaks a build that previously
+  succeeded (`autofix_nudge`, `kaisen/autofix/engine.py`). The default
+  `resolve_mode` now maps every language with a backend to `"nudge"`;
+  the C family keeps the gcc fixer and Python keeps the linter fixer.
+- **One-change diff guard (P1.13).** `data.max_changed_lines: N` counts
+  how many lines a candidate touches vs the champion and rejects any that
+  exceed N (outcome `diff_violation`) before the pipeline — a guardrail,
+  not a prompt, so "change ONE value" is enforceable. Line-level
+  (`difflib`); absent/0 = off.
+- **The factory self-check found and we fixed three real baseline bugs**
+  (in `kaisen/factory.py`): `reverse-str-perl` (unparenthesized
+  `reverse` swallowed the newline argument), `levenshtein-perl` (lexical
+  `$a`/`$b` shadowed sort's special vars → broken min), and
+  `caesar-shift-shell` (the non-POSIX `%c` form quoted the numeric
+  string; now octal escapes). All three now pass the gate.
+
+### Fixed
+
+- `kaisen/autofix` restructured from a single `autofix.py` module into a
+  package (`c_family.py` + one module per language); the public API
+  (`autofix_build`, `parse_hints`, `resolve_mode`, `apply_fix`, …) is
+  re-exported unchanged, so the pipeline and existing tests were
+  updated only where the behavior intentionally changed (non-C/Python
+  languages that had no fixer now get one).
+
+
+## [KAISEN 0.1.8-alpha] — 2026-09-06
+
+Every factory baseline is now proven on a real toolchain, and toolchain
+availability is visible per OS.
+
+### Added
+
+- **All 23 registry languages now have verified baselines.** The factory
+  test (`test_registry_is_complete`) enforces a baseline + workload for
+  every (algorithm, language) pair. The ten languages that previously
+  relied on "the self-check gate on a capable machine" now have
+  hand-written, toolchain-verified baselines in `kaisen/factory_langs.py`
+  (Java, TypeScript, C#, Kotlin, Swift, Zig, Scala, Dart, Haskell, D —
+  25 algorithms each). Every baseline was compiled and run against the
+  trusted Python reference on this machine; `tools/verify_factory_baselines.py`
+  is the reusable per-(algo,lang) gate for any baseline module.
+- **OS-aware toolchain status.** `kaisen/languages.py` learns the running
+  OS family and reports, per language, whether the compiler/interpreter is
+  present (PATH + the OS's standard install dirs), which binary, and the
+  exact install command for that platform (apt/snap on Linux, brew on
+  macOS, winget on Windows). Surfaced everywhere:
+  - KAI `TOOLCHAINS` — a per-language table of OK / MISSING + install hint;
+  - GUI → Settings → **Toolchains** tab (`GET /api/toolchains`);
+  - `toolchain_status`/`toolchain_status_all`/`install_hint` in Python.
+- **Per-compiler build contracts fixed** (found by verifying the new
+  baselines): the Java build script's `javap` now uses the class basename
+  (the absolute path broke entry-point discovery), and Kotlin uses `-d`
+  (not `-o`) for the output jar.
+
+### Fixed
+
+- Interpreted-language check now reports status for python/javascript/php/
+  ruby/r/lua/perl/shell interpreters too (compiled used to be the only
+  probed kind).
+
+
 ## [KAISEN 0.1.5-alpha] — 2026-09-06
 
 Campaign release: the "fast but wrong" hole is closed with a differential

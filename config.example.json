@@ -66,5 +66,14 @@
     "llm_repair": true,
     "llm_repair_max": 3
   },
+  "factory": {
+    # Max compile time (s) for new FACTORY projects. null = per-language
+    # empirical default (trial runs); hard cap 120 s (2 min).
+    "build_timeout": null,
+    # Max execution time (s) per fuzz case. null = per-language empirical
+    # default; hard cap 600 s (10 min). Per-run override: KAI
+    # FACTORY BUILD_TIMEOUT <s> CASE_TIMEOUT <s>.
+    "case_timeout": null
+  },
   "debug_logs": true
 }
