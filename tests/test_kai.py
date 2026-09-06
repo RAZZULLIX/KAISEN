@@ -511,3 +511,33 @@ def test_run_summary_uses_goal_pid():
     # not the selected engine's (1.2, 2 scored)
     assert "3.3" in out and "1.2" not in out
     assert "1 generation(s) scored" in out
+
+
+# ----------------------------------------------------------------------
+# FACTORY — registration payload shape (files must ride inside the spec)
+# ----------------------------------------------------------------------
+
+def test_factory_posts_files_inside_spec(monkeypatch):
+    """Regression: the server reads bundled files from spec["files"]; a
+    top-level "files" key is silently dropped and ships an empty harness
+    (observed live: 40 registered projects, zero files on disk)."""
+    import kaisen.factory as FA
+    row = {"id": "popcount-c", "ok": True, "error": "",
+           "spec": {"id": "popcount-c", "name": "P (C)", "language": "c",
+                    "artifact_name": "program"},
+           "files": {"harness/build.py": "#!/usr/bin/env python3\nprint('OK')\n"}}
+    monkeypatch.setattr(FA, "create_all", lambda **kw: [row])
+
+    posted = {}
+
+    def _post(call):
+        posted.update(call[2] or {})
+        return {"ok": True, "project": {"id": "popcount-c", "name": "P (C)"}}
+
+    s = _session({("GET", "/api/projects"): {"projects": []},
+                  ("POST", "/api/projects"): _post})
+    out = s.dispatch("FACTORY")
+    assert out.startswith("OK factory: 1 created"), out
+    assert "files" not in posted, \
+        "top-level files key is silently dropped by the server"
+    assert posted["spec"].get("files") == row["files"]

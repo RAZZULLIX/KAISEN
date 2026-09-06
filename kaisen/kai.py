@@ -58,7 +58,6 @@ import requests
 from .util import load_json, save_json
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-__version__ = "0.1.2-alpha"
 _RUNS_FILE = REPO_ROOT / "kai_runs.json"   # persistent run goals (gitignored)
 
 
@@ -249,6 +248,7 @@ ALIASES: Dict[str, List[str]] = {
     "MODELS": ["MODELS", "SCOREBOARD", "RANKINGS"],
     "GOAL": ["GOAL", "SUGGEST", "DESIGN", "BUILD", "NEW"],
     "CREATE": ["CREATE", "MAKE"],
+    "FACTORY": ["FACTORY", "FABRICATE", "GENPROJECTS"],
     "ESTIMATE": ["ESTIMATE", "COST", "PRICE", "BUDGET"],
     "ACCEPT": ["ACCEPT", "ADOPT"],
     "HELP": ["HELP", "H", "?"],
@@ -1142,6 +1142,73 @@ class KaiSession:
         return (f"OK created {pid}" + (f" WARNINGS {warns}" if warns else "")
                 + (" — TEMP (wiped at server close/next start)" if temp else ""))
 
+    def cmd_factory(self, arg: str) -> str:
+        """Generate algorithm × language projects (factory self-checks each
+        before registering): FACTORY [ALGOS a,b] [LANGS c,python,rust,go]
+        [CASES n]."""
+        from . import factory as FA
+        tokens = arg.split()
+        algos: Optional[List[str]] = None
+        langs: Optional[List[str]] = None
+        n_cases = 200
+        i = 0
+        while i < len(tokens):
+            u = tokens[i].upper().rstrip(":,")
+            if u == "ALGOS" and i + 1 < len(tokens):
+                algos = [a.strip().lower() for a in tokens[i + 1].split(",") if a.strip()]
+                i += 2
+            elif u == "LANGS" and i + 1 < len(tokens):
+                langs = [l.strip().lower() for l in tokens[i + 1].split(",") if l.strip()]
+                i += 2
+            elif u == "CASES" and i + 1 < len(tokens):
+                try:
+                    n_cases = max(10, int(tokens[i + 1]))
+                except ValueError as e:
+                    raise KaiError("CASES needs an integer") from e
+                i += 2
+            else:
+                raise KaiError("FACTORY [ALGOS a,b] [LANGS c,python,rust,go] [CASES n]")
+        report = FA.create_all(algo_keys=algos, langs=langs, n_cases=n_cases)
+        existing = set()
+        try:
+            lst = self.client.call("GET", "/api/projects", read_timeout=15.0)
+            for p in (lst.get("projects") or []):
+                existing.add(str(p.get("id", "")).lower())
+        except Exception:
+            pass
+        created: List[str] = []
+        skipped: List[str] = []
+        failed: List[str] = []
+        for row in report:
+            pid = row["id"]
+            if not row["ok"]:
+                failed.append(f"{pid}: {row['error'][:120]}")
+                continue
+            if pid in existing:
+                skipped.append(pid)
+                continue
+            # NOTE: the server reads bundled files from INSIDE the spec
+            # (spec["files"]) — a top-level "files" key is silently dropped.
+            res = self.client.call(
+                "POST", "/api/projects",
+                {"id": pid, "spec": {**row["spec"], "files": row["files"]}},
+                read_timeout=180.0,
+            )
+            if res.get("ok"):
+                warns = res.get("warnings") or []
+                created.append(pid + (f" [warns: {'; '.join(warns)[:120]}]" if warns else ""))
+            else:
+                failed.append(f"{pid}: {str(res.get('error', 'create failed'))[:120]}")
+        lines = [f"OK factory: {len(created)} created, {len(skipped)} skipped (existing), "
+                 f"{len(failed)} failed"]
+        if created:
+            lines.append("CREATED " + " ".join(created))
+        if skipped:
+            lines.append("SKIPPED " + " ".join(skipped))
+        for f in failed[:20]:
+            lines.append(f"FAIL {f}")
+        return "\n".join(lines)
+
     def cmd_forge(self, arg: str) -> str:
         """Generate n parallel drafts (default 3, max 12), each scored by the
         pipeline and ranked: FORGE [<n>] [ON <pid>] [GOAL <words...>]."""
@@ -1274,6 +1341,8 @@ class KaiSession:
                 return self.cmd_accept(rest)
             if cmd == "CREATE":
                 return self.cmd_create(rest)
+            if cmd == "FACTORY":
+                return self.cmd_factory(rest)
             return f"ERR unimplemented command '{cmd}'"
         except KaiError as e:
             return f"ERR {e}"

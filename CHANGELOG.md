@@ -5,6 +5,185 @@ All notable changes to KAISEN are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [KAISEN 0.1.5-alpha] — 2026-09-06
+
+Campaign release: the "fast but wrong" hole is closed with a differential
+fuzz gate, and long multi-project campaigns get first-class tooling —
+factory, driver, bug capture, triage.
+
+### Added
+
+- **Fuzz gate — correctness on seeded cases, not just fixed tests.** A
+  verify step that checks five hard-coded inputs can be fooled by a
+  candidate that is right on the test slice and wrong everywhere else.
+  New `kaisen/fuzzlib.py` generates SEEDED case sets per problem family
+  (`int`, `pair_int`, `str`): boundary values (0/1, powers of two ±1,
+  domain edges, empty string) plus seeded randoms — same seed gives
+  identical cases forever, so a failing case is reproducible exactly.
+  Projects carry `fuzz_cases.json` (inputs + reference outputs computed
+  from a trusted reference at creation time); the shared verify step
+  `harness/fuzz_verify.py` replays every case against the candidate and
+  fails on the first mismatch with a machine-readable diagnostic
+  (`FUZZ MISMATCH case=42 tag=rand:7 input=[...] expected='...' got='...'`,
+  plus `FUZZ CRASH` / `FUZZ TIMEOUT`). Compare modes: `exact` (default),
+  `sorted_lines`, `float_last` (relative tolerance 1e-6, understands
+  `key=value` metric tokens).
+- **Project factory — algorithm × language campaigns in one command.**
+  `kaisen/factory.py` + KAI `FACTORY [ALGOS a,b] [LANGS c,python,rust,go]
+  [CASES n]`: 25 algorithm families × 4 languages = 100 projects. The
+  original ten (prime counting, popcount, GCD, Fibonacci mod, divisor
+  count, Collatz stopping time, range sum, string reverse, palindrome
+  check, run-length encoding) are joined by fifteen from integer math
+  (primality, integer sqrt, digital root, trailing zero bits, total prime
+  factors, nth prime, happy-number steps, modular exponentiation), strings
+  (Levenshtein distance, LCS length, longest palindromic substring, KMP
+  prefix function, Caesar shift) and lists (maximum subarray sum, count
+  inversions). Every project ships a naive baseline, its own
+  build/fuzz/score harness and a seeded fuzz gate; three new input
+  families (`pair_str`, `triple_int`, `intlist`) feed the string-pair,
+  triple-argument and list problems. Before registration the factory
+  PROVES each project works: baseline must build, pass its full fuzz gate
+  against the reference, and score — broken combinations are reported,
+  never shipped.
+- **Campaign driver — resumable multi-project runs.** `kaisen/campaign.py`
+  (CLI: `python3 -m kaisen.campaign [TARGET n] [PARALLEL k] [POLL s] |
+  STATUS | STOP`) runs every pool project to N generations each, filling
+  at most K engine slots at a time. State lives in `campaign.json` with a
+  per-project history anchor: crash or restart mid-campaign and it resumes
+  exactly where it left off (engines persist via `engine_pool.json`;
+  progress before the crash counts, nothing double-counts). Semantics
+  match `RUN <n>`: only SCORED generations (fitness measured) count
+  toward the target — failed attempts never burn budget.
+- **Bug capture + triage.** Every stage failure of a running campaign
+  project is appended to `campaign_bugs.jsonl` (exactly once per
+  generation — anchored, restart-safe). `python3 -m kaisen.triage` groups
+  rows by (project, outcome, signature), separates expected candidate
+  noise (a generation's code wrong on one fuzz input) from HARNESS
+  SUSPECTS (same stage failing the same way ≥3 generations in a row —
+  toolchain/spec problems the LLM cannot fix), and prints a reproduction
+  pointer (`runs/gen_NNNN/` + the exact failing input) for every group.
+- **C builds now reject implicit function declarations**: the C build
+  script compiles with `-Werror=implicit-function-declaration`. This
+  class of bug was silent before: a missing `#include <stdlib.h>` makes
+  gcc assume `atol`/`strtoul` return `int`, truncating 64-bit results —
+  the digital-root baseline returned garbage for n = 10^15 while passing
+  every small case. All fourteen affected baselines now include
+  `<stdlib.h>`, and the build fails fast with a clear message instead of
+  shipping a binary that lies about half its inputs.
+
+### Fixed
+
+- **FACTORY shipped empty harnesses (silent)**: the registration payload
+  put bundled `files` at the top level of the POST body, but the server
+  reads them from `spec["files"]` — so 40 projects registered with zero
+  files on disk and every build failed with "No such file or directory".
+  The triage tool caught it on the first live campaign run (harness-
+  suspect heuristic); payload now nests files in the spec, surfaces
+  server warnings, and a regression test pins the shape.
+- **Campaign budget burned on failures (silent)**: driver progress counted
+  every iteration-history entry, but failed generations land there too —
+  four projects failing every generation hit "50/50" in ten minutes and
+  were marked done with zero champions. Progress now counts SCORED
+  generations only (fitness measured), matching `RUN <n>` semantics; a
+  regression test pins it (an all-failing project must keep running).
+- **Factory prompts never said where the input comes from**: the contract
+  text described the task but not the I/O protocol, so candidates
+  defaulted to stdin while the fuzz gate passes argv — whole projects
+  failed every generation with empty output and an empty champion block
+  to learn from. Every factory project now carries an explicit
+  `I/O PROTOCOL` (argv[1..], per-language pointers, "NEVER read from
+  stdin") plus a concrete example computed from the reference, in
+  `data.contract_text`; the collatz goal text also dropped a misleading
+  "memoization is the main win" hint.
+- **Triage re-flagged fixed bugs forever**: the harness-suspect heuristic
+  ran over all history, so an already-fixed failure kept shouting in
+  every report. Suspects are now freshness-gated (last row ≤15 min) and
+  every group shows "last seen Nm ago".
+
+
+## [0.1.4-alpha] — 2026-09-06
+
+LLM-layer resilience release: a slow or crashing llama.cpp box no longer
+silently eats generations, and the GUI config save no longer corrupts
+`config.json`.
+
+### Fixed
+
+- **GUI config save wiped fields the panel doesn't show**: `PUT /api/config`
+  replaced whole sections, so every "Save" from Settings dropped
+  `llm.retry_backoff`, `llm.routing`, `llm.allowlists` and — worst —
+  `server.api_key` (the dashboard password silently stopped working after
+  the next save). Sections now deep-merge: nested dicts merge key-by-key,
+  scalars and lists replace.
+- **Generations discarded while the server was still working** (field
+  report: "generations don't get counted most of the time"): client-side
+  deadline *guesses* — a before-first-token timeout scaled from prompt
+  size and measured prefill speed, plus a total stream budget — killed
+  slow-but-alive generations on slow or loaded boxes; the model was still
+  chewing the prompt when its own output got thrown away. The policy is
+  now simple and honest: **by default there is NO before-first-token
+  limit** — KAISEN waits as long as prefill needs and accepts the output
+  whenever it arrives; a stream that keeps producing tokens is never cut
+  off by a total time budget. The only remaining time policy is
+  `nodata_timeout` BETWEEN tokens, so a genuinely stalled decode still
+  fails fast. Opt-in protection: new `llm.first_token_timeout` (default
+  0 = no limit) hard-fails when no token arrives within N seconds — for
+  llama.cpp the error says whether `/slots` showed visible work. Exposed
+  in Settings as "First-token timeout".
+- **Server death mid-stream misclassified**: a llama.cpp crash while
+  streaming (OOM is common with several instances on one GPU) surfaced as
+  a generic failure. The error now carries kind `stream`, the endpoint is
+  marked offline + banned, and the request retries elsewhere.
+- **401/403 marked the server offline**: an auth error means the server
+  ANSWERED — marking it offline hid the real problem (wrong key) behind a
+  "server down" state. Kind `auth` now keeps the server online with a
+  longer ban; the operator sees the key problem, not a phantom outage.
+- **Every engine re-hammered dead servers**: reachability was tracked per
+  orchestrator instance. Health is now one shared record per endpoint for
+  the whole process — every engine/pipeline sees one truth and only the
+  re-probe loop touches an offline server.
+- **Pool concentration: N identical boxes, only box #1 ever called**: the
+  cost-first sort keyed on (tier, priority, inflight) — for identical
+  servers with sequential calls that's always (equal, equal, 0), so a
+  stable sort returned the first server in config order forever. A shared
+  round-robin cursor now rotates among equals (tier and priority still
+  win outright; load breaks remaining ties). Field-verified: three boxes
+  went from 100%/0%/0% to an even split.
+
+### Added
+
+- **Error-kind classification** (`connection` / `stream` / `auth` /
+  `http` / `timeout` / `cancelled`) driving the orchestrator reaction:
+  `connection`/`stream` → offline + ban; `auth` → online, longer ban;
+  `timeout`/`http` → ban only, never offline. Cancellation is its own kind
+  and never penalizes the server.
+- **Background re-probe of offline servers**: every offline-but-active
+  server is re-probed every `llm.reprobe_interval` seconds (default 30;
+  `GET /health` for llama.cpp, `GET /models` for OpenAI-type). Restart the
+  crashed instance and it rejoins the pool on its own — no GUI toggle —
+  with a `[KAISEN] LLM server … back online` log line. `0` disables.
+- **`llm.nodata_timeout`** (default 120 s): max silence BETWEEN tokens —
+  a stalled decode fails after this long. Exposed in Settings as
+  "No-data timeout".
+- **Prefill visibility**: per-server `last_ttft` (time to first token) and
+  `prefill_tps` in the LLM server panel — "how long does filling take on
+  this box" is visible instead of guessed.
+- **Resilience regression suite** (`tests/test_llm_resilience.py`, 13
+  tests): no-limit-by-default and flat opt-in cap, long-prefill survival
+  with unhelpful `/slots` telemetry, hard-cap failure kind, streaming
+  completion while tokens flow, mid-stream drop kind, error-kind
+  classification, shared health across orchestrators, re-probe recovery
+  + loop idempotency, cancel-during-silence latency, and the config
+  deep-merge contract.
+- **`install.sh`**: one-command setup (venv + deps) that works on PEP-668
+  "externally managed" Pythons (Ubuntu 24.04/26.04, Debian 12+, Fedora).
+
+Field-verified against three live llama.cpp instances (one healthy, two
+crashed): SMOKE passed, 13 generations evolved a C prime-counter from
+134.7 ms to 1.3 ms (100×) while routing worked around both dead servers;
+their offline state was recorded without error spam and the re-probe loop
+kept watching for their return.
+
 ## [0.1.3-alpha] — 2026-09-04
 
 Windows compatibility release + field-crash fixes from user reports.

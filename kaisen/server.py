@@ -34,6 +34,17 @@ def _json(data: Any, status: int = 200):
     return web.json_response(data, status=status)
 
 
+def _deep_update(base: Dict[str, Any], new: Dict[str, Any]) -> None:
+    """Merge `new` into `base` recursively.  Nested dicts merge key-by-key;
+    scalars and lists replace.  Lets a partial section from the GUI update
+    only what it carries instead of wiping sibling keys."""
+    for k, v in new.items():
+        if isinstance(v, dict) and isinstance(base.get(k), dict):
+            _deep_update(base[k], v)
+        else:
+            base[k] = v
+
+
 def _auth_middleware(api_key: str):
     """Optional server password, using only globally recognized auth forms:
     `Authorization: Bearer <key>` (API clients) and HTTP Basic auth
@@ -1600,7 +1611,12 @@ class DashboardServer:
         tg = data.get("telegram")
         if isinstance(tg, dict) and tg.get("token") in ("", "********"):
             tg["token"] = self.cfg.telegram.get("token", "")
-        self.cfg.data.update(data)
+        # Deep-merge: the GUI sends only the fields it shows (e.g. llm has
+        # just read/connect/retry timeouts).  A shallow update would WIPE
+        # every sibling key it doesn't know about — nodata_timeout,
+        # retry_backoff, routing, allowlists, server.api_key — silently
+        # corrupting the config on each "Save".
+        _deep_update(self.cfg.data, data)
         self.cfg.save()
         return _json({"ok": True})
 

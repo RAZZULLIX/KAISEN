@@ -46,6 +46,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "read_timeout": 1200,
         "connect_timeout": 15,
         "nodata_timeout": 120,
+        # Max silence BEFORE the first token (s). 0 = no limit (default):
+        # wait as long as the server needs to prefill; set >0 to hard-fail.
+        "first_token_timeout": 0,
         "max_retries": 3,
         "retry_backoff": 2.0,
         # Active server ids (subset of "servers") — the checkbox selection.

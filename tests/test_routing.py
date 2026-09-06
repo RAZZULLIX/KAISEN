@@ -56,6 +56,39 @@ def test_pick_prefers_priority_within_tier(orch):
     assert orch._pick_server("tiny") == "hi"
     orch.release("hi")
 
+def test_pick_rotates_among_equal_servers(orch):
+    """Three identical servers (same tier/priority/cost/load): sequential
+    picks must cycle through the WHOLE pool, not hammer the first one —
+    the field bug where a 3-box setup only ever called box #1."""
+    a = _server(orch, "a", tier="large")
+    b = _server(orch, "b", tier="large")
+    c = _server(orch, "c", tier="large")
+    _register(orch, a, b, c)
+    picks = []
+    for _ in range(6):
+        sid = orch._pick_server("tiny")
+        assert sid is not None
+        picks.append(sid)
+        orch.release(sid)
+    assert picks == ["a", "b", "c", "a", "b", "c"]
+
+
+def test_pick_rotation_never_outranks_tier_or_priority(orch):
+    """Round-robin is a tiebreak ONLY: a cheaper tier or a higher priority
+    wins every single pick, even when it was the one picked most recently."""
+    cheap = _server(orch, "cheap", tier="tiny")
+    exp1 = _server(orch, "exp1", tier="large")
+    exp2 = _server(orch, "exp2", tier="large")
+    _register(orch, cheap, exp1, exp2)
+    for _ in range(4):
+        assert orch._pick_server("tiny") == "cheap"   # tiny always beats large
+        orch.release("cheap")
+    lo = _server(orch, "lo", tier="large", priority=1)
+    hi = _server(orch, "hi", tier="large", priority=9)
+    _register(orch, lo, hi)                           # resets the cursor
+    for _ in range(3):
+        assert orch._pick_server("tiny") == "hi"      # priority always beats rotation
+        orch.release("hi")
 
 def test_pick_busy_falls_through_to_next(orch):
     busy = _server(orch, "busy", tier="tiny", max_concurrent=1)

@@ -250,6 +250,8 @@
           <section class="panel">
             <div class="panel-header"><div class="panel-title">LLM defaults</div></div>
             <div class="form-row"><label>Read timeout (s)</label><input id="cfg-llm-timeout" type="number"></div>
+            <div class="form-row"><label>No-data timeout (s) — max silence BETWEEN tokens; a stalled decode fails after this</label><input id="cfg-llm-nodata" type="number"></div>
+            <div class="form-row"><label>First-token timeout (s) — 0 = wait forever (default): prefill can take as long as it takes. Set &gt;0 to fail if no token arrives within N s</label><input id="cfg-llm-firsttoken" type="number"></div>
             <div class="form-row"><label>Connect timeout (s)</label><input id="cfg-llm-connect" type="number"></div>
             <div class="form-row"><label>Max retries</label><input id="cfg-llm-retries" type="number"></div>
           </section>

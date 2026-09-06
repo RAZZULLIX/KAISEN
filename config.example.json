@@ -18,6 +18,7 @@
     "read_timeout": 1200,
     "connect_timeout": 15,
     "nodata_timeout": 120,
+    "first_token_timeout": 0,
     "max_retries": 3,
     "retry_backoff": 2.0,
     "active_ids": [],

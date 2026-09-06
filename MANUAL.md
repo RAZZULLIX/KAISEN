@@ -189,6 +189,80 @@ Harness commands use `{candidate}` (source path), `{artifact}` (build
 output), `{project_dir}`, `{workdir}` (this generation's scratch dir).
 They are substituted per generation.
 
+### Fuzz gate — correctness on seeded cases, not just fixed tests
+
+A verify step that checks a handful of fixed inputs can be fooled by a
+"fast but wrong" candidate: correct on the test slice, broken elsewhere.
+KAISEN ships a differential fuzz gate for exactly this:
+
+- `kaisen/fuzzlib.py` generates a SEEDED case set per problem family
+  (`int`, `pair_int`, `str`): boundary values (0/1, powers of two ±1,
+  domain edges, empty string, ...) plus seeded random draws. Same seed →
+  identical cases, forever — a failing case is reproducible exactly.
+- Each project carries `fuzz_cases.json`: every input with its REFERENCE
+  output (computed from a trusted reference at creation time).
+- `harness/fuzz_verify.py` (a verify step) replays all cases against the
+  candidate artifact and fails on the first mismatch with a
+  machine-readable diagnostic:
+  `FUZZ MISMATCH case=42 tag=rand:7 input=[...] expected='...' got='...'`
+  (plus `FUZZ CRASH` / `FUZZ TIMEOUT`). Compare modes: `exact` (default),
+  `sorted_lines` (order-free output), `float_last` (measured values,
+  relative tolerance 1e-6).
+
+### Project factory — algorithm × language campaigns in one command
+
+`FACTORY` (KAI) / `kaisen/factory.py` generates a full campaign: 25
+algorithm families × 4 languages (C, Python, Rust, Go) = 100 projects.
+The original ten (prime counting, popcount, GCD, Fibonacci mod, divisor
+count, Collatz stopping time, range sum, string reverse, palindrome check,
+run-length encoding) are joined by fifteen: integer math (primality,
+integer sqrt, digital root, trailing zero bits, total prime factors, nth
+prime, happy-number steps, modular exponentiation), strings (Levenshtein
+distance, LCS length, longest palindromic substring, KMP prefix function,
+Caesar shift) and lists (maximum subarray sum, count inversions). Every
+project ships a naive baseline, its own build/fuzz/score harness and a
+seeded fuzz gate (string-pair, triple-argument and list problems use the
+`pair_str`, `triple_int` and `intlist` input families). Before
+registration, the factory PROVES each project works: the baseline must
+build, pass its full fuzz gate against the reference, and score — broken
+combinations are reported, never shipped. C builds compile with
+`-Werror=implicit-function-declaration`, so a missing `#include
+<stdlib.h>` (which makes gcc assume 32-bit returns for `atol` & co.)
+fails the build instead of shipping a binary that truncates large inputs.
+
+    FACTORY                          # everything, 200 cases each
+    FACTORY ALGOS gcd,fib-mod LANGS c,rust CASES 300
+
+### Campaigns — run every project to N generations, resumably
+
+`python3 -m kaisen.campaign [TARGET n] [PARALLEL k] [POLL s] | STATUS | STOP`
+drives every registered pool project to `n` scored generations each
+(default 50), filling at most `k` engine slots at a time (default 4).
+Progress lives in `campaign.json` anchored to each project's iteration
+history, and engines persist in `engine_pool.json` — kill the driver or
+restart it mid-campaign and it resumes exactly where it left off:
+KAI `RUN <n>`: only scored generations (fitness measured) count toward
+the target — failed attempts never burn budget.
+
+    python3 -m kaisen.campaign TARGET 100 PARALLEL 6   # supervised run
+    python3 -m kaisen.campaign STATUS                  # per-project progress
+    python3 -m kaisen.campaign STOP                    # pause engines, keep state
+
+### Bug capture & triage — separate candidate noise from tooling bugs
+
+Every stage failure of a running campaign project is appended to
+`campaign_bugs.jsonl` (exactly once per generation — anchored, restart-
+safe). `python3 -m kaisen.triage [--limit N]` groups the rows by
+(project, outcome, signature) and splits them:
+
+- **HARNESS SUSPECTS** — the same stage failing the same way ≥3
+  generations in a row. The LLM cannot fix a broken toolchain or spec;
+  these are KAISEN bugs (this heuristic caught the factory's empty-
+  harness payload on its first live run).
+- **CANDIDATE noise** — expected: a generation's code wrong on one fuzz
+  input, or invalid syntax. Each group carries a reproduction pointer:
+  `runs/gen_NNNN/` plus the exact failing input.
+
 ---
 
 ## 6. The pipeline
@@ -493,7 +567,10 @@ OpenAI-compatible chat), `url`/`base_url`, `model`, `params`,
 | `cost_in` / `cost_out` | $ per 1M tokens (local servers = $0) |
 
 **Routing is cost-first**: every request picks the LOWEST tier that can
-do the job, then priority, then free capacity. Busy servers fall
+do the job, then priority.  Among EQUALS (same tier + priority — e.g.
+three identical local boxes) a shared round-robin cursor rotates the pool,
+so sequential calls spread across EVERY server instead of hammering the
+first one; current load breaks any remaining ties. Busy servers fall
 through so the pipeline never stalls; if no qualifying server is free,
 it falls back to any usable server rather than deadlocking. Servers
 have live state: inflight counters, bans with cooldown, one-shot
@@ -501,6 +578,40 @@ reachability probes, per-server stats (requests, failures, tps).
 
 `ESTIMATE <in> [out]` (KAI) or the Servers panel shows per-server
 time/cost for a call of that size before you commit.
+
+### Resilience — why a slow box no longer loses half its generations
+
+Three field failure modes are handled explicitly:
+
+- **Silent prefill ("it fills but never generates").** A llama.cpp server
+  sends NOTHING while it processes the prompt; on a slow machine that can
+  take minutes. By default there is **NO before-first-token limit**: KAISEN
+  waits as long as the server needs and accepts the output whenever it
+  arrives — a slow box must not lose generations to a client-side timeout
+  guess (earlier versions killed slow-but-working prefills; that made
+  generations "not get counted" in the field). If you want protection
+  against a truly hung server, set `llm.first_token_timeout` (>0 s):
+  silence past that cap fails fast with a diagnostic, and for llama.cpp a
+  `/slots` poll says whether the server shows visible work. Between tokens,
+  `nodata_timeout` still applies, so a stalled decode fails fast either
+  way; a stream that keeps producing tokens is never cut off by a total
+  time budget.
+- **Server death mid-stream.** If the process crashes while streaming
+  (OOM is common with several instances on one GPU), the error is reported
+  as such (`stream` kind) and the server is marked offline — but see next.
+- **Offline servers come back automatically.** A background loop re-probes
+  every offline-but-active server every `llm.reprobe_interval` seconds
+  (default 30; `GET /health` for llama.cpp, `GET /models` for OpenAI-type).
+  Restart the crashed instance and it rejoins the pool on its own — no GUI
+  toggle needed. Reachability + ban state is shared process-wide, so every
+  engine/pipeline sees one truth per endpoint instead of each re-hammering
+  a dead server.
+
+Error kinds drive the reaction: `connection`/`stream` → offline + ban;
+`auth` (401/403) → **stays online** (the server answered — fix the key),
+longer ban; `timeout`/`http` → ban only, never marked offline. The GUI
+server panel shows per-server `last_ttft` (time to first token) and
+`prefill_tps` so "how long does filling take on this box" is visible.
 
 For raw `/completion` servers, `chat_template` selects the model's native
 chat format (`auto | gptoss | chatml | qwen | llama3 | llama2 | gemma |
@@ -609,11 +720,13 @@ Complete reference — copy from `config.example.json`:
 | `server.host` | `127.0.0.1` | dashboard bind (loopback; §19) |
 | `server.port` | `8080` | dashboard port |
 | `server.api_key` | `""` | optional server password (Bearer/Basic); empty = no auth; env `KAISEN_API_KEY` wins (§19) |
-| `llm.read_timeout` | `1200` | per-request read timeout (s) |
+| `llm.read_timeout` | `1200` | read timeout (s) for NON-streaming LLM calls; streaming silence is governed by `first_token_timeout` / `nodata_timeout` (§13 resilience) |
 | `llm.connect_timeout` | `15` | connection timeout (s) |
-| `llm.nodata_timeout` | `120` | max silence between tokens (s) |
+| `llm.nodata_timeout` | `120` | max silence BETWEEN tokens (s): a stalled decode fails after this long (§13 resilience) |
+| `llm.first_token_timeout` | `0` | max silence BEFORE the first token (s); **0 = no limit** — wait as long as prefill needs (default). Set >0 to hard-fail on a hung server (§13 resilience) |
 | `llm.max_retries` | `3` | per-server retries |
 | `llm.retry_backoff` | `2.0` | backoff multiplier |
+| `llm.reprobe_interval` | `30` | how often offline servers are re-probed in the background (s); 0 disables — a crashed llama.cpp that comes back rejoins the pool automatically |
 | `llm.max_tokens` | `8192` | cap for UNLIMITED generations |
 | `llm.active_ids` | `[]` | which servers are active (checkbox set) |
 | `llm.servers` | `[…]` | the server registry (§13) |

@@ -21,9 +21,11 @@ Behavior:
 from __future__ import annotations
 
 import json
+import queue
 import random
 import threading
 import time
+import urllib.parse
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -200,18 +202,173 @@ def _cap_predict(payload: Dict[str, Any], global_cfg: FrameworkConfig) -> Dict[s
         payload["n_predict"] = max(1, cap)
     return payload
 
+# --------------------------------------------------------------------------- #
+# Process-wide server health
+# --------------------------------------------------------------------------- #
+class ServerHealth:
+    """Reachability + ban state shared by EVERY orchestrator instance.
+
+    Engines, suggest jobs and swarm coordinators each build their own
+    ModelOrchestrator, but a dead (or slow) LLM endpoint is a fact about the
+    endpoint, not about one orchestrator.  Sharing one record per server id
+    means one discovery — crash, wrong key, recovery — propagates everywhere
+    instead of each pipeline independently re-hammering the same broken
+    server (the "half my generations fail" field pattern)."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        # None = unknown, True = reachable, False = unreachable.
+        self._online: Optional[bool] = None
+        self.banned_until: float = 0.0
+        self.last_error: Optional[str] = None
+
+    def set_online(self, ok: Optional[bool]) -> None:
+        with self._lock:
+            self._online = ok
+
+    @property
+    def online(self) -> Optional[bool]:
+        with self._lock:
+            return self._online
+
+    def ban(self, seconds: float, reason: str = "") -> None:
+        with self._lock:
+            self.banned_until = max(self.banned_until, time.time() + seconds)
+            if reason:
+                self.last_error = reason
+
+    @property
+    def banned(self) -> bool:
+        return self.banned_until > time.time()
 
 
+_HEALTH: Dict[str, ServerHealth] = {}
+_HEALTH_LOCK = threading.Lock()
+# sid -> zero-arg callable returning True when the endpoint answers.  The
+# background re-probe loop calls these for servers marked offline.
+_PROBES: Dict[str, Callable[[], bool]] = {}
 
+
+def health_for(sid: str) -> ServerHealth:
+    with _HEALTH_LOCK:
+        h = _HEALTH.get(sid)
+        if h is None:
+            h = _HEALTH[sid] = ServerHealth()
+        return h
+
+
+def register_probe(sid: str, probe: Callable[[], bool]) -> None:
+    with _HEALTH_LOCK:
+        _PROBES[sid] = probe
+
+
+_REPROBE_THREAD: Optional[threading.Thread] = None
+_REPROBE_LOCK = threading.Lock()
+
+
+def _reprobe_cycle() -> None:
+    """One pass: re-probe every known server marked offline.
+
+    llama.cpp instances die (OOM, box reboot, user restarts them) and come
+    back.  Without this loop a single failed request would keep the endpoint
+    out of routing for the lifetime of the daemon — the operator sees it
+    "offline" in the GUI while it has actually been fine for an hour."""
+    with _HEALTH_LOCK:
+        items = list(_PROBES.items())
+    for sid, probe in items:
+        h = health_for(sid)
+        if h.online is not False:
+            continue
+        try:
+            ok = bool(probe())
+        except Exception:
+            ok = False
+        if ok:
+            print(f"[KAISEN] LLM server {sid!r} back online (background re-probe)")
+        h.set_online(ok)
+
+
+def start_reprobe_loop() -> None:
+    """Idempotent: at most one daemon thread per process.  The interval comes
+    from llm.reprobe_interval (seconds; 0 disables) and is re-read every
+    cycle, so it can be tuned live."""
+    global _REPROBE_THREAD
+    with _REPROBE_LOCK:
+        if _REPROBE_THREAD is not None and _REPROBE_THREAD.is_alive():
+            return
+
+        def run() -> None:
+            while True:
+                try:
+                    interval = float(get_config().llm.get("reprobe_interval", 30) or 30)
+                except Exception:
+                    interval = 30.0
+                if interval <= 0:
+                    time.sleep(60.0)
+                    continue
+                deadline = time.time() + interval
+                while time.time() < deadline:
+                    time.sleep(min(5.0, max(0.1, deadline - time.time())))
+                try:
+                    _reprobe_cycle()
+                except Exception:
+                    pass  # the loop must never die
+
+        _REPROBE_THREAD = threading.Thread(target=run, name="kaisen-reprobe", daemon=True)
+        _REPROBE_THREAD.start()
 
 
 class ServerError(Exception):
-    pass
+    """Failed LLM call.  `kind` classifies the failure so callers can react
+    sensibly instead of treating every error as "server is down":
+
+      - "connection" : endpoint unreachable (refused/DNS) — it is down
+      - "stream"     : connection died mid-response — process likely crashed
+      - "auth"       : 401/403 — the server IS up, our key is wrong
+      - "timeout"    : silence exceeded the (adaptive) deadline
+      - "http"       : other HTTP error (5xx etc.) — server up, response bad
+      - "unknown"    : anything else
+    """
+
+    def __init__(self, message: str, kind: str = "unknown") -> None:
+        super().__init__(message)
+        self.kind = kind
 
 
 class GenerationCancelled(Exception):
     """Raised when an in-flight generation is cancelled (engine stop)."""
 
+
+def _classify(e: Exception) -> str:
+    """Map a transport/HTTP exception to a ServerError kind (see class doc).
+    Mid-stream breaks are ALSO requests ConnectionErrors — the caller marks
+    those "stream" via _wrap, so plain ConnectionError here means the
+    connection never carried our response."""
+    if isinstance(e, requests.exceptions.HTTPError):
+        code = getattr(getattr(e, "response", None), "status_code", 0) or 0
+        if code in (401, 403):
+            return "auth"
+        return "http"
+    if isinstance(e, requests.exceptions.ConnectTimeout):
+        return "connection"
+    if isinstance(e, requests.exceptions.ReadTimeout):
+        return "timeout"
+    if isinstance(e, (requests.exceptions.ConnectionError, ConnectionError, OSError)):
+        return "connection"
+    return "unknown"
+
+
+def _wrap_error(e: Exception, sid: str, mid_stream: bool = False) -> ServerError:
+    """Turn a raw exception into a classified ServerError.  A connection-level
+    break AFTER bytes were flowing means the server process died mid-response
+    (kind "stream") — that is what the dashboard/operator must see, not a
+    generic error."""
+    if isinstance(e, ServerError):
+        return e
+    kind = _classify(e)
+    if mid_stream and kind == "connection":
+        kind = "stream"
+    return ServerError(f"{sid}: {e}", kind=kind)
 
 class Server:
     """A configured LLM endpoint with live state."""
@@ -241,6 +398,12 @@ class Server:
         self.timeout: float = float(cfg.get("timeout", global_cfg.llm.get("read_timeout", 1200)))
         self.connect_timeout: float = float(cfg.get("connect_timeout", global_cfg.llm.get("connect_timeout", 15)))
         self.nodata_timeout: float = float(cfg.get("nodata_timeout", global_cfg.llm.get("nodata_timeout", 120)))
+        # Max silence BEFORE the first token (s).  0 = NO LIMIT (default):
+        # wait as long as the server needs to prefill — a slow box must not
+        # lose generations.  Set >0 to hard-fail when no token arrives in
+        # that many seconds.
+        self.first_token_timeout: float = float(
+            cfg.get("first_token_timeout", global_cfg.llm.get("first_token_timeout", 0)))
         self.spawn_cmd: List[str] = list(cfg.get("spawn_cmd", []) or [])
         self.enabled: bool = bool(cfg.get("enabled", True))
         # Routing profile: the orchestrator prefers the lowest tier that
@@ -257,11 +420,16 @@ class Server:
         self.cost_out: float = float(cfg.get("cost_out", cost_cfg.get("out", 0.0)) or 0.0)
         self._lock = threading.Lock()
         self._inflight = 0
-        self._banned_until: float = 0.0
-        # Reachability, probed ONCE on activation (or proven by use):
-        # None = unknown, True = reachable, False = offline.
-        self._online: Optional[bool] = None
-        self._stats = {"requests": 0, "failures": 0, "total_seconds": 0.0, "last_tps": 0.0, "last_error": None}
+        # Reachability + ban live in the PROCESS-WIDE health record so every
+        # orchestrator (engines, suggest, swarm) sees one truth per endpoint.
+        self._health = health_for(self.id)
+        register_probe(self.id, self._probe)
+        # Learned prompt-processing speed (tokens/s), from measured
+        # time-to-first-token — scales the first-byte deadline on slow boxes.
+        self._prefill_tps: float = 0.0
+        self._stats = {"requests": 0, "failures": 0, "total_seconds": 0.0,
+                       "last_tps": 0.0, "last_ttft": None,
+                       "prefill_tps": 0.0, "last_error": None}
 
     # -- capacity / health -------------------------------------------------
     @property
@@ -271,7 +439,8 @@ class Server:
 
     def acquire(self) -> bool:
         with self._lock:
-            if self._inflight >= self.max_concurrent or self._banned_until > time.time() or not self.enabled:
+            if (self._inflight >= self.max_concurrent or self._health.banned
+                    or not self.enabled):
                 return False
             self._inflight += 1
             return True
@@ -281,22 +450,116 @@ class Server:
             self._inflight = max(0, self._inflight - 1)
 
     def ban(self, seconds: float = 60.0, reason: str = "") -> None:
+        self._health.ban(seconds, reason)
         with self._lock:
-            self._banned_until = time.time() + seconds
-            self._stats["last_error"] = reason
+            if reason:
+                self._stats["last_error"] = reason
 
     @property
     def banned(self) -> bool:
-        return self._banned_until > time.time()
+        return self._health.banned
 
     def mark_online(self, ok: Optional[bool]) -> None:
-        with self._lock:
-            self._online = ok
+        self._health.set_online(ok)
 
     @property
     def online(self) -> Optional[bool]:
-        with self._lock:
-            return self._online
+        return self._health.online
+
+    # -- reachability / liveness ------------------------------------------
+    def _probe(self) -> bool:
+        """Cheap reachability check for the background re-probe loop.  A
+        successful HTTP answer means the endpoint process is alive — that is
+        all this may conclude (a full generation probe would burn tokens)."""
+        try:
+            if self.type == "llama":
+                base = self._base_of(self.url)
+                if not base:
+                    return False
+                r = requests.get(base + "/health", timeout=5.0)
+                return r.status_code == 200
+            if self.type == "openai":
+                if not self.base_url:
+                    return False
+                headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+                r = requests.get(self.base_url.rstrip("/") + "/models",
+                                 headers=headers, timeout=5.0)
+                return r.status_code == 200
+            return False
+        except Exception:
+            return False
+
+    @staticmethod
+    def _base_of(url: str) -> Optional[str]:
+        """scheme://host:port from an endpoint URL (llama.cpp serves /health
+        and /slots at the root).  None when the shape is not recognized."""
+        try:
+            p = urllib.parse.urlsplit(url or "")
+            if p.scheme in ("http", "https") and p.netloc:
+                return f"{p.scheme}://{p.netloc}"
+        except Exception:
+            pass
+        return None
+
+    def _slots_snapshot(self) -> tuple:
+        """(working, counter_total) from a llama.cpp /slots poll.
+
+        `working` = some slot is currently processing (prompt eval OR token
+        prediction); `counter_total` = sum of processed-prompt + predicted
+        tokens across slots — an increasing value proves the server is making
+        real progress, which lets request_stream distinguish "slow prefill /
+        queued behind another request" from "server actually hung".
+        (None, None) when the endpoint doesn't expose usable /slots."""
+        base = self._base_of(self.url)
+        if not base:
+            return (None, None)
+        try:
+            headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+            r = requests.get(base + "/slots", headers=headers, timeout=5.0)
+            if r.status_code != 200:
+                return (None, None)
+            slots = r.json()
+        except Exception:
+            return (None, None)
+        if isinstance(slots, dict):
+            slots = [slots]
+        if not isinstance(slots, list) or not slots:
+            return (None, None)
+        working = False
+        total = 0
+        for s in slots:
+            if not isinstance(s, dict):
+                continue
+            if s.get("is_processing"):
+                working = True
+            total += int(s.get("n_prompt_tokens_processed") or 0) + \
+                int(s.get("n_tokens_predicted") or 0)
+        return (working, total)
+
+    # -- silence deadlines ---------------------------------------------------
+    def _first_byte_deadline(self, prompt: str) -> Optional[float]:
+        """Allowed silence BEFORE the first token, or None = no limit.
+
+        A llama.cpp server sends nothing while it processes (prefills) the
+        prompt — on a slow box that can take many minutes.  Killing such a
+        generation client-side is exactly what made generations "not get
+        counted" in the field: the model was still chewing the prompt, and
+        the whole call died of a timeout guess.  The default (0) therefore
+        waits as long as needed — accept the output whenever it arrives.
+        An explicit `first_token_timeout > 0` is a HARD cap: no token in
+        that many seconds -> ServerError(timeout)."""
+        cap = float(self.first_token_timeout or 0.0)
+        return cap if cap > 0 else None
+
+    def _learn_prefill(self, prompt: str, ttft: float) -> None:
+        """EWMA of prompt-processing speed from measured time-to-first-token."""
+        tokens = max(64, len(prompt) // 4)
+        if ttft > 0.5:
+            tps = tokens / ttft
+            self._prefill_tps = tps if self._prefill_tps <= 0.0 \
+                else 0.7 * self._prefill_tps + 0.3 * tps
+            with self._lock:
+                self._stats["prefill_tps"] = round(self._prefill_tps, 1)
     def record(self, ok: bool, seconds: float, tokens: int = 0) -> None:
         with self._lock:
             self._stats["requests"] += 1
@@ -336,7 +599,7 @@ class Server:
                 "model": self.model,
                 "enabled": self.enabled,
                 "busy": self._inflight >= self.max_concurrent,
-                "online": self._online,
+                "online": self.online,
                 "inflight": self._inflight,
                 "max_concurrent": self.max_concurrent,
                 "banned": self.banned,
@@ -421,9 +684,30 @@ class Server:
 
         except Exception as e:
             self.record(False, time.time() - t0)
-            raise ServerError(f"{self.id}: {e}") from e
+            raise _wrap_error(e, self.id) from e
 
     # -- streaming request ------------------------------------------------
+    def _post_stream(self, target: str, headers: Dict[str, str],
+                     payload: Dict[str, Any]) -> Any:
+        """POST a streaming request.  Transport/HTTP failures become a
+        classified ServerError (kind connection/auth/http/timeout) BEFORE
+        any bytes flow.  The socket read timeout is only a backstop — the
+        real silence policy runs in Python (_consume_stream), so it must
+        never fire first: with no first-token cap (the default) the socket
+        waits indefinitely; with an explicit cap it outlasts that cap."""
+        cap = float(self.first_token_timeout or 0.0)
+        if cap > 0:
+            sock_read = max(cap, float(self.nodata_timeout), 60.0) + 30.0
+        else:
+            sock_read = None
+        try:
+            resp = requests.post(target, json=payload, headers=headers, stream=True,
+                                 timeout=(self.connect_timeout, sock_read))
+            resp.raise_for_status()
+            return resp
+        except Exception as e:
+            raise _wrap_error(e, self.id) from e
+
     def request_stream(
         self,
         prompt: str,
@@ -437,52 +721,52 @@ class Server:
         - remote: no streaming — plain request, delivered in one chunk
 
         `cancel_event` is checked between chunks; when set, raises
-        GenerationCancelled.  The read timeout applies between chunks, so a
-        stalled server fails fast instead of hanging a producer.
+        GenerationCancelled.  Silence policy: BEFORE the first token the
+        allowed silence scales with prompt size and this server's measured
+        prefill speed, and is extended (evidence-based) while a llama.cpp
+        /slots poll shows visible work — slow prefills and queue waits are
+        not failures.  BETWEEN tokens the nodata_timeout applies, so a
+        stalled decode still fails fast instead of hanging a producer.
         """
         t0 = time.time()
+        if self.type == "remote":
+            content = self.request(prompt)
+            if on_token:
+                on_token(content, max(1, len(content) // 4))
+            self.record(True, time.time() - t0, max(1, len(content) // 4))
+            return content
         try:
-            if self.type == "remote":
-                content = self.request(prompt)
-                if on_token:
-                    on_token(content, max(1, len(content) // 4))
-                self.record(True, time.time() - t0, max(1, len(content) // 4))
-                return content
             if self.type == "llama":
                 payload = dict(DEFAULT_PARAMS)
                 payload.update(self.params)
                 payload.update({"prompt": prompt, "stream": True})
                 payload = _cap_predict(payload, self._global_cfg)
-                resp = requests.post(
-                    self.url, json=payload,
-                    headers=self._auth_headers(),
-                    stream=True,
-                    timeout=(self.connect_timeout, self.nodata_timeout),
-                )
-                resp.raise_for_status()
-                content, tokens = self._consume_sse(resp, on_token, cancel_event, llama=True)
+                target, headers = self.url, self._auth_headers()
             elif self.type == "openai":
                 messages = [{"role": "user", "content": prompt}]
                 payload = {"model": self.model, "messages": messages, "stream": True}
                 payload.update(self.params)
-                resp = requests.post(
-                    self.base_url.rstrip("/") + "/chat/completions",
-                    json=payload,
-                    headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
-                    stream=True,
-                    timeout=(self.connect_timeout, self.nodata_timeout),
-                )
-                resp.raise_for_status()
-                content, tokens = self._consume_sse(resp, on_token, cancel_event, llama=False)
+                target = self.base_url.rstrip("/") + "/chat/completions"
+                headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
             else:
-                raise ServerError(f"unknown server type {self.type!r}")
+                raise ServerError(f"{self.id}: unknown server type {self.type!r}")
+            resp = self._post_stream(target, headers, payload)
+            content, tokens, ttft = self._consume_stream(
+                resp, on_token, cancel_event, llama=(self.type == "llama"), prompt=prompt)
+            if ttft is not None:
+                with self._lock:
+                    self._stats["last_ttft"] = round(ttft, 2)
+                self._learn_prefill(prompt, ttft)
             self.record(True, time.time() - t0, tokens)
             return content
         except GenerationCancelled:
             raise
+        except ServerError:
+            self.record(False, time.time() - t0)
+            raise
         except Exception as e:
             self.record(False, time.time() - t0)
-            raise ServerError(f"{self.id}: {e}") from e
+            raise _wrap_error(e, self.id) from e
     def request_chat(self, messages: List[Dict[str, str]],
                      extra_params: Optional[Dict[str, Any]] = None) -> str:
         """Conversational request with proper roles. OpenAI-compatible
@@ -509,29 +793,36 @@ class Server:
                             cancel_event: Optional[threading.Event] = None) -> str:
         """Streaming variant of request_chat."""
         if self.type == "openai":
+            prompt_txt = " ".join(str(m.get("content", "")) for m in messages)
             payload = {"model": self.model, "messages": messages, "stream": True}
             payload.update(self.params)
-            resp = requests.post(
-                self.base_url.rstrip("/") + "/chat/completions",
-                json=payload,
-                headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
-                stream=True,
-                timeout=(self.connect_timeout, self.nodata_timeout),
-            )
-            resp.raise_for_status()
-            content, _ = self._consume_sse(resp, on_token, cancel_event, llama=False)
+            target = self.base_url.rstrip("/") + "/chat/completions"
+            headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+            resp = self._post_stream(target, headers, payload)
+            content, _, _ = self._consume_stream(resp, on_token, cancel_event, llama=False,
+                                                 prompt=prompt_txt)
             return content
         return self.request_stream(_chat_transcript(messages, self.chat_template), on_token=on_token,
                                    cancel_event=cancel_event)
 
-    def _consume_sse(
+    def _consume_stream(
         self,
         resp: Any,
         on_token: Optional[Callable[[str, int], None]],
         cancel_event: Optional[threading.Event],
         llama: bool,
+        prompt: str,
     ) -> tuple:
-        """Consume a streaming response.  Returns (full_text, token_count).
+        """Consume a streaming response with a silence policy that never
+        kills slow-but-alive servers by default.
+
+        The blocking socket read runs in a worker thread; this method pulls
+        lines from a queue and enforces exactly two time policies:
+          * BEFORE the first token — nothing at all (default): prefill can
+            take as long as it takes; accept the output when it arrives.
+            An explicit `first_token_timeout > 0` is a hard cap.
+          * BETWEEN tokens — `nodata_timeout`: a stalled decode fails fast.
+        Returns (full_text, token_count, time_to_first_token).
 
         Token counting is REAL: one SSE content event = one token for
         llama.cpp streams and OpenAI-style deltas; the final llama.cpp
@@ -541,25 +832,69 @@ class Server:
         repeats is rejected here (ServerError) so the orchestrator bans
         the endpoint and retries elsewhere instead of streaming junk.
         """
+        q: "queue.Queue" = queue.Queue()
+
+        def worker() -> None:
+            try:
+                for raw in resp.iter_lines(decode_unicode=False):
+                    q.put(("line", raw))
+                q.put(("done", None))
+            except Exception as e:
+                q.put(("error", e))
+
+        threading.Thread(target=worker, name=f"kaisen-llm-{self.id}", daemon=True).start()
         chunks: List[str] = []
         token_count = 0
         final_count: Optional[int] = None
         total_chars = 0
         qmark_chars = 0
         t_start = time.time()
+        ttft: Optional[float] = None
+        cap = self._first_byte_deadline(prompt)
+        first_deadline = (t_start + cap) if cap is not None else None
+        last_data = t_start
         try:
-            for raw in resp.iter_lines(decode_unicode=False):
+            while True:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise GenerationCancelled("generation cancelled")
+                # Wake at most every 2 s so a cancel is honored promptly.
+                remaining = 2.0 if ttft is None \
+                    else max(0.2, min(float(self.nodata_timeout), 2.0))
+                try:
+                    tag, item = q.get(timeout=remaining)
+                except queue.Empty:
+                    now = time.time()
+                    if ttft is None:
+                        if first_deadline is None or now < first_deadline:
+                            continue  # no cap (default), or inside the cap — keep waiting
+                        # Explicit cap reached with no token yet.  A /slots
+                        # poll only colors the diagnostic — the cap is hard.
+                        working, _total = self._slots_snapshot() if llama else (None, None)
+                        raise ServerError(
+                            f"{self.id}: no tokens after {now - t_start:.0f}s of silence "
+                            f"(first-token timeout {first_deadline - t_start:.0f}s)"
+                            + (" — server shows no visible work (may be hung)"
+                               if working is False else ""),
+                            kind="timeout")
+                    if now - last_data < float(self.nodata_timeout):
+                        continue  # poll woke early — silence still within bounds
+                    raise ServerError(
+                        f"{self.id}: no data for {now - last_data:.0f}s between tokens "
+                        f"(nodata timeout {float(self.nodata_timeout):.0f}s)", kind="timeout")
+                if tag == "error":
+                    raise _wrap_error(item, self.id, mid_stream=True) from item
+                if tag == "done":
+                    break
+                raw = item
+                now = time.time()
+                last_data = now
+                if ttft is None:
+                    ttft = now - t_start
                 # llama.cpp sends `text/event-stream` with no charset;
                 # requests then guesses ISO-8859-1 and mangles every
                 # non-ASCII token (mojibake like "commandâ\x80\x91line").
                 # SSE payloads are UTF-8 by spec — decode explicitly.
                 line = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw)
-                # Absolute cap (legacy parity): a server trickling one token
-                # per chunk under the nodata timeout must not stream forever.
-                if time.time() - t_start > self.timeout:
-                    raise ServerError(f"{self.id}: stream exceeded total read timeout ({self.timeout:.0f}s)")
-                if cancel_event is not None and cancel_event.is_set():
-                    raise GenerationCancelled("generation cancelled")
                 line = line.strip()
                 if line.startswith("data:"):
                     data = line[5:].strip()
@@ -570,7 +905,7 @@ class Server:
                     except json.JSONDecodeError:
                         continue
                     if obj.get("error"):
-                        raise ServerError(f"{self.id}: server error: {obj['error']}")
+                        raise ServerError(f"{self.id}: server error: {obj['error']}", kind="http")
                     if llama:
                         token = obj.get("content", "")
                         if isinstance(obj.get("tokens_predicted"), int):
@@ -601,8 +936,8 @@ class Server:
                         if total_chars > 200 and qmark_chars / total_chars > 0.9:
                             raise ServerError(
                                 f"{self.id}: degenerate stream "
-                                f"({qmark_chars}/{total_chars} '?' chars) — rejecting"
-                            )
+                                f"({qmark_chars}/{total_chars} '?' chars) — rejecting",
+                                kind="unknown")
                         if on_token:
                             on_token(token, 1)
                 else:
@@ -627,7 +962,7 @@ class Server:
                         if on_token:
                             on_token(token, 1)
                     break
-            return "".join(chunks), (final_count if final_count is not None else token_count)
+            return "".join(chunks), (final_count if final_count is not None else token_count), ttft
         finally:
             try:
                 resp.close()
@@ -654,6 +989,7 @@ class ModelOrchestrator:
         self._skill_stats: Dict[tuple, Dict[str, Any]] = {}
         self._load_stats()
         self._reload_servers()
+        start_reprobe_loop()
 
     # -- skill scoreboard --------------------------------------------------
     def _load_stats(self) -> None:
@@ -896,8 +1232,19 @@ class ModelOrchestrator:
                     return out
                 except ServerError as e:
                     last_err = str(e)
-                    s.mark_online(False)
-                    s.ban(seconds=min(300, 30 * (attempt + 1)), reason=last_err)
+                    if e.kind in ("connection", "stream"):
+                        # Endpoint unreachable, or its process died mid-response.
+                        s.mark_online(False)
+                    elif e.kind == "auth":
+                        # The server ANSWERED (it is online); our key is wrong.
+                        # Longer ban so the pool stops re-hammering it every
+                        # cycle with the same bad key.
+                        s.ban(seconds=300, reason=last_err)
+                    else:
+                        # timeout / http / unknown: slow or flaky — never mark
+                        # a server offline from that alone (the old behavior
+                        # permanently exiled one slow prefill).
+                        s.ban(seconds=min(300, 30 * (attempt + 1)), reason=last_err)
                     time.sleep(backoff * (attempt + 1))
                 finally:
                     s.release()
@@ -934,8 +1281,12 @@ class ModelOrchestrator:
                     raise
                 except ServerError as e:
                     last_err = str(e)
-                    s.mark_online(False)
-                    s.ban(seconds=min(300, 30 * (attempt + 1)), reason=last_err)
+                    if e.kind in ("connection", "stream"):
+                        s.mark_online(False)
+                    elif e.kind == "auth":
+                        s.ban(seconds=300, reason=last_err)
+                    else:
+                        s.ban(seconds=min(300, 30 * (attempt + 1)), reason=last_err)
                     time.sleep(backoff * (attempt + 1))
                 finally:
                     s.release()
@@ -981,8 +1332,12 @@ class ModelOrchestrator:
                     raise
                 except ServerError as e:
                     last_err = str(e)
-                    s.mark_online(False)
-                    s.ban(seconds=min(300, 30 * (attempt + 1)), reason=last_err)
+                    if e.kind in ("connection", "stream"):
+                        s.mark_online(False)
+                    elif e.kind == "auth":
+                        s.ban(seconds=300, reason=last_err)
+                    else:
+                        s.ban(seconds=min(300, 30 * (attempt + 1)), reason=last_err)
                     time.sleep(backoff * (attempt + 1))
                 finally:
                     s.release()
@@ -1026,8 +1381,12 @@ class ModelOrchestrator:
 
     def _pick_server(self, min_tier: str = "tiny", skill: Optional[str] = None) -> Optional[str]:
         """Routing: the LOWEST smartness tier that satisfies the
-        requirement, then highest priority, then free capacity. Busy
-        servers fall through so the pipeline never stalls.
+        requirement, then highest priority.  Among EQUALS (same tier +
+        priority — e.g. three identical local boxes), a shared round-robin
+        cursor rotates the pool so sequential calls spread across every
+        server instead of hammering the first one; current load breaks any
+        remaining ties, and busy servers fall through so the pipeline never
+        stalls.
 
         Per-skill model allowlists (config llm.allowlists) HARD-filter the
         candidates — a skill can be pinned to (or banned from) specific
@@ -1036,13 +1395,21 @@ class ModelOrchestrator:
         set (min_tier still applies; cost-first stays the default)."""
         with self._lock:
             candidates = [s for s in self._active_ids
-                          if s in self._servers and self._servers[s]._online is not False]
+                          if s in self._servers and self._servers[s].online is not False]
             if skill:
                 candidates = [s for s in candidates if self._allowed(s, skill)]
             if not candidates:
                 return None
             rank_min = TIER_RANK.get(min_tier, 0)
             adaptive = str(self.cfg.llm.get("routing", "cost")).lower() == "adaptive"
+            # Round-robin among equals: distance of each candidate from the
+            # shared cursor position in pool order.  The smallest offset is
+            # picked, and the cursor advances on every successful acquire —
+            # so identical servers (same tier/priority/cost/load) get their
+            # turns in sequence instead of the first one eating everything.
+            n = len(candidates)
+            pos = {sid: i for i, sid in enumerate(candidates)}
+            rot = lambda sid: (self._rr - pos[sid]) % n
             if adaptive and skill:
                 # best measured quality-per-dollar for this skill first
                 # (cost 0 local servers: cost floor keeps the order stable).
@@ -1054,6 +1421,7 @@ class ModelOrchestrator:
                         TIER_RANK.get(self._servers[sid].tier, 1),
                         -int(getattr(self._servers[sid], "priority", 1) or 1),
                         self._servers[sid]._inflight,
+                        rot(sid),
                     ),
                 )
             else:
@@ -1063,6 +1431,7 @@ class ModelOrchestrator:
                         TIER_RANK.get(self._servers[sid].tier, 1),
                         -int(getattr(self._servers[sid], "priority", 1) or 1),
                         self._servers[sid]._inflight,
+                        rot(sid),
                     ),
                 )
             for sid in ordered:
@@ -1070,6 +1439,7 @@ class ModelOrchestrator:
                 if s.banned or not s.enabled or s.busy:
                     continue
                 if TIER_RANK.get(s.tier, 1) >= rank_min and s.acquire():
+                    self._rr += 1
                     return sid
             # Requirement unsatisfiable (all qualifying servers busy):
             # fall back to any usable server rather than stalling.

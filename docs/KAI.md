@@ -67,6 +67,7 @@ deliberately tolerant, because LLMs decorate everything:
 | `GOAL <words> [TEMP]` | build a new project from a goal (suggest loop). TEMP: lives under the `temp/` root, wiped at server close/next startup |
 | `ACCEPT <id>` | keep the project built by the last GOAL (carries its TEMP flag) |
 | `CREATE <id> [TEMP] <spec-json>` | create a project from an explicit spec; TEMP = temp-rooted |
+| `FACTORY [ALGOS a,b] [LANGS c,python,rust,go] [CASES n]` | generate algorithm × language projects (each self-checked: baseline builds, passes its seeded fuzz gate vs reference, scores) and register them; existing ids are skipped |
 | `AUTOFIX [tries <n>] [repair <n\|off>]` | per-run compile-loop caps for the session project: deterministic autofix turns (default 5), LLM repair attempts (default 3; `off` = deterministic only, then fail) |
 | `FORGE [<n>] [TIER <t>] [ON <pid>] [GOAL <words>]` | n parallel scored drafts (max 12) |
 | `HELP` | this reference |
@@ -78,7 +79,9 @@ deliberately tolerant, because LLMs decorate everything:
   any order; `ON <pid>` targets another pool member.
 - Multi-line commands (`BASELINE`, `CANDIDATE`) end with a line that is
   exactly `END`.
-- `FORGE` blocks until the swarm job finishes (or ~20 minutes).
+- `FORGE` blocks until the swarm job finishes (or ~20 minutes). `FACTORY`
+  blocks while it generates + self-checks every project (a full 40-project
+  run takes a few minutes).
 
 ## Routing
 

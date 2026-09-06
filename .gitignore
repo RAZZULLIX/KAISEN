@@ -7,20 +7,13 @@ secrets.json
 .env
 kai_runs.json
 engine_pool.json
+campaign.json
+campaign_bugs.jsonl
 
 
-# runtime artifacts
-projects/*/.kaisen_scripts/
-projects/*/.kaisen_cache/
-projects/*/runs/
-projects/*/best/
-projects/*/state.json
-projects/*/seen_hashes.json
-projects/*/results.csv
-projects/*/memos/
-projects/*/lessons.txt
-projects/*/keywords.txt
-projects/*/smoke_results.json
+# generated projects are runtime data, not framework code — never publish
+projects/*
+!projects/.gitkeep
 
 # legacy / old harness data (kept locally, not published)
 legacy/

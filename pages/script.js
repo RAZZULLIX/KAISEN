@@ -1886,6 +1886,8 @@ async function loadConfig() {
     document.getElementById('cfg-wmax').value = c.workers.max_count;
     document.getElementById('cfg-wqueue').value = c.workers.queue_size;
     document.getElementById('cfg-llm-timeout').value = c.llm.read_timeout;
+    document.getElementById('cfg-llm-nodata').value = (c.llm.nodata_timeout !== undefined ? c.llm.nodata_timeout : 120);
+    document.getElementById('cfg-llm-firsttoken').value = (c.llm.first_token_timeout !== undefined ? c.llm.first_token_timeout : 0);
     document.getElementById('cfg-llm-connect').value = c.llm.connect_timeout;
     document.getElementById('cfg-llm-retries').value = c.llm.max_retries;
     document.getElementById('cfg-autofix').checked = !!(c.autofix && c.autofix.build_enabled);
@@ -1972,6 +1974,8 @@ async function saveConfig() {  const body = {
     },
     llm: {
       read_timeout: parseFloat(document.getElementById('cfg-llm-timeout').value || '1200'),
+      nodata_timeout: parseFloat(document.getElementById('cfg-llm-nodata').value || '120'),
+      first_token_timeout: parseFloat(document.getElementById('cfg-llm-firsttoken').value || '0'),
       connect_timeout: parseFloat(document.getElementById('cfg-llm-connect').value || '15'),
       max_retries: parseInt(document.getElementById('cfg-llm-retries').value || '3'),
     },
