@@ -335,14 +335,14 @@ print(best)
     "kmp-prefix": '''\
 import sys
 s = sys.argv[1] if len(sys.argv) > 1 else ""
-pi = []
-for i in range(len(s)):
-    j = pi[-1] if pi else 0
+pi = [0] * len(s)
+for i in range(1, len(s)):
+    j = pi[i - 1]
     while j > 0 and s[i] != s[j]:
         j = pi[j - 1]
     if s[i] == s[j]:
         j += 1
-    pi.append(j)
+    pi[i] = j
 print(" ".join(map(str, pi)))
 ''',
     "caesar-shift": '''\
@@ -1671,8 +1671,9 @@ int main(int argc, char **argv) {
     const char *s = argc > 1 ? argv[1] : "";
     size_t n = strlen(s);
     int *pi = malloc(n ? n * sizeof(int) : 1);
-    for (size_t i = 0; i < n; i++) {
-        int j = i ? pi[i - 1] : 0;
+    if (n) pi[0] = 0;
+    for (size_t i = 1; i < n; i++) {
+        int j = pi[i - 1];
         while (j > 0 && s[i] != s[j]) j = pi[j - 1];
         if (s[i] == s[j]) j++;
         pi[i] = j;
@@ -1688,14 +1689,14 @@ int main(int argc, char **argv) {
 #!/usr/bin/env python3
 import sys
 s = sys.argv[1] if len(sys.argv) > 1 else ""
-pi = []
-for i in range(len(s)):
-    j = pi[-1] if pi else 0
+pi = [0] * len(s)
+for i in range(1, len(s)):
+    j = pi[i - 1]
     while j > 0 and s[i] != s[j]:
         j = pi[j - 1]
     if s[i] == s[j]:
         j += 1
-    pi.append(j)
+    pi[i] = j
 print(" ".join(map(str, pi)))
 ''',
         "rust": '''\
@@ -1703,9 +1704,9 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let s: String = args.get(1).cloned().unwrap_or_default();
     let v: Vec<char> = s.chars().collect();
-    let mut pi: Vec<i32> = Vec::new();
-    for i in 0..v.len() {
-        let mut j = if i > 0 { pi[i - 1] as usize } else { 0 };
+    let mut pi: Vec<i32> = if v.is_empty() { Vec::new() } else { vec![0] };
+    for i in 1..v.len() {
+        let mut j = pi[i - 1] as usize;
         while j > 0 && v[i] != v[j] { j = pi[j - 1] as usize; }
         if v[i] == v[j] { j += 1; }
         pi.push(j as i32);
@@ -3148,6 +3149,71 @@ _algo("lpal-len", "Longest palindromic substring", "str", {}, ascii_only=True,
            "input -> 0). Center expansion or Manacher beat scanning every "
            "substring; keep it exact.")
 ALGORITHMS["lpal-len"]["workload"] = {l: _str_stream(7, 300) for l in LANG_EXT}
+
+# kmp-prefix standard-KMP overrides: the baselines above reproduced a
+# self-match bug in the original reference (pi[0] compared s[0] to s[0]).
+# The reference is now corrected; these keep the baselines consistent.
+_BASELINES["kmp-prefix"]["go"] = '''\
+package main
+
+import (
+	"fmt"
+	"os"
+	"strings"
+)
+
+func main() {
+	s := ""
+	if len(os.Args) > 1 { s = os.Args[1] }
+	v := []rune(s)
+	pi := make([]int, len(v))
+	for i := 1; i < len(v); i++ {
+		j := pi[i-1]
+		for j > 0 && v[i] != v[j] { j = pi[j-1] }
+		if v[i] == v[j] { j++ }
+		pi[i] = j
+	}
+	out := make([]string, len(pi))
+	for i, x := range pi { out[i] = fmt.Sprint(x) }
+	fmt.Println(strings.Join(out, " "))
+}
+'''
+_BASELINES["kmp-prefix"]["javascript"] = '''\
+const s = process.argv[2] || "";
+const pi = new Array(s.length).fill(0);
+for (let i = 1; i < s.length; i++) {
+    let j = pi[i - 1];
+    while (j > 0 && s[i] !== s[j]) j = pi[j - 1];
+    if (s[i] === s[j]) j++;
+    pi[i] = j;
+}
+console.log(pi.join(" "));
+'''
+_BASELINES["kmp-prefix"]["perl"] = '''\
+my $s = defined $ARGV[0] ? $ARGV[0] : "";
+my @pi = (0) x length($s);
+for my $i (1 .. length($s) - 1) {
+    my $j = $pi[$i - 1];
+    while ($j > 0 && substr($s, $i, 1) ne substr($s, $j, 1)) { $j = $pi[$j - 1]; }
+    $j++ if substr($s, $i, 1) eq substr($s, $j, 1);
+    $pi[$i] = $j;
+}
+print join(" ", @pi), "\\n";
+'''
+_BASELINES["kmp-prefix"]["shell"] = '''\
+s=${1:-}
+n=${#s}
+pi=()
+[ -z "$s" ] && { echo ""; exit 0; }
+pi[0]=0
+for (( i = 1; i < n; i++ )); do
+    j=${pi[i-1]}
+    while [ "$j" -gt 0 ] && [ "${s:i:1}" != "${s:j:1}" ]; do j=${pi[j-1]}; done
+    if [ "${s:i:1}" = "${s:j:1}" ]; then j=$((j + 1)); fi
+    pi[$i]=$j
+done
+echo "${pi[*]}"
+'''
 
 _algo("kmp-prefix", "KMP prefix function", "str", {}, ascii_only=True,
       goal="Print the KMP prefix (failure) function of the input string as "
