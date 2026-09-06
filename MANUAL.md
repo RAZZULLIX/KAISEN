@@ -232,17 +232,21 @@ fails the build instead of shipping a binary that truncates large inputs.
 
     FACTORY                          # everything, 200 cases each
     FACTORY ALGOS gcd,fib-mod LANGS c,rust CASES 300
+    FACTORY FORCE                    # re-provision existing projects too
 
 ### Campaigns — run every project to N generations, resumably
 
 `python3 -m kaisen.campaign [TARGET n] [PARALLEL k] [POLL s] | STATUS | STOP`
 drives every registered pool project to `n` scored generations each
-(default 50), filling at most `k` engine slots at a time (default 4).
 Progress lives in `campaign.json` anchored to each project's iteration
-history, and engines persist in `engine_pool.json` — kill the driver or
-restart it mid-campaign and it resumes exactly where it left off:
-KAI `RUN <n>`: only scored generations (fitness measured) count toward
-the target — failed attempts never burn budget.
+history (and engines persist in `engine_pool.json`) — kill the driver or
+restart it mid-campaign and it resumes exactly where it left off.
+Semantics match KAI `RUN <n>`: only scored generations (fitness measured)
+count toward the target — failed attempts never burn budget. The driver
+adopts projects registered in the pool mid-campaign (a live `FACTORY`
+scale-up is picked up on the next poll, no restart), and if a project's
+history shrinks below its anchor (e.g. `FACTORY FORCE` wiped its runs) it
+re-anchors at the new start instead of replaying ghost generations.
 
     python3 -m kaisen.campaign TARGET 100 PARALLEL 6   # supervised run
     python3 -m kaisen.campaign STATUS                  # per-project progress

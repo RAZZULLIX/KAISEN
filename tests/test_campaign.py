@@ -211,3 +211,51 @@ def test_failed_generations_do_not_burn_budget(tmp_path):
         assert len(srv.iterations["p1"]) >= 5  # failures don't consume budget
     finally:
         C.BUGS_FILE = real_bugs
+
+
+def test_live_adopted_projects_join_running_campaign(tmp_path):
+    """Regression (live scale-up, 2026-09-06): projects registered in the
+    pool AFTER driver startup must be picked up on the next tick — a FACTORY
+    scale-up mid-campaign should not require a driver restart."""
+    srv = FakeServer(fail_every=0)
+    drv = _driver(srv, tmp_path, target=3, parallel=3)
+    drv.tick()  # p1..p3 running — all slots filled
+
+    # simulate a live registration: a new project appears in the pool
+    pid = "p4"
+    srv.pids.append(pid)
+    srv.engines[pid] = {"engine_state": "stopped", "paused": False}
+    srv.iterations[pid] = []
+    srv.best[pid] = {"metrics": {"time_ms": 10.0}}
+
+    drv.tick()
+    assert pid in drv.state["projects"], "newly registered project not adopted"
+    # slots are full, so it queues as pending rather than starting
+    assert drv.state["projects"][pid]["state"] == "pending"
+
+    _run_to_completion(drv)
+    p = drv.state["projects"][pid]
+    assert p["state"] == "done", (p,)
+    assert len(srv.iterations[pid]) == 3  # ran exactly its target
+
+
+def test_reprovisioned_project_reanchors_and_finishes(tmp_path):
+    """Regression (FACTORY FORCE, 2026-09-06): if a running project's history
+    shrinks below its start_hist anchor (re-provisioning wiped its runs), the
+    driver must re-anchor at 0 — otherwise the ghost of the old generations
+    would have to be replayed before new progress counts."""
+    srv = FakeServer(pids=("p1",), fail_every=0)
+    # pre-existing history from a previous life (e.g. failed gens pre-fix)
+    srv.iterations["p1"] = [{
+        "iteration": k, "outcome": "ok", "detail": "",
+        "metrics": {"time_ms": 90.0}, "fitness": 1.0} for k in (1, 2, 3)]
+    drv = _driver(srv, tmp_path, target=5, parallel=1)
+    drv.tick()  # starts p1; anchor lands AFTER the 3 old rows
+    assert drv.state["projects"]["p1"]["start_hist"] == 3
+
+    # simulate FACTORY FORCE: history wiped while the engine is alive
+    srv.iterations["p1"] = []
+    _run_to_completion(drv)
+    p = drv.state["projects"]["p1"]
+    assert p["state"] == "done", (p,)
+    assert len(srv.iterations["p1"]) == 5  # exactly target — no anchor replay

@@ -11,6 +11,10 @@ Campaign release: the "fast but wrong" hole is closed with a differential
 fuzz gate, and long multi-project campaigns get first-class tooling —
 factory, driver, bug capture, triage.
 
+The campaign driver adopts newly registered projects live (no restart),
+  and `FACTORY ... FORCE` re-provisions existing projects so factory fixes
+  reach already-registered specs.
+
 ### Added
 
 - **Fuzz gate — correctness on seeded cases, not just fixed tests.** A
@@ -44,7 +48,9 @@ factory, driver, bug capture, triage.
   triple-argument and list problems. Before registration the factory
   PROVES each project works: baseline must build, pass its full fuzz gate
   against the reference, and score — broken combinations are reported,
-  never shipped.
+  never shipped. `FACTORY ... FORCE` re-provisions projects that are
+  already registered (delete + recreate), so a factory fix — new contract
+  text, repaired baseline — reaches the live pool without manual surgery.
 - **Campaign driver — resumable multi-project runs.** `kaisen/campaign.py`
   (CLI: `python3 -m kaisen.campaign [TARGET n] [PARALLEL k] [POLL s] |
   STATUS | STOP`) runs every pool project to N generations each, filling
@@ -53,7 +59,11 @@ factory, driver, bug capture, triage.
   exactly where it left off (engines persist via `engine_pool.json`;
   progress before the crash counts, nothing double-counts). Semantics
   match `RUN <n>`: only SCORED generations (fitness measured) count
-  toward the target — failed attempts never burn budget.
+  toward the target — failed attempts never burn budget. The driver also
+  adopts projects registered in the pool mid-campaign (live `FACTORY`
+  scale-ups need no restart), and if a project's history shrinks below its
+  anchor (re-provisioning wiped its runs) it re-anchors at the new start
+  instead of replaying ghost generations.
 - **Bug capture + triage.** Every stage failure of a running campaign
   project is appended to `campaign_bugs.jsonl` (exactly once per
   generation — anchored, restart-safe). `python3 -m kaisen.triage` groups

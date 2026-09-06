@@ -1151,6 +1151,7 @@ class KaiSession:
         algos: Optional[List[str]] = None
         langs: Optional[List[str]] = None
         n_cases = 200
+        force = False
         i = 0
         while i < len(tokens):
             u = tokens[i].upper().rstrip(":,")
@@ -1165,9 +1166,14 @@ class KaiSession:
                     n_cases = max(10, int(tokens[i + 1]))
                 except ValueError as e:
                     raise KaiError("CASES needs an integer") from e
-                i += 2
+            elif u == "FORCE":
+                # Re-provision existing projects (DELETE + recreate) so a
+                # factory fix reaches already-registered specs. Without it,
+                # existing projects are skipped and keep their old contract.
+                force = True
             else:
-                raise KaiError("FACTORY [ALGOS a,b] [LANGS c,python,rust,go] [CASES n]")
+                raise KaiError("FACTORY [ALGOS a,b] [LANGS c,python,rust,go] "
+                               "[CASES n] [FORCE]")
         report = FA.create_all(algo_keys=algos, langs=langs, n_cases=n_cases)
         existing = set()
         try:
@@ -1178,6 +1184,7 @@ class KaiSession:
             pass
         created: List[str] = []
         skipped: List[str] = []
+        reprovisioned: List[str] = []
         failed: List[str] = []
         for row in report:
             pid = row["id"]
@@ -1185,8 +1192,15 @@ class KaiSession:
                 failed.append(f"{pid}: {row['error'][:120]}")
                 continue
             if pid in existing:
-                skipped.append(pid)
-                continue
+                if not force:
+                    skipped.append(pid)
+                    continue
+                try:
+                    self.client.call("DELETE", f"/api/projects/{pid}",
+                                     read_timeout=60.0)
+                except Exception:
+                    pass  # already gone — proceed to recreate
+                reprovisioned.append(pid)
             # NOTE: the server reads bundled files from INSIDE the spec
             # (spec["files"]) — a top-level "files" key is silently dropped.
             res = self.client.call(
@@ -1196,13 +1210,18 @@ class KaiSession:
             )
             if res.get("ok"):
                 warns = res.get("warnings") or []
-                created.append(pid + (f" [warns: {'; '.join(warns)[:120]}]" if warns else ""))
+                tag = f" [warns: {'; '.join(warns)[:120]}]" if warns else ""
+                if pid in reprovisioned:
+                    reprovisioned[reprovisioned.index(pid)] = pid + tag
+                else:
+                    created.append(pid + tag)
             else:
                 failed.append(f"{pid}: {str(res.get('error', 'create failed'))[:120]}")
-        lines = [f"OK factory: {len(created)} created, {len(skipped)} skipped (existing), "
-                 f"{len(failed)} failed"]
-        if created:
-            lines.append("CREATED " + " ".join(created))
+        lines = [f"OK factory: {len(created)} created, "
+                 f"{len(reprovisioned)} re-provisioned, "
+                 f"{len(skipped)} skipped (existing), {len(failed)} failed"]
+        if reprovisioned:
+            lines.append("REPROVISIONED " + " ".join(reprovisioned))
         if skipped:
             lines.append("SKIPPED " + " ".join(skipped))
         for f in failed[:20]:

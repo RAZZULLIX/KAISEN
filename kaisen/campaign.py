@@ -136,6 +136,21 @@ class CampaignDriver:
         self.save()
         return added
 
+    def adopt_new(self) -> int:
+        """Pick up projects registered in the pool after startup.
+
+        The campaign tracks a snapshot of the pool; without this, projects
+        added mid-campaign (e.g. a FACTORY scale-up while the driver runs)
+        would wait for a driver restart to be noticed."""
+        try:
+            res = self.client.call("GET", "/api/projects", read_timeout=15.0)
+        except Exception:
+            return 0
+        pids = [str(p.get("id")) for p in (res or {}).get("projects") or []
+                if p.get("id") and not p.get("temp")]
+        new = [p for p in pids if p not in self.state["projects"]]
+        return self.register(new) if new else 0
+
     def reconcile(self) -> None:
         """Re-derive state from the server (call at startup)."""
         engines = self._engines()
@@ -212,6 +227,7 @@ class CampaignDriver:
 
     def tick(self) -> None:
         """One poll cycle: finalize finished runs, capture bugs, fill slots."""
+        self.adopt_new()
         engines = self._engines()
         target = int(self.state.get("target_gens") or 50)
         running = 0
@@ -226,6 +242,13 @@ class CampaignDriver:
                 running += 1
                 iters = self._iterations(pid)
                 start = int(p.get("start_hist") or 0)
+                # History shorter than the anchor => the project was
+                # re-provisioned (e.g. FACTORY FORCE wiped its runs). Re-anchor
+                # at the new history's start, or every old generation would
+                # have to be replayed before progress counts again.
+                if len(iters) < start:
+                    p["start_hist"] = 0
+                    start = 0
                 # Progress = SCORED generations only (fitness measured).
                 # Failed iterations still land in history, but burning the
                 # budget on failures is exactly what RUN <n> semantics forbid.
