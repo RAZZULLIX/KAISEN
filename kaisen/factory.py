@@ -2130,12 +2130,14 @@ ALGORITHMS: "Dict[str, Dict[str, Any]]" = {}
 
 def _algo(key: str, name: str, family: str, domain: Dict[str, Any], goal: str,
           workload: Optional[Dict[str, List[List[str]]]] = None, compare: str = "exact",
-          ascii_only: bool = False) -> None:
+          ascii_only: bool = False,
+          domains: Optional[Dict[str, Dict[str, Any]]] = None) -> None:
     ALGORITHMS[key] = {
         "key": key,
         "name": name,
         "family": family,
         "domain": domain,
+        "domains": domains or {},
         "compare": compare,
         "ascii_only": ascii_only,
         "goal": goal,
@@ -2150,7 +2152,8 @@ _algo("prime-count", "Prime Counter", "int", {"lo": 0, "hi": 10 ** 6},
       "output contract: print one integer. Prefer algorithmic wins (sieve, "
       "odd-only, wheel factorization) over micro-tuning.",
       {"c": [["100000"]] * 30, "rust": [["100000"]] * 30, "go": [["100000"]] * 30,
-       "python": [["40000"]] * 8})
+       "python": [["40000"]] * 8},
+      domains={"python": {"hi": 20000}})
 
 _algo("popcount", "Popcount (set-bit counter)", "int", {"lo": 0, "hi": 2 ** 31 - 1},
       "Count the set bits of n as fast as possible: print one integer. "
@@ -2440,6 +2443,13 @@ def make_project(algo_key: str, lang: str, n_cases: int = 200,
     seed = _stable_seed(algo_key, lang) if seed is None else seed
     family = algo["family"]
     domain = dict(algo["domain"])
+    # Per-language fuzz-domain override: a naive Python baseline cannot chew
+    # C-sized domains (prime-count at n=10^6 is ~30-90s/case in pure Python),
+    # so the python project gets a scaled domain — same pattern as the
+    # per-language workload scaling.
+    override = algo.get("domains", {}).get(lang)
+    if override:
+        domain.update(override)
     cases = F.gen_cases(family, seed=seed, n=n_cases,
                         ascii_only=algo.get("ascii_only", False), **domain)
 

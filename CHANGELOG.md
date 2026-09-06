@@ -51,6 +51,9 @@ The campaign driver adopts newly registered projects live (no restart),
   never shipped. `FACTORY ... FORCE` re-provisions projects that are
   already registered (delete + recreate), so a factory fix — new contract
   text, repaired baseline — reaches the live pool without manual surgery.
+  Per-language fuzz-domain overrides let slow-baseline languages scale
+  their domain down (prime-count-python: n=10^6 costs ~30-90s per naive
+  case; its projects now fuzz to n=2×10^4, self-check dropped 244s → 7s).
 - **Campaign driver — resumable multi-project runs.** `kaisen/campaign.py`
   (CLI: `python3 -m kaisen.campaign [TARGET n] [PARALLEL k] [POLL s] |
   STATUS | STOP`) runs every pool project to N generations each, filling
