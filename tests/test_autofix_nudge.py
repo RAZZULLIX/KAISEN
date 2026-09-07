@@ -2,7 +2,7 @@
 import pytest
 
 from kaisen.autofix import engine
-from kaisen.autofix import rust, go, shell, javascript, python, perl
+from kaisen.autofix import rust, go, shell, javascript, python, perl, lua, php, ruby, r
 
 
 # ── delimiter scan ────────────────────────────────────────────────────────
@@ -154,6 +154,57 @@ def test_perl_syntax_error_unbalanced():
     src = "my $x = (1 + 2;\nprint $x, \"\\n\";\n"
     fixes = perl.parse(PERL_ERR, src)
     assert any(f[0] == "delim" for f in fixes)
+
+
+# ── lua ────────────────────────────────────────────────────────────────────
+def test_lua_missing_then():
+    src = "for i = 1, 3 do\n    if i == 2\n        print(i)\n    end\nend\n"
+    fixes = lua.parse("prog.lua:3: 'then' expected near 'print'", src)
+    assert fixes and fixes[0][0] == "raw"
+    out = engine._apply_nudge(src, fixes[0])
+    assert "if i == 2 then" in out
+
+
+# ── php ────────────────────────────────────────────────────────────────────
+def test_php_undefined_constant_variable():
+    src = "<?php\nfor ($j = i; $j < 3; $j++) echo 1;\n"
+    fixes = php.parse('PHP Fatal error: Undefined constant "i" in p.php:2', src)
+    assert fixes and fixes[0][0] == "raw"
+    out = engine._apply_nudge(src, fixes[0])
+    assert "$j = $i" in out
+
+
+# ── ruby ───────────────────────────────────────────────────────────────────
+def test_ruby_exit_nil_fix():
+    src = 'n = (ARGV[0] || "0").to_i\nexit(puts(0)) if n < 2\nputs n\n'
+    fixes = ruby.parse("p.rb:2:in `exit': no implicit conversion from nil to integer (TypeError)", src)
+    assert fixes and fixes[0][0] == "raw"
+    out = engine._apply_nudge(src, fixes[0])
+    assert "(puts(0); exit 0) if n < 2" in out
+
+
+def test_ruby_missing_end():
+    src = 'if true\n  puts "x"\n'
+    fixes = ruby.parse("p.rb:3: syntax error, unexpected end-of-input (SyntaxError)", src)
+    assert fixes
+    out = engine._apply_nudge(src, fixes[0])
+    assert out.rstrip().endswith("end")
+
+
+# ── r ──────────────────────────────────────────────────────────────────────
+def test_r_unrecognized_escape():
+    src = 'args <- commandArgs(trailingOnly=TRUE)\nxs <- as.integer(strsplit(args[1], "\\s+")[[1]])\n'
+    fixes = r.parse("Error: '\\s' is an unrecognized escape in character string", src)
+    assert fixes
+    out = engine._apply_nudge(src, fixes[0])
+    assert "\\\\s+" in out.replace("\\\\", "\\\\") or "\\s+" in out
+
+
+def test_r_break_if():
+    src = "for (i in 1:5) {\n  break if (i == 3)\n}\n"
+    fixes = r.parse("Error: unexpected 'if' in: \"for (i in 1:5) { break if\"", src)
+    out = engine._apply_nudge(src, fixes[0])
+    assert "if (i == 3) break" in out
 
 
 # ── loop contract: revert a fix that breaks a previously-good build ───────

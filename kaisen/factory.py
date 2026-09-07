@@ -3315,7 +3315,7 @@ echo "$c\\n";
 '''
 _BASELINES["prime-count"]["ruby"] = '''\
 n = (ARGV[0] || "0").to_i
-exit(puts(0)) if n < 2
+(puts(0); exit 0) if n < 2
 sieve = Array.new(n, false)
 (2...n).each do |i|
   next if sieve[i]
@@ -3328,12 +3328,15 @@ puts c
 _BASELINES["prime-count"]["r"] = '''\
 args <- commandArgs(trailingOnly=TRUE)
 n <- if (length(args) > 0) as.integer(args[1]) else 0L
-if (n < 2) { cat(0, "\\n"); quit(save = "no") }
+if (n < 3) { cat(0, "\\n"); quit(save = "no") }
 sieve <- rep(FALSE, n)
-for (i in 2:(floor(sqrt(n - 1)))) {
-  if (!sieve[i]) sieve[seq(i * i, n, by = i)] <- TRUE
+up <- as.integer(floor(sqrt(n - 1)))
+if (up >= 2) {
+  for (i in 2:up) {
+    if (!sieve[i]) sieve[seq(i * i, n - 1, by = i)] <- TRUE
+  }
 }
-cat(sum(!sieve[2:n]), "\\n")
+cat(sum(!sieve[2:(n - 1)]), "\\n")
 '''
 _BASELINES["prime-count"]["lua"] = '''\
 local n = tonumber(arg[1]) or 0
@@ -3667,10 +3670,10 @@ echo "1\\n";
 '''
 _BASELINES["is-prime"]["ruby"] = '''\
 n = (ARGV[0] || "0").to_i
-exit(puts(0)) if n < 2
+(puts(0); exit 0) if n < 2
 d = 2
 while d * d <= n
-  exit(puts(0)) if n % d == 0
+  (puts(0); exit 0) if n % d == 0
   d += 1
 end
 puts 1
@@ -3720,7 +3723,7 @@ n <- if (length(args) > 0) as.integer(args[1]) else 0L
 lo <- 0L; hi <- n + 1L
 while (hi - lo > 1L) {
   mid <- (lo + hi) %/% 2L
-  if (mid * mid <= n) lo <- mid else hi <- mid
+  if (as.double(mid) * mid <= n) lo <- mid else hi <- mid
 }
 cat(lo, "\\n")
 '''
@@ -3854,7 +3857,7 @@ while d * d <= n do
     while n % d == 0 do c = c + 1; n = math.floor(n / d) end
     d = d + 1
 end
-c = c + 1 if n > 1
+if n > 1 then c = c + 1 end
 print(c)
 '''
 
@@ -4062,8 +4065,8 @@ function is_pal($s, $i, $j) {
 $best = 0;
 for ($i = 0; $i < $n; $i++) {
     if ($n - $i <= $best) break;
-    for ($j = i; $j < $n; $j++) {
-        if ($j - $i + 1 > $best && is_pal($s, $i, $j)) $best = $j - i + 1;
+    for ($j = $i; $j < $n; $j++) {
+        if ($j - $i + 1 > $best && is_pal($s, $i, $j)) $best = $j - $i + 1;
     }
 }
 echo "$best\\n";
@@ -4080,7 +4083,7 @@ def is_pal(s, i, j)
 end
 best = 0
 (0...n).each do |i|
-  break if n - i <= best
+  if (n - i <= best) break
   (i...n).each do |j|
     best = j - i + 1 if j - i + 1 > best && is_pal(s, i, j)
   end
@@ -4097,7 +4100,7 @@ is_pal <- function(i, j) {
 }
 best <- 0L
 for (i in seq_len(n)) {
-  break if (n - i + 1L <= best)
+  if ((n - i + 1L) <= best) break
   for (j in i:n) {
     if (j - i + 1L > best && is_pal(i, j)) best <- j - i + 1L
   }
@@ -4248,7 +4251,7 @@ n = (ARGV[0] || "0").to_i
 seen = {}
 steps = 0
 while n != 1
-  break if seen[n]
+  if (n %in% seen) break
   seen[n] = true
   s, m = 0, n
   while m > 0
@@ -4267,7 +4270,7 @@ n <- if (length(args) > 0) as.integer(args[1]) else 0L
 seen <- integer(0)
 steps <- 0L
 while (n != 1L) {
-  break if (n %in% seen)
+  if (n %in% seen) break
   seen <- c(seen, n)
   s <- 0L; m <- n
   while (m > 0L) { d <- m %% 10L; s <- s + d * d; m <- m %/% 10L }
@@ -4314,7 +4317,7 @@ _BASELINES["modexp"]["ruby"] = '''\
 a = (ARGV[0] || "0").to_i
 b = (ARGV[1] || "0").to_i
 m = (ARGV[2] || "1").to_i
-exit(puts(0)) if m == 1
+(puts(0); exit 0) if m == 1
 r = 1 % m
 a %= m
 while b > 0
@@ -4362,7 +4365,7 @@ $best = (int)$nums[0];
 $n = count($nums);
 for ($i = 0; $i < $n; $i++) {
     $sum = 0;
-    for ($j = i; $j < $n; $j++) {
+    for ($j = $i; $j < $n; $j++) {
         $sum += (int)$nums[$j];
         if ($sum > $best) $best = $sum;
     }
@@ -4371,7 +4374,7 @@ echo "$best\\n";
 '''
 _BASELINES["max-subarray"]["ruby"] = '''\
 nums = (ARGV[0] || "").split(" ").reject { |t| t.empty? }.map(&:to_i)
-exit(puts(0)) if nums.empty?
+(puts(0); exit 0) if nums.empty?
 best = nums[0]
 nums.each_index do |i|
   sum = 0
@@ -4384,7 +4387,7 @@ puts best
 '''
 _BASELINES["max-subarray"]["r"] = '''\
 args <- commandArgs(trailingOnly=TRUE)
-nums <- if (length(args) > 0) as.integer(strsplit(args[1], "\\s+")[[1]]) else integer(0)
+nums <- if (length(args) > 0) as.integer(strsplit(args[1], "\\\\s+")[[1]]) else integer(0)
 if (length(nums) == 0L) { cat("0\\n"); quit(save = "no") }
 n <- length(nums)
 best <- nums[1]
@@ -4435,7 +4438,7 @@ puts c
 '''
 _BASELINES["count-inversions"]["r"] = '''\
 args <- commandArgs(trailingOnly=TRUE)
-nums <- if (length(args) > 0) as.integer(strsplit(args[1], "\\s+")[[1]]) else integer(0)
+nums <- if (length(args) > 0) as.integer(strsplit(args[1], "\\\\s+")[[1]]) else integer(0)
 n <- length(nums)
 c <- 0L
 for (i in seq_len(n - 1)) {
@@ -4504,14 +4507,41 @@ def _build_script(probes: List[Tuple[str, List[str]]]) -> str:
     )
 
 
+# Per-interpreter syntax probe so a broken candidate fails the BUILD step
+# (where the deterministic autofix nudge fires) instead of surfacing as a
+# runtime crash in verify/score — a small-model guard, not just a lint.
+_SYNTAX_PROBE: Dict[str, List[str]] = {
+    "ruby": ["-c", "%s"],
+    "php": ["-l", "%s"],
+    "perl": ["-c", "%s"],
+    "python": ["-c", "import ast,sys;ast.parse(open(sys.argv[1]).read())", "%s"],
+    "node": ["--check", "%s"],
+    "bash": ["-n", "%s"],
+    "sh": ["-n", "%s"],
+    "lua": ["-e", "assert(loadfile((...)))", "%s"],
+    "lua5.4": ["-e", "assert(loadfile((...)))", "%s"],
+    "lua5.3": ["-e", "assert(loadfile((...)))", "%s"],
+    "luajit": ["-e", "assert(loadfile((...)))", "%s"],
+    "Rscript": ["--vanilla", "-e",
+                "invisible(parse(file=commandArgs(trailingOnly=TRUE)[1]))", "%s"],
+}
+
+
 def _interp_script(interps: List[str]) -> str:
     """Emit a build.py for an interpreted language: copy the candidate, make
     it executable, and insure the shebang (the build step owns executability,
-    the model owns logic). Shebang points at the first interpreter found."""
+    the model owns logic). Shebang points at the first interpreter found.
+
+    When the chosen interpreter has a known syntax probe, the build runs it
+    on the artifact first and fails on a parse error — so a broken candidate
+    is caught at build (and auto-nudged) rather than crashing at runtime in
+    verify/score."""
+    probe_map = f"PROBE = {json.dumps({k: v for k, v in _SYNTAX_PROBE.items()})}\n"
     return (
         "#!/usr/bin/env python3\n"
-        "import shutil, stat, sys\n"
+        "import shutil, stat, subprocess, sys\n"
         f"CANDIDATES = {json.dumps(interps)}\n"
+        f"{probe_map}"
         "cand, art = sys.argv[1], sys.argv[2]\n"
         "shutil.copyfile(cand, art)\n"
         "with open(art, \"rb\") as f:\n"
@@ -4527,6 +4557,13 @@ def _interp_script(interps: List[str]) -> str:
         "        f.write(data)\n"
         "st = __import__(\"os\").stat(art)\n"
         "__import__(\"os\").chmod(art, st.st_mode | stat.S_IEXEC)\n"
+        "probe = PROBE.get(interp)\n"
+        "if probe:\n"
+        "    argv = [interp] + [a.replace(\"%s\", art) for a in probe]\n"
+        "    pr = subprocess.run(argv, capture_output=True)\n"
+        "    if pr.returncode != 0:\n"
+        "        sys.stderr.write((pr.stderr or b\"\").decode(\"utf-8\", \"replace\"))\n"
+        "        sys.exit(1)\n"
         "print(\"OK\")\n"
     )
 

@@ -40,7 +40,7 @@ from .c_family import (
     parse_hints,
 )
 from .engine import autofix_nudge, register_parser, _NUDGE_PARSERS
-from . import rust, go, perl, shell, javascript, python
+from . import rust, go, perl, shell, javascript, python, lua, php, ruby, r
 
 # Register each language's nudge backend with the shared engine.
 register_parser("rust", rust.parse)
@@ -50,6 +50,10 @@ register_parser("shell", shell.parse)
 register_parser("javascript", javascript.parse)
 register_parser("typescript", javascript.parse)
 register_parser("python", python.parse)
+register_parser("lua", lua.parse)
+register_parser("php", php.parse)
+register_parser("ruby", ruby.parse)
+register_parser("r", r.parse)
 
 # Languages with a per-compiler nudge backend.
 NUDGE_AVAILABLE = frozenset(_NUDGE_PARSERS)
