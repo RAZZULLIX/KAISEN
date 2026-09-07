@@ -177,7 +177,8 @@ def _parse_line_no(stderr: str) -> Optional[int]:
     exts = ("js", "ts", "go", "rs", "sh", "pl", "php", "rb", "lua",
             "r", "java", "kt", "scala", "swift", "dart", "c", "cc",
             "cpp", "cu", "zig", "hs", "d", "py")
-    ext_pat = r"\." + "(?:" + "|".join(re.escape(e) for e in exts) + r"):(\d+)$"
+    ext_alt = "|".join(re.escape(e) for e in exts)
+    ext_pat = r"\." + "(?:" + ext_alt + r"):(\d+)(?::|\b|$)"
     for line in stderr.splitlines():
         s = line.strip()
         if not s or s.startswith("at ") or "node:internal" in line or \
@@ -188,10 +189,14 @@ def _parse_line_no(stderr: str) -> Optional[int]:
         m = re.search(r":\s*(\d+):\s*(\d+)(?::|\b|$)", s)
         if m:
             return int(m.group(1))
-        # "path/file.js:6" (node --check) — number is the last token.
+        # "path/file.java:3:" (javac/Kotlin/Scala/...) or "path/file.js:6" (node)
         m = re.search(ext_pat, s)
         if m:
             return int(m.group(1))
+        # "path/file.d(4):" — D's parenthesized line form
+        m = re.search(r"\." + "(?:" + ext_alt + r")(?:\((\d+)\)|:(\d+))", s)
+        if m:
+            return int(m.group(1) or m.group(2))
         # "path: line N:" / "FILE line N" / "line N"
         m = re.search(r"\bline\s+(\d+)\b", s, re.I)
         if m:

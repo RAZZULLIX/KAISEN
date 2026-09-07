@@ -237,7 +237,9 @@ def test_resolve_mode_matrix():
     assert resolve_mode({"language": "python", "skills": {}}) == "python"
     assert resolve_mode({"language": "rust", "skills": {}}) == "nudge"
     assert resolve_mode({"language": "go", "skills": {}}) == "nudge"
-    assert resolve_mode({"language": "java", "skills": {}}) == "off"
+    assert resolve_mode({"language": "java", "skills": {}}) == "nudge"
+    assert resolve_mode({"language": "csharp", "skills": {}}) == "nudge"
+    assert resolve_mode({"language": "haskell", "skills": {}}) == "nudge"
     assert resolve_mode({"skills": {"autofix_build": "harness/fixer.py"}}) == \
         ("custom", "harness/fixer.py")
 

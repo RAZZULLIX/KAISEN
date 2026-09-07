@@ -836,10 +836,12 @@ c, cpp, cuda, python, java, javascript, typescript, csharp, go, rust,
 kotlin, swift, php, ruby, r, zig, scala, dart, haskell, lua, perl,
 shell, **d** — plus aliases (`c++`, `py`, `js`, `cs`, `bash`, `dlang`, …).
 The gcc/nvcc compiler-hint autofixer applies to the C family (c/cpp/cuda);
-Python gets the linter fixer; every other language has a per-compiler
-nudge backend (rust, go, shell, node, perl — §7) that parses that
-compiler's own diagnostics and does what it suggests; the rest surface
-diagnostics through the build stderr. D uses the `dmd`/`ldc2`/`gdc`/`rdmd`
+Python gets the linter fixer; every other language has its own per-compiler
+nudge backend (§7) — one per language, 20 of them (rust, go, java, kotlin,
+scala, swift, zig, dart, haskell, d, csharp, typescript, shell, node,
+perl, php, ruby, r, lua, python) — each parsing that compiler's own
+diagnostics and transforming them into a correction attempt; the rest of
+the languages are covered by those. D uses the `dmd`/`ldc2`/`gdc`/`rdmd`
 toolchain, which is on the guardrail launcher allowlist. The project
 factory (§5) covers all 23: baselines exist for every language, and each
 machine provisions only what it can build (preflight skip + report).

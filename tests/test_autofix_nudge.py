@@ -2,7 +2,8 @@
 import pytest
 
 from kaisen.autofix import engine
-from kaisen.autofix import rust, go, shell, javascript, python, perl, lua, php, ruby, r
+from kaisen.autofix import (rust, go, shell, javascript, python, perl, lua, php, ruby, r,
+                            java, kotlin, scala, swift, zig, dart, haskell, d, csharp, typescript)
 
 
 # ── delimiter scan ────────────────────────────────────────────────────────
@@ -205,6 +206,84 @@ def test_r_break_if():
     fixes = r.parse("Error: unexpected 'if' in: \"for (i in 1:5) { break if\"", src)
     out = engine._apply_nudge(src, fixes[0])
     assert "if (i == 3) break" in out
+
+
+# ── compiled-language backends (message -> correction attempt) ────────────
+def test_java_semicolon():
+    src = "public class Main {\n  public static void main(String[] args) {\n    int x = 5\n    System.out.println(x);\n  }\n}\n"
+    fixes = java.parse("Main.java:3: error: ';' expected", src)
+    assert ("semicolon", 3) == fixes[0]
+    out = engine._apply_nudge(src, fixes[0])
+    assert "int x = 5;" in out
+
+
+def test_java_unbalanced():
+    src = "public class Main {\n  public static void main(String[] args) {\n    if (true) {\n      System.out.println(1);\n  }\n}\n"
+    fixes = java.parse("Main.java:6: error: reached end of file while parsing", src)
+    assert any(f[0] == "delim" for f in fixes)
+
+
+def test_zig_semicolon_and_unbalanced():
+    src = "const std = @import(\"std\");\npub fn main() !void {\n    const x: i64 = 5\n    std.debug.print(\"{d}\", .{x});\n}\n"
+    fixes = zig.parse("semi.zig:3:21: error: expected ';' after statement", src)
+    assert ("semicolon", 3) == fixes[0]
+    src2 = "const std = @import(\"std\");\npub fn main() !void {\n    if (true) {\n        std.debug.print(\"x\", .{});\n}\n"
+    fixes2 = zig.parse("unbal.zig:6:1: error: expected statement, found 'EOF'", src2)
+    assert any(f[0] == "delim" for f in fixes2)
+
+
+def test_dart_semicolon():
+    src = "void main(List<String> args) {\n    int x = 5\n    print(x);\n}\n"
+    fixes = dart.parse("semi.dart:2:13: Error: Expected ';' after this.", src)
+    assert ("semicolon", 2) == fixes[0]
+    out = engine._apply_nudge(src, fixes[0])
+    assert "int x = 5;" in out
+
+
+def test_kotlin_unbalanced():
+    src = "fun main(args: Array<String>) {\n    if (true) {\n        println(\"hi\")\n}\n"
+    fixes = kotlin.parse("unbal.kt:4:2: error: syntax error: Expecting '}'", src)
+    assert any(f[0] == "delim" for f in fixes)
+
+
+def test_scala_missing_brace():
+    src = "object original {\n  def main(args: Array[String]): Unit = {\n    if (true) {\n      println(1)\n  }\n}\n"
+    fixes = scala.parse("unbal.scala:5: error: Missing closing brace '}' assumed here", src)
+    assert any(f[0] == "delim" for f in fixes)
+
+
+def test_d_semicolon_and_unbalanced():
+    src = "import std.stdio;\nvoid main() {\n    int x = 5\n    writeln(x);\n}\n"
+    fixes = d.parse("semi.d(4): Error: semicolon needed to end declaration of 'x'", src)
+    assert ("semicolon", 4) == fixes[0]
+    src2 = "import std.stdio;\nvoid main() {\n    if (true) {\n        writeln(\"x\");\n}\n"
+    fixes2 = d.parse("unbal.d(6): Error: matching '}' expected following compound statement", src2)
+    assert any(f[0] == "delim" for f in fixes2)
+
+
+def test_csharp_unbalanced():
+    src = "class Program {\n  static void Main() {\n    if (true) {\n      System.Console.WriteLine(1);\n  }\n}\n"
+    fixes = csharp.parse("unbal.cs(6,246): error CS1525: Unexpected symbol `end-of-file'", src)
+    assert any(f[0] == "delim" for f in fixes)
+
+
+def test_haskell_unbalanced():
+    src = "main :: IO ()\nmain = do {\n    putStrLn \"x\"\n"
+    fixes = haskell.parse("unbal.hs:4:1: error: parse error (possibly incorrect indentation or mismatched brackets)", src)
+    assert any(f[0] == "delim" for f in fixes)
+
+
+def test_swift_unbalanced():
+    src = "import Glibc\nlet args = CommandLine.arguments\nif true {\n    print(args[1])\n\n"
+    fixes = swift.parse("unbal.swift:3:9: note: to match this opening '{'", src)
+    assert any(f[0] == "delim" for f in fixes)
+
+
+def test_line_parse_file_ext_digit_colon():
+    from kaisen.autofix import engine as E
+    assert E._parse_line_no("Main.java:3: error: ';' expected") == 3
+    assert E._parse_line_no("--> /tmp/main.rs:2:14") == 2
+    assert E._parse_line_no("prog.js:6\n\nSyntaxError: Unexpected end of input") == 6
 
 
 # ── loop contract: revert a fix that breaks a previously-good build ───────
