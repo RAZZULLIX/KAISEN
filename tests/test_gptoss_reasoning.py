@@ -238,6 +238,54 @@ def test_stream_qwen_think_events_return_clean_code(tmp_cfg, monkeypatch):
     assert "fn main(){}" in out
 
 
+class OpenAIDeltaStream:
+    """SSE stream shaped like an OpenAI-compatible API: reasoning tokens in
+    delta.reasoning_content, the answer in delta.content.  The API separates
+    them — KAISEN must surface reasoning live/captured but keep it OUT of the
+    returned content (extract_code sees only the answer)."""
+
+    def __init__(self, deltas):
+        self.deltas = deltas  # list of dicts with content/reasoning_content
+        self.closed = False
+
+    def iter_lines(self, decode_unicode=False):
+        for d in self.deltas:
+            msg = {"choices": [{"delta": d}]}
+            yield f'data: {json.dumps(msg)}\n'.encode()
+        yield b'data: [DONE]\n'
+
+    def close(self):
+        self.closed = True
+
+
+def _openai_server(tmp_cfg, sid="t-openai"):
+    return L.Server({"id": sid, "type": "openai", "model": "deepseek-v4-pro",
+                     "base_url": "https://api.deepseek.com/v1",
+                     "api_key": "dummy"}, tmp_cfg), sid
+
+
+def test_openai_stream_separates_reasoning_from_content(tmp_cfg, monkeypatch):
+    """DeepSeek-style streaming: reasoning_content is captured into the live
+    stream (so it reaches llm_raw.txt) but is NOT part of the returned
+    content — otherwise extract_code would consume thinking as code."""
+    s, _ = _openai_server(tmp_cfg)
+    seen = []
+    stream = OpenAIDeltaStream([
+        {"reasoning_content": "need fast doubling", "content": ""},
+        {"reasoning_content": "and matrix exponentiation", "content": ""},
+        {"content": "```python\nprint('ok')\n```"},
+    ])
+    monkeypatch.setattr(L.Server, "_post_stream",
+                        lambda self, target, headers, payload: stream)
+    out = s.request_stream("Write a program.", on_token=lambda t, n: seen.append(t))
+    # returned content: answer only, no reasoning
+    assert "print('ok')" in out
+    assert "fast doubling" not in out and "matrix exponentiation" not in out
+    # live stream captured the reasoning (this is what feeds llm_raw.txt)
+    assert any("fast doubling" in t for t in seen)
+    assert any("matrix exponentiation" in t for t in seen)
+
+
 def test_model_check_reports_streaming_path(tmp_cfg, monkeypatch):
     """" MODELCHECK must exercise request_stream (what a generation uses),
     not just request — it catches 'endpoint answers but delivers no stream'."""

@@ -223,10 +223,12 @@ BARE command lines, never prefixed with OK. Commands (case-insensitive):
   CREATE <id> [TEMP] <spec-json>
                              create a project from a hand-written spec
                              (TEMP: lives in temp/, wiped on close/restart)
-  AUTOFIX [tries <n>] [repair <n|off>]
+  AUTOFIX [tries <n>] [repair <n|off>] [candidates <n>]
                              compile-loop knobs for the session project:
-                             deterministic autofix turns (default 5) and
-                             LLM repair attempts (default 3; off = 0)
+                             deterministic autofix turns (default 5), LLM
+                             repair attempts (default 3; off = 0), and how
+                             many candidate code blocks from one reply to try
+                             latest-first when a build fails (default 3)
   HELP                        this text
   QUIT                        end session
 NOTES: HTTP clients are FRESH per request — send PROJECT <id> + the command
@@ -1288,15 +1290,18 @@ class KaiSession:
         return "\n".join(lines)
 
     def cmd_autofix(self, arg: str) -> str:
-        """AUTOFIX [tries <n>] [repair <n|off>] — per-run compile-loop
-        knobs for the session's project engine: how many deterministic
-        autofix turns before giving up, and how many LLM repair attempts
-        (0/off = deterministic autofix only, then fail). No args = show
-        the current effective caps."""
+        """AUTOFIX [tries <n>] [repair <n|off>] [candidates <n>] — per-run
+        compile-loop knobs for the session's project engine: deterministic
+        autofix turns before giving up, LLM repair attempts (0/off =
+        deterministic only), and how many candidate code blocks from ONE
+        generation's reply to try best-first when a build keeps failing
+        (default 3; 1 = single-block extraction). No args = show the current
+        effective caps."""
         pid = self._need_project()
         tokens = arg.split()
         tries: Optional[int] = None
         repair: Optional[int] = None
+        candidates: Optional[int] = None
         for i, t in enumerate(tokens):
             u = t.upper().rstrip(":,")
             if u in ("TRIES", "TURNS") and i + 1 < len(tokens) and tokens[i + 1].isdigit():
@@ -1309,19 +1314,24 @@ class KaiSession:
                     repair = 0
                 elif v.upper().rstrip(":,") in ("ON", "YES"):
                     repair = None  # keep current/default
+            elif u in ("CANDIDATES", "CAND", "BLOCKS") and i + 1 < len(tokens) and tokens[i + 1].isdigit():
+                candidates = int(tokens[i + 1])
         body: Dict[str, Any] = {"project_id": pid}
         if tries is not None:
             body["tries"] = tries
         if repair is not None:
             body["repair"] = repair
+        if candidates is not None:
+            body["candidates"] = candidates
         res = self.client.call("POST", "/api/engine/autofix", body, read_timeout=30.0)
         if not res.get("ok"):
             raise KaiError(res.get("error", "autofix settings failed"))
         eff = res.get("effective", {})
         repair_s = "OFF (deterministic only)" if eff.get("repair_max") == 0 \
             else f"{eff.get('repair_max')} LLM repair attempt(s)"
+        cand_s = f"candidates {res.get('max_candidates')}"
         return (f"OK {pid} compile loop: autofix turns {eff.get('max_tries')}, "
-                f"{repair_s}")
+                f"{repair_s}, {cand_s}")
 
     def cmd_estimate(self, arg: str) -> str:
         """ESTIMATE <in_tokens> [<out_tokens>]: per-server cost/time for one

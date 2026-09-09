@@ -1481,8 +1481,11 @@ class DashboardServer:
         tries = _num(data.get("tries")) if isinstance(data, dict) else None
         repair = _num(data.get("repair")) if isinstance(data, dict) else None
         settings = eng.set_autofix_settings(max_tries=tries, repair_max=repair)
+        cand = _num(data.get("candidates")) if isinstance(data, dict) else None
+        max_cand = eng.set_max_candidates(cand)
         return _json({"ok": True, "project_id": eng.project.id,
-                      "settings": settings, "effective": eng._autofix_effective()})
+                      "settings": settings, "effective": eng._autofix_effective(),
+                      "max_candidates": max_cand})
 
     async def _api_engine_workers(self, request):
         """Runtime resource knob: resize one engine's worker pool to exactly

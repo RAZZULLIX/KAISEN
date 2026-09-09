@@ -192,3 +192,100 @@ def test_session_waiting_is_distinct_from_prefill(tmp_path):
     s.push("tok", 1)
     assert s.prefill is False
     assert s.snapshot()["text"] == "tok"
+
+
+# ----------------------------------------------------------------------
+# llm_raw.txt NEVER stores the stripped output — a lost generation is a
+# lost chance at improvement AND paid-for tokens.  A thinking model that
+# never closes its reasoning block yields raw="" but a full stream trace;
+# that trace must be persisted (reasoning included, un-stripped).
+# ----------------------------------------------------------------------
+
+def test_save_raw_persists_full_unstripped_stream(tmp_path):
+    from kaisen.engine import ProjectEngine
+    import pytest
+    eng = _make_engine(tmp_path)
+    gen_dir = eng._make_gen_dir(7)
+    # full stream carries reasoning; raw (stripped) is empty
+    full = ["<think>", " considering fast doubling ", "</think>", "\n```rust\nfn main(){}\n```"]
+    raw = "```rust\nfn main(){}\n```"
+    eng._save_raw(gen_dir, full, raw)
+    out = (gen_dir / "llm_raw.txt").read_text(encoding="utf-8")
+    assert "<think>" in out and "</think>" in out  # reasoning KEPT in raw
+    assert "fn main(){}" in out
+
+
+def test_save_raw_falls_back_to_raw_when_no_stream(tmp_path):
+    eng = _make_engine(tmp_path)
+    gen_dir = eng._make_gen_dir(8)
+    eng._save_raw(gen_dir, [], "some fallback content")
+    assert (gen_dir / "llm_raw.txt").read_text(encoding="utf-8") == "some fallback content"
+
+
+def test_save_raw_skips_blank(tmp_path):
+    eng = _make_engine(tmp_path)
+    gen_dir = eng._make_gen_dir(9)
+    eng._save_raw(gen_dir, [], "")
+    assert not (gen_dir / "llm_raw.txt").exists()
+
+
+# ---------------------------------------------------------------------- #
+# candidate fallback — build fails after autofix, retry the previous block
+# ---------------------------------------------------------------------- #
+
+def test_try_next_candidate_resubmits_previous_block(tmp_path):
+    """build_fail after autofix exhaustion pops the next queued candidate
+    and re-submits it for a fresh pipeline run (the model often leaves a
+    working program in an earlier block)."""
+    eng = _make_engine(tmp_path)
+    gen = 10
+    gen_dir = eng._make_gen_dir(gen)
+    # queue: candidates[1:] = [the previous working block]
+    eng._candidate_queue[gen] = ["fn main(){ println!(\"ok\"); }\n"]
+    submitted = []
+    eng._submit = lambda g, cand, gd, baseline=False, **extra: submitted.append(
+        {"gen": g, "candidate": cand, "baseline": baseline})
+    job = {"gen_dir": str(gen_dir), "generation": gen}
+    eng._code_lang = "rust"
+    ok = eng._try_next_candidate(gen, job)
+    assert ok is True
+    assert len(submitted) == 1
+    assert "println!" in open(submitted[0]["candidate"]).read()
+    # queue was consumed
+    assert eng._candidate_queue.get(gen) == []
+
+
+def test_try_next_candidate_false_when_queue_empty(tmp_path):
+    eng = _make_engine(tmp_path)
+    eng._candidate_queue[11] = []
+    assert eng._try_next_candidate(11, {"gen_dir": str(eng._make_gen_dir(11))}) is False
+
+
+def test_apply_result_falls_back_on_build_fail_after_autofix(tmp_path):
+    """A build_fail with NO deterministic fixes applied triggers the
+    candidate fallback instead of recording a plain build_fail."""
+    eng = _make_engine(tmp_path)
+    gen = 12
+    gen_dir = eng._make_gen_dir(gen)
+    eng._candidate_queue[gen] = ["fn main(){}\n"]
+    submitted = []
+    eng._submit = lambda g, cand, gd, baseline=False, **extra: submitted.append(
+        {"gen": g, "candidate": cand})
+    job = {"gen_dir": str(gen_dir), "generation": gen, "baseline": False}
+    result = {"ok": False, "outcome": "build_fail", "reason": "compile error",
+              "build_fixes": [], "metrics": {}}
+    eng._apply_result(gen, job, result)
+    assert len(submitted) == 1          # the fallback candidate was re-submitted
+    assert not any("build_fail" == h.get("outcome") for h in eng.state.history)
+
+
+def test_apply_result_records_build_fail_when_no_candidates(tmp_path):
+    eng = _make_engine(tmp_path)
+    gen = 13
+    gen_dir = eng._make_gen_dir(gen)
+    eng._candidate_queue[gen] = []
+    job = {"gen_dir": str(gen_dir), "generation": gen, "baseline": False}
+    result = {"ok": False, "outcome": "build_fail", "reason": "compile error",
+              "build_fixes": [], "metrics": {}}
+    eng._apply_result(gen, job, result)
+    assert any("build_fail" == h.get("outcome") for h in eng.state.history)

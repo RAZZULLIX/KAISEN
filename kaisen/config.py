@@ -115,6 +115,13 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         # still apply; this gate only switches the layer off.
         "llm_repair": True,
         "llm_repair_max": 3,
+        # Candidate fallback: how many code blocks from ONE generation's
+        # reply to try, best-first (latest → previous), when the build fails
+        # after the deterministic autofix is exhausted.  A reasoning model
+        # often leaves a working program in an earlier block while the final
+        # one is a truncated/broken attempt.  Default 3; 1 = single-block
+        # extraction (old behavior).  Editable via KAI: AUTOFIX candidates <n>.
+        "max_candidates": 3,
     },
     # Auto-fix defaults apply to NEW projects; existing projects carry
     # their own skills.autofix_build (true | false | custom fixer path).

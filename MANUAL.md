@@ -459,6 +459,14 @@ When a build fails, KAISEN repairs in four guarded stages:
 `llm_repair_max: 3`, so a failed build always gets the compiler error fed
 back to the model (source + stderr tail) unless you opt out.
 
+**Candidate fallback** — a reasoning model often writes a working program
+in an earlier ```` ``` ```` block while the final one is truncated/broken.
+When a generation's build fails AND the deterministic autofix is exhausted,
+KAISEN falls back to the **previous** candidate block and re-runs the
+pipeline, up to `autofix.max_candidates` (default **3**; `1` = single-block
+extraction). This recovers generations a one-block extraction would throw
+away. Same knob via KAI: `AUTOFIX candidates <n>`.
+
 **Per-run compile-loop knobs (KAI)**: `AUTOFIX tries <n> repair <n|off>`
 sets, for the session's project engine, how many deterministic autofix
 turns before giving up (default 5) and how many LLM repair attempts
@@ -912,6 +920,7 @@ Complete reference — copy from `config.example.json`:
 | `safety.global_off` | `false` | requires `KAISEN_SAFETY_OFF=1` too (§19) |
 | `autofix.build_enabled` | `true` | default for NEW projects |
 | `autofix.llm_repair` | `true` | LLM last-resort repair gate (§7) |
+| `autofix.max_candidates` | `3` | how many code blocks from ONE reply to try, latest-first, when a build fails after the deterministic autofix is exhausted (§7). `1` = single-block extraction. KAI: `AUTOFIX candidates <n>` |
 | `onboarding.done` | `false` | wizard state |
 | `factory.build_timeout` | `null` | max compile time (s) for new FACTORY projects; null = per-language empirical default, cap 120 (§5) |
 | `factory.case_timeout` | `null` | max execution time (s) per fuzz case for new FACTORY projects; null = per-language empirical default, cap 600 (§5) |

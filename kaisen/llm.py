@@ -484,6 +484,13 @@ class Server:
         # silently burn its allowance.
         from .budget import Budget
         self.budget = Budget.from_spec(cfg)
+        # The endpoint's reasoning format, learned from a FREE /props call
+        # (no tokens).  llama.cpp: "none" = reasoning is INLINE in content,
+        # "separate"/"content" = the server emits a reasoning_content field.
+        # OpenAI-compatible APIs ALWAYS separate (delta.reasoning_content).
+        # This is how we decide whether to strip reasoning from the content
+        # return (guessing was the old way) — never pay to discover it.
+        self._reasoning_format: Optional[str] = None
         # Number of llama.cpp slots the server actually has, once known.
         # Config max_concurrent may be HIGHER than the real slot count
         # (a single-slot box configured with max_concurrent: 2/8) — that
@@ -557,6 +564,13 @@ class Server:
                     # cap engages from the first probe.  Non-fatal: a /slots
                     # miss leaves _detected_slots unknown.
                     self._learn_slots()
+                    # Learn the endpoint's CAPABILITIES (free /props — no
+                    # tokens).  reasoning_format tells us whether the server
+                    # separates the reasoning channel (separate/content) or
+                    # inlines it in content (none) — so we stop GUESSING the
+                    # delimiters and strip only when reasoning is actually
+                    # in the content stream.
+                    self._learn_caps()
                 return r.status_code == 200
             if self.type == "openai":
                 if not self.base_url:
@@ -665,6 +679,39 @@ class Server:
             total += int(s.get("n_prompt_tokens_processed") or 0) + \
                 int(s.get("n_tokens_predicted") or 0)
         return (working, total)
+
+    def _learn_caps(self) -> None:
+        """Learn the endpoint's capabilities from a FREE /props call — no
+        tokens.  For llama.cpp this reports `reasoning_format` (none =
+        reasoning inline in content; separate/content = a reasoning_content
+        field) and whether a chat template exists.  Unknown/absent stays
+        None; the caller falls back to heuristic stripping only when the
+        server truly inlines reasoning."""
+        try:
+            base = self._base_of(self.url)
+            if not base or self.type != "llama":
+                return
+            headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+            r = requests.get(base + "/props", headers=headers, timeout=5.0)
+            if r.status_code != 200:
+                return
+            d = r.json()
+            params = (d.get("default_generation_settings") or {}).get("params") or {}
+            fmt = str(params.get("reasoning_format") or "").lower()
+            if fmt:
+                with self._lock:
+                    self._reasoning_format = fmt
+        except Exception:
+            pass
+
+    def _reasoning_separated(self) -> bool:
+        """True when the server (or API) delivers reasoning in a SEPARATE
+        channel, so content is already the final answer.  OpenAI-compatible
+        always does; llama.cpp only when reasoning_format is separate/content
+        (not "none")."""
+        if self.type == "openai":
+            return True
+        return self._reasoning_format in ("separate", "content")
 
     def _learn_slots(self, slots: Optional[List[Any]] = None) -> None:
         """Record the endpoint's REAL slot count.  Config max_concurrent is
@@ -944,7 +991,13 @@ class Server:
                     self._stats["last_ttft"] = round(ttft, 2)
                 self._learn_prefill(prompt, ttft)
             self.record(True, time.time() - t0, tokens)
-            return strip_reasoning(content)
+            # Only strip when the endpoint INLINES reasoning in content
+            # (llama.cpp reasoning_format=none).  If the server/API already
+            # separates it (openai delta.reasoning_content, or llama.cpp
+            # reasoning_format=separate/content), content is the final answer
+            # as-is — stripping would be guessing at delimiters we were told
+            # nothing about.
+            return content if self._reasoning_separated() else strip_reasoning(content)
         except GenerationCancelled:
             raise
         except ServerError:
@@ -1107,6 +1160,21 @@ class Server:
                                     on_token(token, 1)
                             break
                     else:
+                        # OpenAI-compatible: the API ALREADY separates the
+                        # reasoning channel — `delta.reasoning_content` (the
+                        # model's thinking) vs `delta.content` (the final
+                        # answer).  Never guess delimiters here: forward the
+                        # reasoning tokens to the LIVE VIEW / raw capture so
+                        # they are not lost, but keep them OUT of the returned
+                        # content (which is what extract_code consumes).
+                        try:
+                            rt = obj["choices"][0]["delta"].get("reasoning_content", "")
+                        except (KeyError, IndexError, TypeError):
+                            rt = ""
+                        if rt and on_token:
+                            # reasoning stays out of the returned content —
+                            # it is only surfaced live / captured as raw.
+                            on_token(rt, 1)
                         try:
                             token = obj["choices"][0]["delta"].get("content", "")
                         except (KeyError, IndexError, TypeError):

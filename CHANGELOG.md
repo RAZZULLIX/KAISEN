@@ -5,6 +5,47 @@ All notable changes to KAISEN are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [KAISEN 0.1.8-alpha (candidate fallback + raw integrity)] — 2026-09-09
+
+Never lose a generation; never guess the delimiters.
+
+### Added
+
+- **Candidate fallback — try the latest block, then the previous.** A
+  reasoning model often writes a working program in an earlier ```` ``` ````
+  block while the final one is truncated/broken. When a generation's build
+  fails AND the deterministic autofix is exhausted, the engine now falls
+  back to the previous candidate block and re-runs the pipeline — up to
+  `autofix.max_candidates` (default **3**). Configure via config.json
+  `autofix.max_candidates` or KAI `AUTOFIX candidates <n>`. `1` = old
+  single-block extraction. `extract_code_candidates` returns the ordered
+  best-first list (latest block first, duplicates/trivial fragments
+  dropped).
+- **llm_raw.txt NEVER loses output.** It now stores the full streamed
+  reply (`reasoning_content`/``...`` included), not the
+  `strip_reasoning`'d extract. Before, a thinking model that never closed
+  its reasoning block yielded an empty raw file and the whole reasoning
+  trace was gone — a lost generation AND paid-for tokens. Now:
+  - `_save_raw` persists every streamed token, uncapped (falls back to the
+    return only if nothing streamed);
+  - OpenAI-compatible streaming captures `delta.reasoning_content` natively
+    (the API tells us the delimiter — no guessing);
+  - llama.cpp `reasoning_format` is learned from a FREE `/props` call, so
+    we strip reasoning only when the server inlines it in content, not when
+    it already separates it.
+- **`extract_code` returns the LAST working block for every language** (not
+  the largest reasoning snippet), and a working program inside reasoning is
+  picked when the final block is absent/truncated. Regression tests in
+  `tests/test_extract_code.py`.
+
+### Fixed
+
+- **`BUDGET` alias collision** — `"budget"` was an alias of both `BUDGET`
+  and `ESTIMATE`, so `BUDGET` silently ran `ESTIMATE`; the alias index is now
+  first-wins.
+- `llm_raw.txt` was empty for error generations in some cases (the raw was
+  written from the stripped return, or not written on request failure).
+
 ## [KAISEN 0.1.8-alpha (generation log)] — 2026-09-09
 
 The full per-generation log is readable on demand.

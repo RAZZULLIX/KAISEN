@@ -185,6 +185,57 @@ def extract_code(text: str, language: str = "c") -> Optional[str]:
     return text.strip().replace("`", "")
 
 
+def extract_code_candidates(text: str, language: str = "c",
+                            limit: int = 3) -> List[str]:
+    """Ordered list of candidate programs from one LLM reply, best-first.
+
+    A reasoning model often writes the real program in a LATER block than
+    where it started thinking — and may leave a working program inside its
+    reasoning when the final block is truncated.  So the candidates are the
+    fenced blocks ordered by POSITION, newest (last) first — "try the latest
+    block; if it doesn't compile, try the previous best."  The engine tries
+    each until one builds (or the `limit` is reached), recovering generations
+    that a single-block extraction would throw away.
+
+    Returns at most `limit` distinct non-empty candidates.  Falls back to a
+    single-element list containing `extract_code(...)` when no fences exist
+    (so callers always get at least the primary)."""
+    from .languages import fence_from_lang, normalize_lang
+    if not text:
+        return []
+    lang = normalize_lang(language)
+    fence = fence_from_lang(lang)
+    starters = _starters(lang)
+    blocks = list(re.finditer(r"```([\w.+-]*)\s*\n?(.*?)```", text, re.DOTALL))
+    cands: List[str] = []
+    if blocks:
+        tagged = [(m.group(1).strip().lower(), m.group(2).strip(), m.start())
+                  for m in blocks if m.group(2).strip()]
+        # newest (last) first; only "working" blocks (lang tag or a starter)
+        working = [(p, b) for t, b, p in tagged
+                   if (t == fence or t == lang) or
+                      (starters and any(re.search(s, b, re.M) for s in starters))]
+        if not working:
+            working = [(p, b) for _t, b, p in tagged]
+        working.sort(key=lambda x: x[0], reverse=True)  # last position first
+        seen: List[str] = []
+        for _p, b in working:
+            b = b.strip()
+            if not b or b in seen:
+                continue
+            if len(b) < 8:
+                continue  # trivial fragment (an aborted turn), not a candidate
+            seen.append(b)
+            cands.append(b)
+            if len(cands) >= limit:
+                break
+    if not cands:
+        primary = extract_code(text, language)
+        if primary:
+            cands = [primary]
+    return cands[:limit]
+
+
 def ensure_headers(code: str, language: str = "c") -> str:
     if language != "c":
         return code

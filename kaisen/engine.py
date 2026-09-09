@@ -255,6 +255,17 @@ class ProjectEngine:
         self._llm_repair_count: Dict[int, int] = {}
         self._autofix_settings: Dict[str, Optional[int]] = {
             "max_tries": None, "repair_max": None}
+        # Candidate fallback: when a generation's LLM reply contains several
+        # code blocks, try the LATEST first; if the build fails after the
+        # deterministic autofix is exhausted, fall back to the previous
+        # block, up to `_max_candidates` (default 3).  Recovers generations a
+        # single-block extraction throws away.  Config + KAI editable.
+        try:
+            self._max_candidates: int = max(
+                1, int((self.orchestrator.cfg.data.get("autofix") or {}).get("max_candidates", 3)))
+        except (TypeError, ValueError):
+            self._max_candidates = 3
+        self._candidate_queue: Dict[int, List[str]] = {}
         self._last_log: List[Dict[str, Any]] = []
         self._custom_queue: List[Dict[str, Any]] = []
         self._deepwork_last = 0
@@ -467,10 +478,22 @@ class ProjectEngine:
                     self._active_generations += 1
                 try:
                     try:
+                        # Accumulate the FULL stream separately (uncapped) so
+                        # llm_raw.txt keeps EVERY token, reasoning included —
+                        # session.text is capped at _SESSION_MAX_TEXT and the
+                        # returned `raw` is strip_reasoning'd.  Losing either
+                        # loses the generation's reasoning trace.
+                        full_text: List[str] = []
+                        raw = ""
+
+                        def _push_full(token, count=1):
+                            session.push(token, count)
+                            full_text.append(token)
+
                         raw, sid = self.orchestrator.request_stream(
                             prompt,
                             pipeline_id=pipeline_id,
-                            on_token=session.push,
+                            on_token=_push_full,
                             cancel_event=session.cancel,
                             session=session,
                             skill="generation",
@@ -486,22 +509,38 @@ class ProjectEngine:
                         continue
                     except ServerError as e:
                         session.finish(error=str(e))
-                        # A failed request IS a generation outcome — record
-                        # it so the results table never silently loses rows.
+                        # NEVER lose a stream: write the full un-stripped token
+                        # stream before recording the failure.  A failed
+                        # request is still a paid-for generation whose
+                        # reasoning trace must be readable afterwards.
+                        self._save_raw(gen_dir, full_text, raw)
                         self.state.append_history({"generation": gen, "outcome": "request_failed", "detail": str(e)[:300]})
                         self.state.save()
                         self._emit_state()
                         self._log(f"LLM request failed (gen {gen}): {e}")
                         time.sleep(3.0)
                         continue
-                    (gen_dir / "llm_raw.txt").write_text(raw, encoding="utf-8")
-                    extracted = skills_mod.extract_code(raw, self._code_lang)
-                    if not extracted:
+                    # Persist the FULL un-stripped stream (every token the
+                    # model emitted, reasoning included) — NOT the stripped
+                    # `raw`.  A thinking model that never closes its reasoning
+                    # block yields raw="" but a full trace; losing it is losing
+                    # the generation's entire reasoning.
+                    self._save_raw(gen_dir, full_text, raw)
+                    candidates = skills_mod.extract_code_candidates(
+                        raw, self._code_lang, limit=self._max_candidates)
+                    if not candidates:
                         self.state.append_history({"generation": gen, "outcome": "no_code", "detail": "no extractable code"})
                         self.state.save()
                         self._emit_state()
                         time.sleep(2.0)
                         continue
+                    extracted = candidates[0]
+                    # Queue the remaining candidate blocks (best-first: the
+                    # first is the latest block currently submitted).  If the
+                    # build fails after the deterministic autofix is
+                    # exhausted, the result handler pops the next and retries.
+                    with self._lock:
+                        self._candidate_queue[gen] = candidates[1:]
                     extracted = skills_mod.ensure_headers(extracted, self._code_lang)
                     bad = skills_mod.find_dangerous(extracted, self._code_lang)
                     if bad:
@@ -557,6 +596,40 @@ class ProjectEngine:
                                     "gen_dir": str(gen_dir), "job_id": job_id, **extra}
         self.pool.submit(job)
 
+    def _try_next_candidate(self, gen: int, job: Optional[Dict[str, Any]]) -> bool:
+        """Pop the next queued candidate block (best-first after the first)
+        and re-submit it for a fresh pipeline run.  Returns False when there
+        is no candidate left (caller records the failure) or the candidate
+        fails a guardrail."""
+        if not job:
+            return False
+        with self._lock:
+            queue = self._candidate_queue.get(gen)
+            if not queue:
+                return False
+            nxt = queue.pop(0)
+        if not nxt.strip():
+            return self._try_next_candidate(gen, job)
+        nxt = skills_mod.ensure_headers(nxt, self._code_lang)
+        bad = skills_mod.find_dangerous(nxt, self._code_lang)
+        if bad:
+            self._log(f"gen {gen}: candidate fallback REJECTED by guardrails: {bad}")
+            return self._try_next_candidate(gen, job)
+        violation = self._scope_check(nxt)
+        if violation:
+            self._log(f"gen {gen}: candidate fallback {violation}")
+            return self._try_next_candidate(gen, job)
+        violation = self._diff_check(nxt)
+        if violation:
+            self._log(f"gen {gen}: candidate fallback {violation}")
+            return self._try_next_candidate(gen, job)
+        gen_dir = Path(job["gen_dir"])
+        candidate = gen_dir / f"candidate{self._code_ext}"
+        candidate.write_text(nxt, encoding="utf-8")
+        self._log(f"gen {gen}: build failed after autofix — trying next candidate block")
+        self._submit(gen, str(candidate), gen_dir)
+        return True
+
     def _abort_context(self) -> Dict[str, Any]:
         """Score early-abort rules: a candidate whose live metric already
         provably cannot beat the champion is killed mid-benchmark."""
@@ -606,6 +679,23 @@ class ProjectEngine:
         d = self.project.runs_dir / f"gen_{gen:06d}"
         d.mkdir(parents=True, exist_ok=True)
         return d
+
+    @staticmethod
+    def _save_raw(gen_dir: Path, full_text: List[str], raw: str) -> None:
+        """Persist the generation's raw LLM output to llm_raw.txt UNSTRIPPED.
+
+        `full_text` is every streamed token (reasoning included, uncapped);
+        `raw` is the strip_reasoning'd return.  Full stream wins — a thinking
+        model that never closed its reasoning block yields raw="" but a full
+        trace, and that trace is the whole point of the archive.  Never store
+        the stripped version as the raw record."""
+        body = "".join(full_text) if full_text else (raw or "")
+        if not body.strip():
+            return
+        try:
+            (gen_dir / "llm_raw.txt").write_text(body, encoding="utf-8")
+        except OSError:
+            pass
 
     # ======================================================================
     # champion helpers
@@ -1083,6 +1173,17 @@ class ProjectEngine:
         outcome = result.get("outcome", "unknown")
 
         if not ok:
+            # Candidate fallback: the LATEST block failed to build AND the
+            # deterministic autofix was exhausted (no fixes applied) — try
+            # the PREVIOUS candidate block instead of throwing the generation
+            # away.  The model often writes a working program in an earlier
+            # block while the final one is a truncated/broken attempt.  Only
+            # the build stage triggers the fallback (a verify/score failure
+            # means the candidate IS valid code, just not good enough).
+            if (outcome == "build_fail" and not baseline
+                    and not result.get("build_fixes")
+                    and self._try_next_candidate(gen, job)):
+                return
             entry = {"generation": gen, "outcome": outcome, "detail": result.get("reason", "")[:800]}
             if baseline and not self.state.best.get("fitness"):
                 entry["detail"] = "BASELINE FAILED: " + entry["detail"]
@@ -1216,6 +1317,13 @@ class ProjectEngine:
             self.state.save()
             self.results.append({**{"generation": gen, "outcome": "valid", "fitness": fitness}, **metrics})
             self._log(f"gen {gen}: valid fitness={fitness:.5f} (best {best_f:.5f})")
+
+    def set_max_candidates(self, n: Optional[int] = None) -> int:
+        """Effective candidate-fallback cap (KAI/API AUTOFIX candidates).
+        None = keep current. 1 = single-block extraction (old behavior)."""
+        if n is not None:
+            self._max_candidates = max(1, int(n))
+        return self._max_candidates
 
     def set_autofix_settings(self, max_tries: Optional[int] = None,
                              repair_max: Optional[int] = None) -> Dict[str, Any]:
