@@ -223,6 +223,36 @@ def test_cap_predict_explicit_value_untouched(orch):
     assert out["n_predict"] == 256
 
 
+def test_routing_prefers_fast_measured_server(orch, tmp_cfg):
+    """Among same-priority servers, a box with a FAST measured average
+    seconds must be preferred over a pathologically slow one — otherwise a
+    slow llama.cpp wedge (a call taking minutes while peers finish in 0.2s)
+    would be the round-robin victim and stall generations."""
+    from kaisen.llm import Server
+    fast = Server({"id": "fast", "type": "llama", "url": "http://x/fast"}, tmp_cfg)
+    slow = Server({"id": "slow", "type": "llama", "url": "http://x/slow"}, tmp_cfg)
+    # fast: 10 requests in 2s (0.2s avg); slow: 5 requests in 1000s (200s avg)
+    fast._stats.update(requests=10, total_seconds=2.0)
+    slow._stats.update(requests=5, total_seconds=1000.0)
+    for s in (fast, slow):
+        s.enabled = True
+        s._health.banned_until = 0.0     # not banned
+    orch._servers = {"fast": fast, "slow": slow}
+    orch._active_ids = ["fast", "slow"]
+    orch._rr = 0
+    # pick thrice: the FAST box must be chosen every time (never round-robin
+    # onto the slow one while fast is free).
+    for _ in range(3):
+        orch._servers["fast"]._inflight = 0   # keep fast free
+        orch._servers["slow"]._inflight = 0
+        assert orch._pick_server(min_tier="tiny") == "fast"
+        # release the picked server's inflight (acquire happened in pick)
+        orch._servers["fast"].release()
+    # now mark fast busy -> slow is the usable fallback
+    orch._servers["fast"]._inflight = orch._servers["fast"]._capacity
+    assert orch._pick_server(min_tier="tiny") == "slow"
+
+
 def test_status_aggregates_all_servers(orch):
     a = _server(orch, "a", tier="tiny")
     b = _server(orch, "b", tier="large")

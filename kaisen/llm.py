@@ -1722,6 +1722,22 @@ class ModelOrchestrator:
             n = len(candidates)
             pos = {sid: i for i, sid in enumerate(candidates)}
             rot = lambda sid: (self._rr - pos[sid]) % n
+
+            # Measured responsiveness: among servers of the SAME priority,
+            # prefer the ones that actually ANSWER FAST.  A pathologically
+            # slow box (one llama.cpp wedge taking minutes for a call its
+            # peers finish in 0.2s) would otherwise be the round-robin
+            # victim and stall generations.  Only engaged once a server has
+            # a measured average seconds — with none measured yet, falls back
+            # to the default ordering (no assumption).
+            def _slowness(sid: str) -> float:
+                st = (self._servers[sid]._stats or {})
+                reqs = int(st.get("requests") or 0)
+                total = float(st.get("total_seconds") or 0.0)
+                if reqs < 3 or total <= 0:
+                    return 0.0
+                return total / reqs
+
             if adaptive and skill:
                 # best measured quality-per-dollar for this skill first
                 # (cost 0 local servers: cost floor keeps the order stable).
@@ -1732,6 +1748,7 @@ class ModelOrchestrator:
                         max(self._skill_cost(sid), 0.0001),
                         TIER_RANK.get(self._servers[sid].tier, 1),
                         -int(getattr(self._servers[sid], "priority", 1) or 1),
+                        _slowness(sid),          # fast box first (0 = unmeasured)
                         self._servers[sid]._inflight,
                         rot(sid),
                     ),
@@ -1742,6 +1759,7 @@ class ModelOrchestrator:
                     key=lambda sid: (
                         TIER_RANK.get(self._servers[sid].tier, 1),
                         -int(getattr(self._servers[sid], "priority", 1) or 1),
+                        _slowness(sid),          # fast box first (0 = unmeasured)
                         self._servers[sid]._inflight,
                         rot(sid),
                     ),
