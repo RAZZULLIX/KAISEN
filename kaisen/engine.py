@@ -355,10 +355,21 @@ class ProjectEngine:
         Returns the effective count."""
         n = max(1, int(n))
         self._ensure_producers(n)
+        retired: List[int] = []
         while len(self._producer_threads) > n:
             _t, ev = self._producer_threads.pop()
             ev.set()
+            retired.append(len(self._producer_threads))
         self._multi = n
+        # Retired pipelines no longer exist: their endpoint reservations go
+        # back to the pool (the remaining pipelines keep theirs).
+        if retired:
+            try:
+                for pid in retired:
+                    self.orchestrator.release_pipeline_slot(
+                        self.project.id, pid)
+            except Exception:
+                pass
         self._log(f"parallel generation pipelines: {n}")
         return n
 
@@ -383,6 +394,12 @@ class ProjectEngine:
         self._stop.set()
         self.sessions.cancel_all()
         self.pool.stop_all()
+        # The engine's pipelines are gone: release their endpoint
+        # reservations so the slots go back to the pool.
+        try:
+            self.orchestrator.release_pipeline_slots(self.project.id)
+        except Exception:
+            pass
         with self._lock:
             # Every queued/in-flight evaluation is a real generation —
             # record its cancellation instead of dropping the row.
@@ -403,6 +420,14 @@ class ProjectEngine:
         if self.engine_state == STATE_RUNNING:
             self._set_state(STATE_PAUSING)
             self._log("pause requested — draining active generation")
+            # A paused engine produces no generations: its endpoint
+            # reservations go back to the pool so ACTIVE engines can use
+            # the slots.  On resume the pipelines re-reserve on their next
+            # call (the assignment is rebuilt, priority-first).
+            try:
+                self.orchestrator.release_pipeline_slots(self.project.id)
+            except Exception:
+                pass
         return True
 
     def request_resume(self) -> bool:
@@ -497,6 +522,7 @@ class ProjectEngine:
                             cancel_event=session.cancel,
                             session=session,
                             skill="generation",
+                            engine_key=self.project.id,
                         )
                         self._gen_server[gen] = sid
                         session.finish(server_id=sid)

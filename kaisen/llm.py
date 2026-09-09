@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 import requests
+from collections import Counter
 
 from .config import FRAMEWORK_ROOT, FrameworkConfig, get_config
 from .util import load_json, save_json
@@ -1244,6 +1245,15 @@ class ModelOrchestrator:
         self._servers: Dict[str, Server] = {}
         self._active_ids: List[str] = []
         self._rr = 0
+        # Global cap-fill allocator: each (engine, pipeline) is ASSIGNED an
+        # endpoint-slot so an engine's `multi` pipelines fill the pool in
+        # priority order up to each endpoint's `max_concurrent`, instead of
+        # every request independently picking the highest-priority free box.
+        # `_pipeline_slot` maps "engine_key|pipeline_id" -> server id; the
+        # reservation is sticky per pipeline (a pipeline keeps its endpoint
+        # across generations) and is only re-assigned when its endpoint is
+        # banned/offline/saturated.
+        self._pipeline_slot: Dict[str, str] = {}
         self._status: Dict[str, Any] = {"state": "idle", "last_activity": None}
         # Per-(server, skill) scoreboard: attempts / one-shot successes /
         # wins / accumulated $ — the data behind "which model does what
@@ -1615,6 +1625,7 @@ class ModelOrchestrator:
         min_tier: str = "tiny",
         skill: str = "unknown",
         templated: bool = False,
+        engine_key: Optional[str] = None,
     ) -> tuple:
         """Stream a completion token-by-token (see Server.request_stream).
 
@@ -1624,15 +1635,23 @@ class ModelOrchestrator:
 
         `session` (optional): a live-view session object; its `server_id`
         is bound as soon as the server is picked so the GUI can show which
-        LLM is streaming before it finishes."""
+        LLM is streaming before it finishes.
+
+        `engine_key` + `pipeline_id`: the engine's identity + producer
+        index form the global cap-fill reservation key — an engine's
+        `multi` pipelines hold sticky endpoint slots so the pool fills in
+        priority order up to each endpoint's `max_concurrent`."""
         retries = max_retries if max_retries is not None else int(self.cfg.llm.get("max_retries", 3))
         backoff = float(self.cfg.llm.get("retry_backoff", 2.0))
         last_err: Optional[str] = None
+        pipeline_key = (f"{engine_key}|{pipeline_id}" if engine_key
+                        else (str(pipeline_id) if pipeline_id else None))
         self._status.update({"state": "writing", "last_activity": time.time()})
         try:
             for attempt in range(retries):
                 sid = self._acquire_server(cancel_event=cancel_event, session=session,
-                                           min_tier=min_tier, skill=skill)
+                                           min_tier=min_tier, skill=skill,
+                                           pipeline_key=pipeline_key)
                 s = self._servers[sid]
                 try:
                     out = s.request_stream(prompt, on_token=on_token, cancel_event=cancel_event,
@@ -1663,6 +1682,7 @@ class ModelOrchestrator:
         session: Optional[Any] = None,
         min_tier: str = "tiny",
         skill: str = "unknown",
+        pipeline_key: Optional[str] = None,
     ) -> str:
         """Wait for a usable server. Busy/banned/disabled servers are
         TRANSIENT states — the caller just waits, the iteration never
@@ -1672,7 +1692,8 @@ class ModelOrchestrator:
             session.waiting = True
         try:
             while True:
-                sid = self._pick_server(min_tier=min_tier, skill=skill)
+                sid = self._pick_server(min_tier=min_tier, skill=skill,
+                                        pipeline_key=pipeline_key)
                 if sid is not None:
                     return sid
                 if cancel_event is not None and cancel_event.is_set():
@@ -1691,7 +1712,8 @@ class ModelOrchestrator:
         except Exception:
             return 0.0
 
-    def _pick_server(self, min_tier: str = "tiny", skill: Optional[str] = None) -> Optional[str]:
+    def _pick_server(self, min_tier: str = "tiny", skill: Optional[str] = None,
+                     pipeline_key: Optional[str] = None) -> Optional[str]:
         """Routing: the LOWEST smartness tier that satisfies the
         requirement, then highest priority.  Among EQUALS (same tier +
         priority — e.g. three identical local boxes), a shared round-robin
@@ -1699,6 +1721,17 @@ class ModelOrchestrator:
         server instead of hammering the first one; current load breaks any
         remaining ties, and busy servers fall through so the pipeline never
         stalls.
+
+        GLOBAL CAP-FILL ALLOCATION: when `pipeline_key` is given (an
+        engine's `multi` producer), the pipeline holds a STICKY endpoint
+        slot.  A new pipeline is assigned the highest-priority endpoint
+        that still has free capacity (reserved pipelines < `_capacity`),
+        so `multi=N` pipelines fill N endpoint slots in priority order and
+        lower-priority endpoints (e.g. qwen) get used once the higher ones
+        are full.  The reservation survives across generations and is
+        re-assigned only when the endpoint becomes banned/offline/
+        saturated.  A pipeline WITHOUT a key (plain callers) keeps the old
+        per-request pick.
 
         Per-skill model allowlists (config llm.allowlists) HARD-filter the
         candidates — a skill can be pinned to (or banned from) specific
@@ -1713,6 +1746,88 @@ class ModelOrchestrator:
             if not candidates:
                 return None
             rank_min = TIER_RANK.get(min_tier, 0)
+
+            # ── global cap-fill allocation (sticky per pipeline) ─────────
+            if pipeline_key:
+                # REBALANCE: an endpoint's REAL capacity can shrink after
+                # reservations were made (llama.cpp /slots learns 2 slots
+                # after config max_concurrent=6 reserved 6 pipelines).
+                # Pipelines beyond the real capacity would queue invisibly
+                # behind the actual slots — the "waste 6 generations on a
+                # box that can only do 2" trap.  Evict the newest excess
+                # reservations so they reassign down the priority bracket.
+                reserved = Counter(self._pipeline_slot.values())
+                for sid, cnt in list(reserved.items()):
+                    s = self._servers.get(sid)
+                    if s is None:
+                        continue
+                    excess = cnt - s._capacity
+                    if excess > 0:
+                        keys = [k for k in self._pipeline_slot
+                                if self._pipeline_slot[k] == sid]
+                        for k in keys[-excess:]:
+                            self._pipeline_slot.pop(k, None)
+                        reserved = Counter(self._pipeline_slot.values())
+                held = self._pipeline_slot.get(pipeline_key)
+                if held and held in self._servers:
+                    hs = self._servers[held]
+                    if hs.banned or not hs.enabled or hs.online is False \
+                            or TIER_RANK.get(hs.tier, 1) < rank_min:
+                        # Endpoint permanently unusable (or no longer
+                        # qualifies) -> release the stale reservation and
+                        # reassign below.
+                        self._pipeline_slot.pop(pipeline_key, None)
+                    elif hs.acquire():
+                        # Held endpoint is healthy and has a free slot:
+                        # keep the reservation, use it.
+                        self._rr += 1
+                        return held
+                    else:
+                        # Held endpoint is transiently saturated (another
+                        # pipeline is streaming on it).  WAIT with the
+                        # reservation kept — the caller polls again after
+                        # pool_wait_interval; popping here would churn the
+                        # assignment on every busy slot.
+                        return None
+                # Assign this pipeline the highest-priority endpoint that has
+                # free capacity: FILL the highest-priority bracket up to each
+                # endpoint's cap BEFORE descending to the next priority (the
+                # user spec: multi=5, caps (3,1,1) -> 3 on port1, 1 on port2,
+                # 1 on port3; multi=3 -> all 3 on port1).  Within a bracket,
+                # partially-filled endpoints take precedence (fill to
+                # completion) and a full one falls through to the next.
+                reserved = Counter(self._pipeline_slot.values())
+                ordered = sorted(
+                    candidates,
+                    key=lambda sid: (
+                        TIER_RANK.get(self._servers[sid].tier, 1),
+                        -int(self._servers[sid].priority),
+                        0 if reserved.get(sid, 0) > 0 else 1,  # fill-first
+                        -reserved.get(sid, 0),
+                    ),
+                )
+                for sid in ordered:
+                    s = self._servers[sid]
+                    if s.banned or not s.enabled or s.online is False:
+                        continue
+                    if TIER_RANK.get(s.tier, 1) < rank_min:
+                        continue
+                    # Slot quota: `multi=N` reserves N DISTINCT endpoint
+                    # slots; a reserved pipeline occupies one slot whether or
+                    # not it is streaming right now.  Live `_inflight` is
+                    # enforced at acquire() time below.
+                    if reserved.get(sid, 0) >= s._capacity:
+                        continue
+                    if s.acquire():
+                        self._pipeline_slot[pipeline_key] = sid
+                        self._rr += 1
+                        return sid
+                # Every endpoint's slot quota is full: WAIT (None) — the
+                # caller polls again.  NO acquire-only fallback here: a
+                # quota-full endpoint is exactly where an unreserved
+                # pipeline would queue invisibly behind the real slots (the
+                # "waste generations on a box that can only do 2" trap).
+                return None
             adaptive = str(self.cfg.llm.get("routing", "cost")).lower() == "adaptive"
             # Round-robin among equals: distance of each candidate from the
             # shared cursor position in pool order.  The smallest offset is
@@ -1803,6 +1918,21 @@ class ModelOrchestrator:
         s = self._servers.get(sid)
         if s:
             s.release()
+
+    def release_pipeline_slots(self, engine_key: str) -> None:
+        """Drop every endpoint reservation held by an engine (stop / multi
+        shrink).  Without this, a dead engine's pipelines would keep their
+        slots reserved forever and starve later assignments."""
+        with self._lock:
+            prefix = f"{engine_key}|"
+            for k in [k for k in self._pipeline_slot if k.startswith(prefix)]:
+                self._pipeline_slot.pop(k, None)
+
+    def release_pipeline_slot(self, engine_key: str, pipeline_id: int) -> None:
+        """Drop ONE pipeline's endpoint reservation (multi shrink retires
+        individual producer threads)."""
+        with self._lock:
+            self._pipeline_slot.pop(f"{engine_key}|{pipeline_id}", None)
 
     def status(self) -> Dict[str, Any]:
         with self._lock:

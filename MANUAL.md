@@ -675,7 +675,7 @@ OpenAI-compatible chat), `url`/`base_url`, `model`, `params`,
 | Field | Meaning |
 |---|---|
 | `tier` | `tiny` / `small` / `large` |
-| `priority` | tiebreak inside a tier (higher first) |
+| `priority` | fill order inside a tier: the highest-priority endpoint is filled to its `max_concurrent` BEFORE the next priority bracket is used (higher first) |
 | `context_window` | the server's real context (informational) |
 | `smartness` | 0-10 score (tier defaults: tiny 2, small 5, large 8) |
 | `cost_in` / `cost_out` | $ per 1M tokens (local servers = $0) |
@@ -689,6 +689,35 @@ through so the pipeline never stalls; if no qualifying server is free,
 it falls back to any usable server rather than deadlocking. Servers
 have live state: inflight counters, bans with cooldown, one-shot
 reachability probes, per-server stats (requests, failures, tps).
+
+### `multi` fills the pool across endpoints (cap-fill allocation)
+
+An engine's `multi` pipelines are **assigned endpoint slots globally**:
+each `(engine, pipeline)` holds a sticky reservation, and reservations
+fill endpoints **in priority order up to each endpoint's real
+concurrency** — so `multi=5` with caps `(3, 1, 1)` puts 3 pipelines on
+the highest-priority endpoint, 1 on the next, 1 on the next.  A
+lower-priority endpoint (e.g. a slow qwen box) is used **once the higher
+brackets are genuinely full** — never starved to zero by accident, never
+over-subscribed.  Details:
+
+- **The cap is REAL, not configured.** An endpoint's capacity is
+  `min(max_concurrent, detected llama.cpp /slots count)` — a box
+  configured `max_concurrent: 6` that actually has 2 slots takes 2
+  reservations, and the rest spill down the priority bracket.  If the
+  real slot count is learned AFTER reservations were made, the excess is
+  evicted on the next pick (newest first) and reassigned — the "waste 6
+  generations on a box that can only do 2" trap is impossible.
+- **Sticky across generations.** A pipeline keeps its endpoint until the
+  engine stops or shrinks `multi` (reservations are released then), or
+  until the endpoint goes banned/offline (reassigned).  A healthy-but-
+  busy held endpoint makes the pipeline WAIT, not churn.
+- **Transient saturation waits.** When every endpoint's quota is full, a
+  new pipeline waits (polls) instead of queueing invisibly behind real
+  slots — it never over-subscribes an endpoint, so the pool's throughput
+  is always exactly the sum of the endpoints' real capacities.
+- **Plain callers are unaffected.** Requests without a pipeline key
+  (repair, suggest, deepwork) keep the old per-request pick.
 
 `ESTIMATE <in> [out]` (KAI) or the Servers panel shows per-server
 time/cost for a call of that size before you commit.

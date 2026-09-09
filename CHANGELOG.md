@@ -5,6 +5,37 @@ All notable changes to KAISEN are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [KAISEN 0.1.8-alpha (cap-fill allocation)] — 2026-09-09
+
+`multi` pipelines fill the model pool across endpoints — priority-first,
+up to each endpoint's REAL concurrency.
+
+### Added
+
+- **Global cap-fill allocator.** An engine's `multi` pipelines hold
+  sticky endpoint reservations, assigned by filling the highest-priority
+  endpoint up to its capacity before descending to the next priority
+  bracket (`multi=5`, caps `(3,1,1)` → 3/1/1). A slow lower-priority box
+  (qwen) is used once the higher brackets are genuinely full — no longer
+  starved to ~1 lifetime request because per-request picks always found a
+  free gpt-oss slot. Keyed by `(engine, pipeline_id)`; the reservation
+  survives across generations and is released on engine stop / pause /
+  `multi` shrink.
+- **The cap is REAL, not configured.** Capacity =
+  `min(max_concurrent, detected llama.cpp /slots count)`; if the real
+  slot count is learned after reservations were made (config 6, box has
+  2), the excess reservations are evicted (newest first) on the next pick
+  and reassigned down the bracket — a pipeline can never waste generations
+  queueing invisibly behind slots that do not exist.
+- **Transient saturation waits, never over-subscribes.** A healthy-but-
+  busy held endpoint makes the pipeline wait with its reservation kept;
+  when every endpoint's quota is full a new pipeline waits instead of an
+  acquire-only fallback that would queue invisibly.
+- Plain callers (repair/suggest/deepwork, no pipeline key) keep the old
+  per-request pick. Regression tests in `tests/test_routing.py`
+  (fill order, stickiness, offline reassignment, slot-shrink rebalance,
+  wait-not-oversubscribe, release on stop).
+
 ## [KAISEN 0.1.8-alpha (routing balance)] — 2026-09-09
 
 The model pool fills every slot instead of hammering the fastest box.
