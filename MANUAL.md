@@ -288,6 +288,33 @@ safe). `python3 -m kaisen.triage [--limit N]` groups the rows by
 
 ## 6. The pipeline
 
+The full life of one generation, end to end:
+
+```mermaid
+flowchart TD
+    A["Generation N — prompt built from the project spec (per-tier template)"] --> B{"LLM routing: lowest tier that can do the job"}
+    B --> C["Model reply (streamed; gpt-oss reasoning channel stripped from the captured answer)"]
+    C --> D["Code extracted — largest fenced block, language-aware"]
+    D --> E{"Guardrails: danger scan · length cap · diff guard"}
+    E -- "rejected" --> H1["history row: rejected (no pipeline run)"]
+    E -- "passes" --> F["Pipeline: build → verify* (fuzz gate vs baseline) → score*"]
+    F -- "build fails" --> G["Autofix ladder 1–4: deterministic compiler fixes, ≤ max_tries turns, rebuilt after each"]
+    G -- "fixed" --> F
+    G -- "still failing" --> I{"LLM repair on?<br/>≤ llm_repair_max per generation"}
+    I -- "yes" --> J["Candidate source + compiler error → LLM; reply danger-scanned, length-capped"]
+    J --> F
+    I -- "off / cap reached" --> H2["history row: build_fail"]
+    F -- "verify or score fails" --> H3["history row: failure outcome (FUZZ MISMATCH / no_metrics / …)"]
+    F -- "scored" --> K{"Fitness vs champion"}
+    K -- "new best" --> L["Champion updated · Telegram/GitHub notify"]
+    K -- "not better" --> M["history row: valid"]
+    L --> N[("iteration history — campaigns count these rows")]
+    M --> N
+```
+
+Every generation lands a row in the iteration history, scored or not —
+that is what `RUN 50` / campaign targets mean. Campaign bug capture
+(§5) mirrors the failure rows into `campaign_bugs.jsonl` for triage.
 Per candidate: **build → verify* → score***. Each step runs as its own
 process with:
 
@@ -398,6 +425,10 @@ When a build fails, KAISEN repairs in four guarded stages:
    file may change, and the repaired code re-runs the FULL pipeline
    (build+verify+score) before it can count. Never on the user's
    baseline. Global switch: `config.json` → `autofix.llm_repair`.
+
+**On by default**: shipped config has `autofix.llm_repair: true` and
+`llm_repair_max: 3`, so a failed build always gets the compiler error fed
+back to the model (source + stderr tail) unless you opt out.
 
 **Per-run compile-loop knobs (KAI)**: `AUTOFIX tries <n> repair <n|off>`
 sets, for the session's project engine, how many deterministic autofix
@@ -665,6 +696,33 @@ mistral | deepseek | none`).  `auto` infers from the model name; use
 `"type": "openai"` with a llama.cpp `--jinja` server to skip this
 entirely.  See [`docs/MODELS.md`](docs/MODELS.md) for the compatibility
 matrix and field notes.
+
+### Tuning inference quality
+
+**Temperature.** Per-server `params.temperature` is passed straight to the
+endpoint — there is no framework-level override. Leave it **blank** (no key
+in `params`) and the server's own model default applies; for gpt-oss that is
+**0.65** (the sampling set baked into the model file, visible on llama.cpp
+via `GET /props`). The first-run wizard no longer bakes a value in — its
+*Inference params* field may stay empty, and the Add-server modal's JSON
+field accepts anything (`{"temperature": 0.6, "top_p": 0.9, …}`). For code
+generation, stick to the model's recommended range (gpt-oss: ~0.6–0.7);
+higher buys novelty at the cost of more build failures the autofix ladder
+then has to absorb.
+
+**Reasoning (does the model think during code generation?).** Yes — for
+hybrid-reasoning models like gpt-oss, and now reliably: KAISEN opens every
+raw prompt in the model's **native chat format** (`chat_template: auto`
+resolves to `gptoss` for gpt-oss names), which is what puts the model into
+its analysis channel. The thinking stream stays visible live in the GUI,
+but everything up to the final-channel marker is stripped from the captured
+answer, so reasoning can never pollute the extracted code. Control how much
+the model thinks with `params.reasoning_effort`: `low` / `medium` /
+`high` (llama.cpp accepts it per request; on gpt-oss-20b: low ≈ fastest,
+high ≈ most deliberation — field-tested at high). One budget note: thinking
+tokens consume the same output cap as the answer (`n_predict`, or
+`llm.max_tokens` when unlimited), so leave headroom if you cap outputs and
+run high reasoning.
 
 Secrets: `KAISEN_SERVER_<ID>_API_KEY` (env, per server) or
 `KAISEN_OPENAI_API_KEY` (fallback). Never written back to config.

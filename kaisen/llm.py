@@ -202,6 +202,26 @@ def _cap_predict(payload: Dict[str, Any], global_cfg: FrameworkConfig) -> Dict[s
         payload["n_predict"] = max(1, cap)
     return payload
 
+# gpt-oss (and other channel-style hybrid-reasoning models) emit their
+# thinking in an "analysis" channel, then switch to the final answer with
+# this marker.  llama.cpp servers configured with reasoning_format=none
+# (the common default) deliver BOTH channels in `content` — so the model's
+# reasoning would pollute the captured answer and burn the n_predict
+# budget inside it.  We strip everything up to the LAST final-channel
+# marker: what remains is exactly the answer the model committed to.
+GPTOSS_FINAL_MARKER = "<|channel|>final<|message|>"
+
+
+def strip_reasoning(text: str) -> str:
+    """Drop the reasoning channel from a hybrid-reasoning model's reply.
+
+    No marker (ordinary models, or a reply that never reached the final
+    channel — e.g. truncated mid-thought) => returned unchanged; callers
+    then see raw thinking and fail downstream as before."""
+    if not text or GPTOSS_FINAL_MARKER not in text:
+        return text
+    return text.rsplit(GPTOSS_FINAL_MARKER, 1)[1]
+
 # --------------------------------------------------------------------------- #
 # Process-wide server health
 # --------------------------------------------------------------------------- #
@@ -386,9 +406,16 @@ class Server:
         self.model: str = cfg.get("model", "")
         # Client-side chat template for raw /completion servers.  "auto"
         # (default) infers from the model name; "none" disables templating.
+        # "auto" is RESOLVED here to a concrete template — leaving it as the
+        # literal "auto" would silently fall back to ChatML in
+        # _chat_transcript and disable the gpt-oss native framing below.
         raw_tpl = cfg.get("chat_template")
-        self.chat_template: str = raw_tpl if raw_tpl in CHAT_TEMPLATES else \
-            (_infer_chat_template(self.model) if raw_tpl in (None, "", "auto") else "auto")
+        if raw_tpl in CHAT_TEMPLATES and raw_tpl != "auto":
+            self.chat_template: str = raw_tpl
+        elif raw_tpl in (None, "", "auto"):
+            self.chat_template = _infer_chat_template(self.model)
+        else:
+            self.chat_template = "auto"
         # Secrets are env-first (KAISEN_SERVER_<ID>_API_KEY / KAISEN_OPENAI_API_KEY);
         # a value in config.json is only a fallback and is never shown in the GUI.
         self.api_key: str = global_cfg.server_api_key(self.id, cfg.get("api_key", ""))
@@ -622,14 +649,26 @@ class Server:
             headers["Authorization"] = f"Bearer {self.api_key}"
         return headers
 
-    def request(self, prompt: str, extra_params: Optional[Dict[str, Any]] = None) -> str:
+    def _maybe_wrap_gptoss(self, prompt: str) -> str:
+        """Open a raw prompt in gpt-oss's NATIVE chat format.  gpt-oss is
+        trained on its own channel markup; a bare prompt degrades it into
+        erratic continuations (verified in the field), while the native
+        framing makes it behave — including entering the analysis channel
+        so reasoning_effort actually does something.  Other templates keep
+        the historical raw-prompt behavior: no regression surface."""
+        if self.type == "llama" and self.chat_template == "gptoss":
+            return _chat_transcript([{"role": "user", "content": prompt}], "gptoss")
+        return prompt
+
+    def request(self, prompt: str, extra_params: Optional[Dict[str, Any]] = None,
+                templated: bool = False) -> str:
         t0 = time.time()
         try:
             if self.type == "llama":
                 payload = dict(DEFAULT_PARAMS)
                 payload.update(self.params)
                 payload.update(extra_params or {})
-                payload["prompt"] = prompt
+                payload["prompt"] = prompt if templated else self._maybe_wrap_gptoss(prompt)
                 payload = _cap_predict(payload, self._global_cfg)
                 resp = requests.post(
                     self.url, json=payload,
@@ -639,7 +678,7 @@ class Server:
                 resp.raise_for_status()
                 resp.encoding = "utf-8"  # charset-less JSON bodies — decode explicitly
                 data = resp.json()
-                content = data.get("content", "") if isinstance(data, dict) else ""
+                content = strip_reasoning(data.get("content", "")) if isinstance(data, dict) else ""
                 tokens = data.get("tokens_predicted") if isinstance(data, dict) else None
                 if tokens is None:
                     tokens = max(1, len(content) // 4)
@@ -713,6 +752,7 @@ class Server:
         prompt: str,
         on_token: Optional[Callable[[str], None]] = None,
         cancel_event: Optional[threading.Event] = None,
+        templated: bool = False,
     ) -> str:
         """Stream a completion token-by-token.
 
@@ -737,9 +777,10 @@ class Server:
             return content
         try:
             if self.type == "llama":
+                sent = prompt if templated else self._maybe_wrap_gptoss(prompt)
                 payload = dict(DEFAULT_PARAMS)
                 payload.update(self.params)
-                payload.update({"prompt": prompt, "stream": True})
+                payload.update({"prompt": sent, "stream": True})
                 payload = _cap_predict(payload, self._global_cfg)
                 target, headers = self.url, self._auth_headers()
             elif self.type == "openai":
@@ -758,7 +799,7 @@ class Server:
                     self._stats["last_ttft"] = round(ttft, 2)
                 self._learn_prefill(prompt, ttft)
             self.record(True, time.time() - t0, tokens)
-            return content
+            return strip_reasoning(content)
         except GenerationCancelled:
             raise
         except ServerError:
@@ -786,7 +827,8 @@ class Server:
             resp.encoding = "utf-8"
             data = resp.json()
             return data["choices"][0]["message"]["content"]
-        return self.request(_chat_transcript(messages, self.chat_template), extra_params)
+        return self.request(_chat_transcript(messages, self.chat_template), extra_params,
+                            templated=True)
 
     def request_chat_stream(self, messages: List[Dict[str, str]],
                             on_token: Optional[Callable[[str], None]] = None,
@@ -803,7 +845,7 @@ class Server:
                                                  prompt=prompt_txt)
             return content
         return self.request_stream(_chat_transcript(messages, self.chat_template), on_token=on_token,
-                                   cancel_event=cancel_event)
+                                   cancel_event=cancel_event, templated=True)
 
     def _consume_stream(
         self,

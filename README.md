@@ -91,11 +91,14 @@ the in-flight run. `RUN` reports progress in *scored* generations (the
 queue counter can run ahead of the workers).
 
 Agent-writer notes: for local llama.cpp servers the raw `/completion`
-endpoint has no chat-template reasoning wrapper — command turns are cheap
-and direct. On reasoning OpenAI-compatible models, prefer
-`reasoning_effort: "none"` (or `chat_template_kwargs: {"enable_thinking":
-false}` on llama.cpp chat endpoints) for KAI tool-call turns, and never
-prefix model output with `OK` — the server does that.
+endpoint applies no server-side chat template — but KAISEN opens gpt-oss
+prompts in the model's native channel format itself (and strips the
+reasoning channel from the captured reply), so command turns stay cheap
+and direct; every other model keeps plain raw prompts. On reasoning
+OpenAI-compatible models, prefer `reasoning_effort: "none"` (or
+`chat_template_kwargs: {"enable_thinking": false}` on llama.cpp chat
+endpoints) for KAI tool-call turns, and never prefix model output with
+`OK` — the server does that.
 
 Full protocol reference: [`docs/KAI.md`](docs/KAI.md) — command table,
 grammar, session semantics, and the reliability contract.
@@ -137,18 +140,27 @@ toggleable from the GUI.
 
 ### Autofix ladder
 
-When a build fails, KAISEN repairs in four guarded stages:
+When a build fails, KAISEN repairs in five guarded stages:
 
 1. deterministic compiler-hint fixes (missing includes, "did you mean",
    `_GNU_SOURCE`, SIMD-target pragmas, literal `\n`, avxintrin rewrite);
-2. linter-backed fixes for Python candidates;
-3. a project's own custom fixer script (`skills.autofix_build: "path"`);
-4. **LLM last-resort repair** — one LLM rewrite with the real compiler
-   error as feedback. The reply is danger-scanned and length-capped,
-   only the candidate file may change, and the result re-runs the FULL
-   pipeline (build + verify + score) before it can count. Once per
-   generation, never on the user's baseline, and switchable off
-   (`config.json` → `autofix.llm_repair: false`).
+2. **per-compiler nudges for every language** — each backend parses THAT
+   compiler's own diagnostics and does exactly what it suggests (rustc
+   missing `;`/unclosed delimiter, go undefined import, bash unbalanced
+   `)`/missing `then`, node EOF, python ast `:`/indentation, perl …);
+3. linter-backed fixes for Python candidates;
+4. a project's own custom fixer script (`skills.autofix_build: "path"`);
+5. **LLM last-resort repair** — up to `llm_repair_max` (default 3) LLM
+   rewrites per generation, each fed the candidate source plus the real
+   compiler error. The reply is danger-scanned and length-capped, only
+   the candidate file may change, and the result re-runs the FULL
+   pipeline (build + verify + score) before it can count. Never on the
+   user's baseline; switchable off (`config.json` → `autofix.llm_repair:
+   false`).
+
+The full generation lifecycle — prompt → guardrails → pipeline → autofix
+ladder → scoring → champion — is drawn as a flowchart in
+[`MANUAL.md` §6](MANUAL.md#6-the-pipeline).
 
 ## Performance notes (honest framing)
 

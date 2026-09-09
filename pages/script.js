@@ -1704,9 +1704,10 @@ function obPickKind(kind) {
   document.getElementById('ob-key-row').style.display = isLocal ? 'none' : 'flex';
   document.getElementById('ob-test').style.display = 'none';
   document.getElementById('ob-test').innerHTML = '';
-  document.getElementById('ob-label').value = '';
-  document.getElementById('ob-model').value = '';
-  document.getElementById('ob-key').value = '';
+    document.getElementById('ob-label').value = '';
+    document.getElementById('ob-model').value = '';
+    document.getElementById('ob-key').value = '';
+    document.getElementById('ob-params').value = '';
   const idEl = document.getElementById('ob-id');
   idEl.dataset.touched = '';
   obAutoId();
@@ -1736,10 +1737,10 @@ async function obAddServer() {
     base_url: '',
     model: '',
     api_key: '',
-    max_concurrent: parseInt(document.getElementById('ob-conc').value || '2'),
     timeout: 1200,
-    params: { temperature: 0.6 },
+    params: {},
   };
+  try { spec.params = JSON.parse(document.getElementById('ob-params').value || '{}'); } catch (e) {}
   if (!spec.id) return systemAlert('ID required.');
   if (isLocal) {
     spec.url = document.getElementById('ob-url').value.trim();

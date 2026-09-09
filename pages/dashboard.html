@@ -748,6 +748,7 @@
           <div class="form-row"><label>Label (optional)</label><input id="ob-label" placeholder="My model" oninput="obAutoId()"></div>
 
           <div class="form-row"><label>Max concurrent</label><input id="ob-conc" type="number" min="1" max="8" value="2"></div>
+          <div class="form-row"><label>Inference params (JSON, optional)</label><input id="ob-params" placeholder='{"temperature": 0.6, "reasoning_effort": "high"}' style="font-family: monospace;"><span class="ob-key-hint">Blank = the server/model's own defaults (gpt-oss runs at temperature 0.65). Keys pass straight to the endpoint — e.g. <code>temperature</code>, <code>top_p</code>, <code>n_predict</code>, <code>reasoning_effort</code> (gpt-oss: low/medium/high).</span></div>
           <div class="form-row"><label>ID</label><input id="ob-id" placeholder="my-model" oninput="this.dataset.touched = '1'"></div>
           <div id="ob-test" class="ob-test" style="display:none;"></div>
           <div class="modal-actions">

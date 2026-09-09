@@ -5,6 +5,45 @@ All notable changes to KAISEN are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [KAISEN 0.1.8-alpha] — 2026-09-09
+
+gpt-oss reasons where it should, and the inference knobs are yours.
+
+### Added
+
+- **Native gpt-oss framing + reasoning-channel stripping.** Raw prompts
+  sent to a llama.cpp `/completion` endpoint are now opened in gpt-oss's
+  native channel format (`chat_template: auto` → `gptoss`; other models
+  and explicit `"none"` keep the historical raw behavior — verified
+  against a live b10402 box that gpt-oss degrades on bare prompts). The
+  model's analysis channel is stripped from the captured answer (everything
+  up to the last `<|channel|>final<|message|>` marker), so thinking never
+  pollutes extracted code; live token streaming still shows the reasoning.
+  `params.reasoning_effort` (`low`/`medium`/`high`) passes straight through
+  per request — document the quality trade-offs in MANUAL §13 "Tuning
+  inference quality".
+- **First-run wizard: optional inference params.** The onboarding model
+  form no longer bakes `{"temperature": 0.6}` into every new server; a new
+  *Inference params (JSON)* field may stay blank, which means "the
+  server/model's own defaults" (gpt-oss: temperature 0.65 per its model
+  file). The Add-server modal already accepted free-form JSON.
+- **Pipeline flowchart** (mermaid) in MANUAL §6 — prompt → routing →
+  extraction → guardrails → build/verify/score → autofix ladder → LLM
+  repair → scoring → champion, with every failure exit labelled.
+- **MANUAL §13 "Tuning inference quality"** — temperature semantics (blank
+  = server default), reasoning_effort guidance, and the n_predict budget
+  note for thinking tokens.
+
+### Fixed
+
+- README autofix ladder now lists all five stages (per-compiler nudges
+  were missing) and states LLM repair correctly: up to `llm_repair_max`
+  (default 3) passes per generation, **on by default** — a failed build
+  gets the candidate source plus the compiler error fed back to the model
+  unless `autofix.llm_repair: false`. MANUAL §7 carries the same note.
+- `kaisen/__init__.py` version drift (0.1.5 → 0.1.8, matching the
+  changelog).
+
 ## [KAISEN 0.1.6-alpha] — 2026-09-06
 
 The factory speaks every language in the registry, and every project's
