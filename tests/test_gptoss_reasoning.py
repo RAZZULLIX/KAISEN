@@ -219,3 +219,74 @@ def test_stream_no_marker_untouched(tmp_cfg, monkeypatch):
                         lambda self, target, headers, payload: stream)
     out = s.request_stream("Say hello.")
     assert out == "hello"
+
+
+def test_stream_qwen_think_events_return_clean_code(tmp_cfg, monkeypatch):
+    """Qwen3 streaming: reasoning tokens then a closing tag, then the code.
+    The engine's streaming path (request_stream) must return ONLY the code,
+    not the <think> block — the regression that made the live view/logs
+    disagree (model log shows generation, KAISEN gets empty/thinking)."""
+    s, _ = _other(tmp_cfg, model="Qwen3.8-27B")
+    stream = ReasoningStream([
+        "<think>", " considering fast doubling ", "</think>",
+        "\n```rust\nfn main(){}\n```",
+    ])
+    monkeypatch.setattr(L.Server, "_post_stream",
+                        lambda self, target, headers, payload: stream)
+    out = s.request_stream("Write a Rust program.")
+    assert "<think>" not in out and "</think>" not in out
+    assert "fn main(){}" in out
+
+
+def test_model_check_reports_streaming_path(tmp_cfg, monkeypatch):
+    """" MODELCHECK must exercise request_stream (what a generation uses),
+    not just request — it catches 'endpoint answers but delivers no stream'."""
+    s, _ = _other(tmp_cfg)
+    stream = ReasoningStream(["ok"])
+    monkeypatch.setattr(L.Server, "_post_stream",
+                        lambda self, target, headers, payload: stream)
+    res = s.model_check(max_tokens=8)
+    assert res.get("streaming_path") is True
+    assert res.get("ok") is True
+    assert res.get("empty") is False
+    assert "ok" in res.get("reply", "")
+
+
+def test_concurrency_capped_at_detected_slots(tmp_cfg):
+    """Single-slot server configured with max_concurrent>1: concurrency is
+    capped at the real slot count so generations stop queuing invisibly
+    behind one slot (the 'chat looks dead during a long queue' field bug)."""
+    s, _ = _gptoss(tmp_cfg)
+    s.max_concurrent = 8                     # config over-subscribes
+    s._detected_slots = 1                    # server has ONE slot
+    assert s._capacity == 1
+    assert s.acquire() is True
+    assert s.acquire() is False              # second slot is a lie
+    # capacity is a min, never below 1, never above configured
+    s._detected_slots = None
+    assert s._capacity == 8
+    s._detected_slots = 3
+    assert s._capacity == 3
+
+
+def test_slots_snapshot_learns_capacity(tmp_cfg, monkeypatch):
+    s, _ = _gptoss(tmp_cfg)
+    calls = {}
+
+    def fake_get(url, headers=None, timeout=5.0, **kw):
+        calls["url"] = url
+        return FakeSlots([{"is_processing": True, "n_prompt_tokens_processed": 100,
+                           "n_tokens_predicted": 20}])
+    monkeypatch.setattr(L.requests, "get", fake_get)
+    working, total = s._slots_snapshot()
+    assert working is True and total == 120
+    assert s._detected_slots == 1
+
+
+class FakeSlots:
+    def __init__(self, slots):
+        self._slots = slots
+        self.status_code = 200
+
+    def json(self):
+        return self._slots

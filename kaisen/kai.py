@@ -191,6 +191,11 @@ BARE command lines, never prefixed with OK. Commands (case-insensitive):
   LOGS [pid] [lines <n>] [grep <text>]
                              recent engine log lines (default 100). grep is a
                              case-insensitive substring; bare word = project id
+  MODELCHECK [<sid>]         verify a server's STREAMING path (what a generation
+                             + the GUI live view use): first-token latency,
+                             whether content reaches the stream, prefill tps.
+                             Catches "generates in the model log but the KAISEN
+                             chat stays empty" without hunting through log files
   TOOLCHAINS                  per-language toolchain availability on this OS
   GOAL <words...> [TEMP]     AI designs + validates a project (blocking);
                              uses the staged BASELINE as the program.
@@ -240,6 +245,7 @@ ALIASES: Dict[str, List[str]] = {
     "WAIT": ["WAIT", "SYNC", "AWAIT", "JOIN"],
     "BUDGET": ["BUDGET", "TIME", "REMAINING", "LEFT"],
     "LOGS": ["LOGS", "LOG", "TAIL"],
+    "MODELCHECK": ["MODELCHECK", "CHECKMODEL", "MCHECK"],
     "SERVERS": ["SERVERS", "LLM", "BACKENDS"],
     "MODELS": ["MODELS", "SCOREBOARD", "RANKINGS"],
     "TOOLCHAINS": ["TOOLCHAINS", "TOOLS", "COMPILERS", "LANGTOOLS"],
@@ -973,6 +979,43 @@ class KaiSession:
         lines.append(f"FREE SLOTS {free_total}")
         return "\n".join(lines)
 
+    def cmd_modelcheck(self, arg: str) -> str:
+        """MODELCHECK [<sid>] — verify a server's STREAMING path (what a
+        generation + the GUI live view use). check_health only proves the
+        endpoint answers; this reports first-token latency, whether content
+        actually makes it to the stream, and the prefill tps — so 'it
+        generates in the model log but KAISEN's chat stays empty' is
+        diagnosed immediately. Defaults to the first active server."""
+        sid = arg.strip().lower()
+        if not sid:
+            cfg = self.client.call("GET", "/api/config", read_timeout=10.0)
+            active = (cfg.get("llm") or {}).get("active_ids") or []
+            if not active:
+                raise KaiError("MODELCHECK <sid> — no active server")
+            sid = active[0]
+        res = self.client.call("POST", f"/api/servers/modelcheck/{sid}", {}, read_timeout=300.0)
+        if not res.get("ok"):
+            # ok is False either from an error OR a diagnostic-only failure:
+            if res.get("error"):
+                return f"ERR {res['error']}"
+            return ("ERR model unreachable via the streaming path — "
+                    "it answers a ping but delivers no stream")
+        reply = (res.get("reply") or "").strip()
+        if res.get("empty"):
+            verdict = "EMPTY — server produces no streamed content"
+        elif res.get("first_token_s") is not None and res.get("first_token_s", 0) > 30:
+            verdict = (f"SLOW prefill ({res['first_token_s']}s to first token) — "
+                       f"fine but the chat view will look empty during the wait")
+        else:
+            verdict = "OK"
+        lines = [f"OK modelcheck {sid}: {res.get('chars')} chars, "
+                 f"first_token={res.get('first_token_s')}s "
+                 f"ttft={res.get('ttft_s')}s total={res.get('total_s')}s "
+                 f"prefill_tps={res.get('prefill_tps')}"]
+        lines.append(f"  {verdict}")
+        lines.append(f"  reply: {reply[:80]!r}")
+        return "\n".join(lines)
+
     def cmd_logs(self, arg: str) -> str:
         """LOGS [pid] [lines <n>] [grep <text>] — the running engine's
         recent log lines from the in-memory buffer. Defaults: the session
@@ -1466,6 +1509,8 @@ class KaiSession:
                 return self.cmd_servers(rest)
             if cmd == "LOGS":
                 return self.cmd_logs(rest)
+            if cmd == "MODELCHECK":
+                return self.cmd_modelcheck(rest)
             if cmd == "MODELS":
                 return self.cmd_models(rest)
             if cmd == "GOAL":

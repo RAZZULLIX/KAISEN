@@ -384,6 +384,7 @@ class DashboardServer:
         r.add_post("/api/servers/remove/{sid}", self._api_server_remove)
         r.add_post("/api/servers/active", self._api_server_active)
         r.add_post("/api/servers/health/{sid}", self._api_server_health)
+        r.add_post("/api/servers/modelcheck/{sid}", self._api_server_modelcheck)
         r.add_post("/api/servers/label", self._api_server_label)
         r.add_post("/api/onboarding/complete", self._api_onboarding_complete)
         r.add_post("/api/onboarding/demo", self._api_onboarding_demo)
@@ -1602,6 +1603,21 @@ class DashboardServer:
     async def _api_server_health(self, request):
         sid = request.match_info["sid"]
         result = await asyncio.to_thread(self._orch().check_health, sid)
+        return _json(result)
+
+    async def _api_server_modelcheck(self, request):
+        """Verify the STREAMING path a generation + the GUI live view use.
+        check_health only proves the endpoint answers (non-streaming); this
+        catches a server that returns nothing to a stream — the 'it
+        generates in the model log but KAISEN's chat stays empty' bug."""
+        sid = request.match_info["sid"]
+        data = await request.json() if request.can_read_body else {}
+        prompt = str((data or {}).get("prompt", "Reply with the single word: ok"))
+        try:
+            max_tokens = int((data or {}).get("max_tokens", 64))
+        except (TypeError, ValueError):
+            max_tokens = 64
+        result = await asyncio.to_thread(self._orch().check_model, sid, prompt, max_tokens)
         return _json(result)
 
     async def _api_server_label(self, request):

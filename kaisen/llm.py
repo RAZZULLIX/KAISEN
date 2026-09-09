@@ -478,16 +478,32 @@ class Server:
         self._stats = {"requests": 0, "failures": 0, "total_seconds": 0.0,
                        "last_tps": 0.0, "last_ttft": None,
                        "prefill_tps": 0.0, "last_error": None}
+        # Number of llama.cpp slots the server actually has, once known.
+        # Config max_concurrent may be HIGHER than the real slot count
+        # (a single-slot box configured with max_concurrent: 2/8) — that
+        # mismatch queues N generations behind one slot and the chat view
+        # looks dead while they wait.  Learned from /slots; None = unknown.
+        self._detected_slots: Optional[int] = None
 
     # -- capacity / health -------------------------------------------------
     @property
     def busy(self) -> bool:
         with self._lock:
-            return self._inflight >= self.max_concurrent
+            return self._inflight >= self._capacity
+
+    @property
+    def _capacity(self) -> int:
+        """Effective concurrency: the configured max_concurrent, CAPPED at
+        the real slot count once known.  Over-subscribing a single-slot
+        server makes every additional generation queue invisibly behind the
+        first — the chat view shows nothing while they wait."""
+        if self._detected_slots is not None:
+            return max(1, min(self.max_concurrent, self._detected_slots))
+        return max(1, self.max_concurrent)
 
     def acquire(self) -> bool:
         with self._lock:
-            if (self._inflight >= self.max_concurrent or self._health.banned
+            if (self._inflight >= self._capacity or self._health.banned
                     or not self.enabled):
                 return False
             self._inflight += 1
@@ -525,6 +541,12 @@ class Server:
                 if not base:
                     return False
                 r = requests.get(base + "/health", timeout=5.0)
+                if r.status_code == 200:
+                    # Learn the REAL slot count now (not only when a capped
+                    # first-token stream polls /slots) so the concurrency
+                    # cap engages from the first probe.  Non-fatal: a /slots
+                    # miss leaves _detected_slots unknown.
+                    self._learn_slots()
                 return r.status_code == 200
             if self.type == "openai":
                 if not self.base_url:
@@ -536,6 +558,51 @@ class Server:
             return False
         except Exception:
             return False
+
+    def model_check(self, prompt: str = "Reply with the single word: ok",
+                    max_tokens: int = 64) -> Dict[str, Any]:
+        """Verify the STREAMING path the engine and GUI actually use.
+
+        `check_health` proves the endpoint answers (a non-streaming
+        n_predict=8 poke).  That is NOT the path a generation uses — the
+        engine calls request_stream() and the GUI shows its first token.
+        A server can pass check_health yet never deliver a token to the
+        stream (huge prompt -> minutes of prefill behind a single slot,
+        wrong template, a thinking model whose whole budget goes to
+        reasoning).  This runs the real streaming call and reports what
+        the chat view would actually see, so "server works but the GUI is
+        empty" is diagnosed immediately instead of looking like a hang.
+        Never fails the run — it is a diagnostic, not a gate."""
+        res: Dict[str, Any] = {"ok": False}
+        t0 = time.time()
+        first_token_at: Optional[float] = None
+
+        def on_token(token: str, n: int = 1) -> None:
+            nonlocal first_token_at
+            if first_token_at is None:
+                first_token_at = time.time()
+
+        try:
+            cap = {"n_predict": max_tokens} if self.type == "llama" else {"max_tokens": max_tokens}
+            params = dict(self.params)
+            params.update(cap)
+            text = self.request_stream(prompt, on_token=on_token, templated=False)
+            res = {
+                "ok": True,
+                "reply": text[:120],
+                "chars": len(text),
+                "empty": not text.strip(),
+                "first_token_s": round(first_token_at - t0, 1) if first_token_at else None,
+                "total_s": round(time.time() - t0, 1),
+                "prefill_tps": self._stats.get("prefill_tps"),
+                "ttft_s": self._stats.get("last_ttft"),
+                "streaming_path": True,
+            }
+            self.mark_online(True)
+        except Exception as e:
+            res["error"] = str(e)[:200]
+            self.mark_online(False)
+        return res
 
     @staticmethod
     def _base_of(url: str) -> Optional[str]:
@@ -573,6 +640,11 @@ class Server:
             slots = [slots]
         if not isinstance(slots, list) or not slots:
             return (None, None)
+        # Learn the real slot count so concurrency can never over-subscribe
+        # a single-slot server (the "looks dead while N generations queue"
+        # field bug).  Config max_concurrent is a hint, not the ceiling.
+        if self._detected_slots is None:
+            self._learn_slots(slots)
         working = False
         total = 0
         for s in slots:
@@ -583,6 +655,36 @@ class Server:
             total += int(s.get("n_prompt_tokens_processed") or 0) + \
                 int(s.get("n_tokens_predicted") or 0)
         return (working, total)
+
+    def _learn_slots(self, slots: Optional[List[Any]] = None) -> None:
+        """Record the endpoint's REAL slot count.  Config max_concurrent is
+        a hint; a single-slot box configured with max_concurrent: 8 queues
+        every generation after the first invisibly behind one slot.  The
+        slot count is discovered from /slots and caps concurrency so the
+        pool never over-subscribes.  Non-fatal: on any miss the value stays
+        unknown (None = uncapped)."""
+        if self._detected_slots is not None:
+            return
+        count: Optional[int] = None
+        try:
+            if slots is None:
+                base = self._base_of(self.url)
+                if not base:
+                    return
+                headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+                r = requests.get(base + "/slots", headers=headers, timeout=5.0)
+                if r.status_code != 200:
+                    return
+                slots = r.json()
+            if isinstance(slots, dict):
+                slots = [slots]
+            if isinstance(slots, list) and slots:
+                count = len(slots)
+        except Exception:
+            return
+        if count is not None:
+            with self._lock:
+                self._detected_slots = count
 
     # -- silence deadlines ---------------------------------------------------
     def _first_byte_deadline(self, prompt: str) -> Optional[float]:
@@ -646,10 +748,11 @@ class Server:
                 "url": self.url or self.base_url,
                 "model": self.model,
                 "enabled": self.enabled,
-                "busy": self._inflight >= self.max_concurrent,
+                "busy": self._inflight >= self._capacity,
                 "online": self.online,
                 "inflight": self._inflight,
                 "max_concurrent": self.max_concurrent,
+                "detected_slots": self._detected_slots,
                 "banned": self.banned,
                 "tier": self.tier,
                 "priority": self.priority,
@@ -1256,10 +1359,25 @@ class ModelOrchestrator:
             cap = {"n_predict": 8} if s.type == "llama" else {"max_tokens": 8}
             text = s.request("Reply with the single word: ok", cap)
             s.mark_online(True)
-            return {"ok": True, "reply": text[:80]}
+            # The activation probe runs for fresh (online=None) servers;
+            # this is the one reliable hook to learn the REAL slot count so
+            # the concurrency cap engages from the very first generation.
+            s._learn_slots()
+            return {"ok": True, "reply": text[:80], "detected_slots": s._detected_slots}
         except Exception as e:
             s.mark_online(False)
             return {"ok": False, "error": str(e)}
+
+    def check_model(self, sid: str, prompt: str = "Reply with the single word: ok",
+                    max_tokens: int = 64) -> Dict[str, Any]:
+        """Verify the STREAMING path (what a generation + the GUI live view
+        use).  check_health uses a non-streaming poke; this catches servers
+        that answer yet never deliver a token to the stream — the 'generates
+        in the model log but the KAISEN chat stays empty' field bug."""
+        s = self._servers.get(sid)
+        if s is None:
+            return {"ok": False, "error": "unknown server"}
+        return s.model_check(prompt=prompt, max_tokens=max_tokens)
 
     # -- use ---------------------------------------------------------------
     @property

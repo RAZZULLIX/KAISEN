@@ -159,3 +159,36 @@ def test_shrink_to_empty_pool_ok(tmp_path):
     assert pool.shrink_to(0) == 0
     assert pool.shrink_to(2) == 0        # nothing to remove; target lowered
     assert pool._target == 2
+
+
+# ----------------------------------------------------------------------
+# Live-session prefill visibility — the "looks dead during a slow prefill"
+# field bug: the server is working (model log shows tokens) but the GUI
+# chat shows an empty box because no token has streamed YET.
+# ----------------------------------------------------------------------
+
+def test_session_prefill_flag_until_first_token(tmp_path):
+    eng = _make_engine(tmp_path)
+    s = eng.sessions.begin(kind="code", gen=1, prompt="write code")
+    assert s.prefill is True          # started, zero tokens -> prefill
+    snap = s.snapshot()
+    assert snap["prefill"] is True
+    assert snap["text"] == ""
+    s.push("fn ", 1)                   # first token arrives
+    assert s.prefill is False
+    assert s.snapshot()["prefill"] is False
+    s.finish(server_id="qwen")
+    assert s.prefill is False          # done, not generating
+
+
+def test_session_waiting_is_distinct_from_prefill(tmp_path):
+    """waiting (no free server slot) vs prefill (slot acquired, no token
+    yet) must be distinguishable — the GUI shows 'queued' vs 'prefilling'."""
+    eng = _make_engine(tmp_path)
+    s = eng.sessions.begin(kind="code", gen=2, prompt="p")
+    s.waiting = True
+    assert s.waiting is True and s.prefill is True
+    s.waiting = False
+    s.push("tok", 1)
+    assert s.prefill is False
+    assert s.snapshot()["text"] == "tok"

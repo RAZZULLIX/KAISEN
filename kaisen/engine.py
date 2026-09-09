@@ -87,9 +87,21 @@ class Session:
         self.cancel = threading.Event()
         self._tokens = 0
         self.tps = 0.0
+        # True once the first token has streamed in.  Before that the GUI
+        # should show "prefilling/queued, Ns" rather than an empty chat
+        # box — a slow prefill is the classic "looks dead but is working"
+        # field bug (single-slot llama server, huge prompt, minutes before
+        # the first token).
+        self._streaming = False
+
+    @property
+    def prefill(self) -> bool:
+        """Started, but no token has arrived yet (still prefill/queued)."""
+        return self.status == "generating" and self._tokens == 0
 
     def push(self, token: str, count: int = 1) -> None:
         self.text += token
+        self._streaming = True
         if len(self.text) > _SESSION_MAX_TEXT:
             self.text = self.text[-_SESSION_MAX_TEXT:]
         # REAL tps: tokens actually received / wall time since the request
@@ -118,6 +130,7 @@ class Session:
             "prompt": self.prompt[-prompt_tail:],
             "tps": round(self.tps, 1),
             "waiting": self.waiting,
+            "prefill": self.prefill,
             "finished_at": self.finished_at,
             "elapsed": round((self.finished_at or time.time()) - self.started_at, 1),
         }

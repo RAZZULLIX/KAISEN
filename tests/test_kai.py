@@ -587,3 +587,47 @@ def test_logs_error_propagates():
     s = _session({("GET", "/api/engine/logs"): {"ok": False, "error": "no engine running"}})
     with pytest.raises(KaiError, match="no engine running"):
         s.cmd_logs("")
+
+
+# ----------------------------------------------------------------------
+# MODELCHECK — the streaming-path diagnostic
+# ----------------------------------------------------------------------
+
+def test_modelcheck_ok():
+    s = _session({("POST", "/api/servers/modelcheck/qwen"): {
+        "ok": True, "chars": 5, "first_token_s": 1.2, "ttft_s": 1.1,
+        "total_s": 2.0, "prefill_tps": 90.0, "reply": "ok"}})
+    out = s.cmd_modelcheck("qwen")
+    assert "OK modelcheck qwen" in out
+    assert "first_token=1.2s" in out
+    assert "OK" in out  # verdict
+
+
+def test_modelcheck_empty_flags_bug():
+    """Endpoint answers but the stream carries no content -> flag it. This
+    is the 'generates in the model log but the KAISEN chat stays empty'
+    symptom, surfaced directly instead of looking like a hang."""
+    s = _session({("POST", "/api/servers/modelcheck/qwen"): {
+        "ok": True, "chars": 0, "empty": True, "reply": ""}})
+    out = s.cmd_modelcheck("qwen")
+    assert "EMPTY" in out
+
+
+def test_modelcheck_slow_prefill_warns():
+    s = _session({("POST", "/api/servers/modelcheck/qwen"): {
+        "ok": True, "chars": 10, "first_token_s": 90.0, "reply": "x"}})
+    out = s.cmd_modelcheck("qwen")
+    assert "SLOW prefill" in out
+
+
+def test_modelcheck_defaults_to_first_active():
+    s = _session({("GET", "/api/config"): {"llm": {"active_ids": ["qwen"]}},
+                  ("POST", "/api/servers/modelcheck/qwen"): {"ok": True, "chars": 2}})
+    out = s.cmd_modelcheck("")
+    assert "modelcheck qwen" in out
+
+
+def test_modelcheck_no_server_error():
+    s = _session({("GET", "/api/config"): {"llm": {"active_ids": []}}})
+    with pytest.raises(KaiError, match="no active server"):
+        s.cmd_modelcheck("")
