@@ -90,7 +90,9 @@ def gen_dir(project: str, iteration: Any) -> Optional[Path]:
     base = PROJECTS_DIR / project / "runs"
     if not base.is_dir():
         return None
-    for pat in (f"gen_{n:04d}", f"gen_{n}"):
+    # The engine creates runs/gen_NNNNNN (6-digit, engine.py _make_gen_dir);
+    # the legacy 4-digit and bare forms are probed only for old archives.
+    for pat in (f"gen_{n:06d}", f"gen_{n:04d}", f"gen_{n}"):
         p = base / pat
         if p.is_dir():
             return p

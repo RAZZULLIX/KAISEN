@@ -576,10 +576,14 @@ KAISEN as an optimization sidecar. Two transports, same grammar:
 - HTTP: `POST /kai` (text in, text out)
 
 Key commands: `PROJECT`, `STATUS`, `SPEC`, `RUN [n] [FOR secs] [WITH k]
-[ON pid]`, `RUN ALL [FOR secs] [WITH k]`, `BUDGET`, `SCORE <path>`,
-`FUZZY <n>`, `WAIT`, `PAUSE/RESUME/STOP`, `BEST`, `SMOKE`, `BASELINE`/`END`,
-`CANDIDATE`/`END`, `SNAPSHOT`, `SERVERS`, `GOAL`, `ACCEPT`, `CREATE`,
-`ESTIMATE`, `FORGE`, `HELP`, `QUIT`.
+[ON pid]`, `RUN ALL [FOR secs] [WITH k]`, `BUDGET` (and `BUDGET SERVER
+[<sid>] [SET …]` for per-server usage budgets), `SCORE <path>`,
+`FUZZY <n>`, `WAIT`, `PAUSE/RESUME/STOP`, `BEST`, `GEN <n>` (full
+per-generation log: prompt + raw reply + program + diff), `SMOKE`,
+`BASELINE`/`END`, `CANDIDATE`/`END`, `SNAPSHOT`, `SERVERS`, `MODELS
+[skill]` (scoreboard), `TOOLCHAINS`, `MODELCHECK`, `LOGS [pid]`,
+`AUTOFIX`, `GOAL`, `ACCEPT`, `CREATE`, `ESTIMATE`, `FORGE`, `HELP`,
+`QUIT`.
 
 Reliability contract: every reply starts `OK` or `ERR`; parsing is
 deliberately tolerant (LLMs decorate commands with quotes, `CMD:`,
@@ -945,9 +949,12 @@ Complete reference — copy from `config.example.json`:
 | `workers.affinity` | `""` | pin worker processes to cores (e.g. `"0,2"` or `"1-3"`) — empty = no pinning (§18 quiet benchmarking) |
 | `workers.quiet` | `false` | run workers at lower priority (nice +10) so scorers don't starve the dashboard/LLMs |
 | `engine.start_paused` | `true` | new engines boot paused |
+| `engine.default_multi` | `1` | parallel LLM pipelines per engine at start (project > config > 1) |
 | `telegram.*` | off | notifications (§17) |
 | `safety.global_off` | `false` | requires `KAISEN_SAFETY_OFF=1` too (§19) |
 | `autofix.build_enabled` | `true` | default for NEW projects |
+| `autofix.max_tries` | `5` | deterministic autofix turns before giving up on a build |
+| `autofix.llm_repair_max` | `3` | LLM repair passes per generation when the deterministic fixer is exhausted |
 | `autofix.llm_repair` | `true` | LLM last-resort repair gate (§7) |
 | `autofix.max_candidates` | `3` | how many code blocks from ONE reply to try, latest-first, when a build fails after the deterministic autofix is exhausted (§7). `1` = single-block extraction. KAI: `AUTOFIX candidates <n>` |
 | `onboarding.done` | `false` | wizard state |
@@ -1065,10 +1072,10 @@ pip install pytest
 python -m pytest tests/
 ```
 
-122 tests, no network, temp dirs only: HTTP API + engine pool scoping,
+440+ tests, no network, temp dirs only: HTTP API + engine pool scoping,
 suggest gates, every deterministic autofix rule, KAI grammar, tier
-routing, LLM repair flow. The suite is hermetic — it passes with no
-dashboard running.
+routing, cap-fill allocation, LLM repair flow. The suite is hermetic —
+it passes with no dashboard running.
 
 ---
 
@@ -1089,4 +1096,4 @@ measurement of the real workload, not by headline multipliers.
 
 ---
 
-*Manual is the complete reference as of KAISEN 0.1.2-alpha.*
+*Manual is the complete reference as of KAISEN 0.1.8-alpha.*

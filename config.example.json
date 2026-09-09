@@ -21,6 +21,8 @@
     "first_token_timeout": 0,
     "max_retries": 3,
     "retry_backoff": 2.0,
+    "reprobe_interval": 30,
+    "max_tokens": 0,
     "active_ids": [],
     "routing": "cost",
     "allowlists": {},
@@ -50,6 +52,10 @@
     "affinity": "",
     "quiet": false
   },
+  "engine": {
+    "start_paused": true,
+    "default_multi": 1
+  },
   "telegram": {
     "token": "",
     "chat_id": "",
@@ -64,7 +70,11 @@
     "build_enabled": true,
     "max_tries": 5,
     "llm_repair": true,
-    "llm_repair_max": 3
+    "llm_repair_max": 3,
+    "max_candidates": 3
+  },
+  "onboarding": {
+    "done": false
   },
   "factory": {
     # Max compile time (s) for new FACTORY projects. null = per-language

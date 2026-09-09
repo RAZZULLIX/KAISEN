@@ -126,7 +126,6 @@ def _chat_transcript(messages: List[Dict[str, str]], template: str = "auto") -> 
         # System is folded into the first user turn; assistant turns are
         # wrapped between [INST]...[/INST] pairs.
         system = next((m for m in msgs if m.get("role") == "system"), None)
-        first_user_idx = next((i for i, m in enumerate(msgs) if m.get("role") == "user"), 0)
         parts = ["<s>"]
         first_user_done = False
         for m in msgs:
@@ -1644,8 +1643,12 @@ class ModelOrchestrator:
         retries = max_retries if max_retries is not None else int(self.cfg.llm.get("max_retries", 3))
         backoff = float(self.cfg.llm.get("retry_backoff", 2.0))
         last_err: Optional[str] = None
-        pipeline_key = (f"{engine_key}|{pipeline_id}" if engine_key
-                        else (str(pipeline_id) if pipeline_id else None))
+        # A sticky cap-fill reservation key exists ONLY when the caller is an
+        # engine pipeline (engine_key + pipeline_id).  A bare pipeline_id
+        # (e.g. LLM repair passes pipeline_id=gen) must NOT mint a reservation
+        # — otherwise every repair permanently consumes an endpoint slot that
+        # release_pipeline_slots (keyed "engine_key|") never frees.
+        pipeline_key = f"{engine_key}|{pipeline_id}" if engine_key else None
         self._status.update({"state": "writing", "last_activity": time.time()})
         try:
             for attempt in range(retries):

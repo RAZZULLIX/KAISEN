@@ -341,13 +341,20 @@ class ProjectEngine:
 
     def _ensure_producers(self, n: int) -> None:
         # Prune dead threads, then top up to n.  Each producer carries its
-        # own stop event so `set_multi` can retire individual pipelines.
-        alive = [(t, ev) for t, ev in self._producer_threads if t and t.is_alive()]
-        for i in range(len(alive), n):
+        # own stop event so `set_multi` can retire individual pipelines, and
+        # its OWN pipeline id — list position is NOT the id (a middle thread
+        # dying would compress the list and make position != id, silently
+        # colliding two live pipelines on one cap-fill reservation key).
+        alive = [r for r in self._producer_threads if r[0] and r[0].is_alive()]
+        next_pid = max((r[2] for r in alive), default=-1) + 1
+        for _ in range(len(alive), n):
             ev = threading.Event()
-            t = threading.Thread(target=self._producer_loop, args=(i, ev), daemon=True, name=f"producer-{i}")
+            pid = next_pid
+            next_pid += 1
+            t = threading.Thread(target=self._producer_loop, args=(pid, ev),
+                                 daemon=True, name=f"producer-{pid}")
             t.start()
-            alive.append((t, ev))
+            alive.append((t, ev, pid))
         self._producer_threads = alive
 
     def set_multi(self, n: int) -> int:
@@ -357,9 +364,9 @@ class ProjectEngine:
         self._ensure_producers(n)
         retired: List[int] = []
         while len(self._producer_threads) > n:
-            _t, ev = self._producer_threads.pop()
+            _t, ev, pid = self._producer_threads.pop()
             ev.set()
-            retired.append(len(self._producer_threads))
+            retired.append(pid)
         self._multi = n
         # Retired pipelines no longer exist: their endpoint reservations go
         # back to the pool (the remaining pipelines keep theirs).

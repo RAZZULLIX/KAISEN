@@ -667,7 +667,6 @@ def suggest_project(
     # harness needs a driver entry point — generated here and compiled
     # together with the candidate (same language).  Interpreted programs
     # need no driver: the harness runs/imports them directly.
-    user_code = bool(code.strip())
     no_main = needs_driver(lang, kind, baseline_code)
     driver_code: Optional[str] = None
     if no_main:

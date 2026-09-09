@@ -274,8 +274,6 @@ ALIASES: Dict[str, List[str]] = {
     "SMOKE": ["SMOKE", "TEST", "CHECK"],
     "CANDIDATE": ["CANDIDATE", "SUBMIT", "INJECT", "CODE", "PATCH"],
     "SNAPSHOT": ["SNAPSHOT", "SNAP", "SAVE", "RESTORE", "ROLLBACK", "UNDO"],
-    "SERVERS": ["SERVERS", "LLM", "BACKENDS"],
-    "MODELS": ["MODELS", "SCOREBOARD", "RANKINGS"],
     "GOAL": ["GOAL", "SUGGEST", "DESIGN", "BUILD", "NEW"],
     "CREATE": ["CREATE", "MAKE"],
     "FACTORY": ["FACTORY", "FABRICATE", "GENPROJECTS"],
@@ -1490,10 +1488,12 @@ class KaiSession:
                 except ValueError as e:
                     raise KaiError("CASE_TIMEOUT needs a number of seconds") from e
                 i += 2
+            elif u == "FORCE":
                 # Re-provision existing projects (DELETE + recreate) so a
                 # factory fix reaches already-registered specs. Without it,
                 # existing projects are skipped and keep their old contract.
                 force = True
+                i += 1
             else:
                 raise KaiError("FACTORY [ALGOS a,b] [LANGS c,python,rust,go] "
                                "[CASES n] [BUILD_TIMEOUT sec] [CASE_TIMEOUT sec] [FORCE]")
@@ -1702,8 +1702,6 @@ class KaiSession:
                 return self.cmd_logs(rest)
             if cmd == "MODELCHECK":
                 return self.cmd_modelcheck(rest)
-            if cmd == "MODELS":
-                return self.cmd_models(rest)
             if cmd == "GOAL":
                 return self.cmd_goal(rest)
             if cmd == "ESTIMATE":

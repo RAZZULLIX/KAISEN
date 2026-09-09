@@ -850,6 +850,17 @@ function iterSortValue(item, key) {
   if (TEXT_COLUMNS.has(key)) return String(v).toLowerCase();
   return Number(v);
 }
+// Wired to the search input + outcome select (dashboard.html): re-render
+// the iteration table with the current filter values.  renderIterations
+// reads the inputs itself, so this is just the event handler.
+function filterIterations() { renderIterations(); }
+function toggleArchiveFilter() {
+  showArchivedNotes = !showArchivedNotes;
+  const btn = document.getElementById('archive-toggle-btn');
+  if (btn) btn.textContent = showArchivedNotes ? 'Show Active' : 'Show Archived';
+  // reload + re-render the notes view with the flipped archive filter
+  loadNotes();
+}
 function renderIterations() {
   const tbody = document.getElementById('iteration-tbody');
   if (!tbody) return;
@@ -1062,7 +1073,7 @@ function renderServers(llm) {
     tr.id = `server-row-${s.id}`;
     tr.innerHTML = `
       <td><input type="checkbox" ${active ? 'checked' : ''} onchange="toggleServerActive('${s.id}', this.checked)"></td>
-      <td class="llm-label-cell" data-label="${escapeHtml(s.label || '')}"><b>${escapeHtml(s.label || s.id)}</b>${s.label && s.label !== s.id ? `<div class="iter-prompt" style="font-size:10px;color:var(--muted);">${escapeHtml(s.id)}</div>` : ''}</td><td>${escapeHtml(s.type)}</td><td class="iter-prompt" style="max-width:260px;" title="${escapeHtml(s.url)}">${escapeHtml(s.url)}</td>
+      <td class="llm-label-cell" data-label="${escapeHtml(s.label || '')}"><b>${escapeHtml(s.label || s.id)}</b>${s.label && s.label !== s.id ? `<div class="iter-prompt" style="font-size:10px;color:var(--muted);">${escapeHtml(s.id)}</div>` : ''}</td><td>${escapeHtml(s.type)}</td><td class="iter-prompt" style="max-width:260px;" title="${escapeHtml(s.url || s.base_url)}">${escapeHtml(s.url || s.base_url)}</td>
       <td>${escapeHtml(s.model || '')}</td><td>${escapeHtml(s.tier || 'small')}</td><td>${escapeHtml(s.priority ?? 1)}</td><td>${s.context_window ? s.context_window : '?'}</td><td>${s.inflight ?? 0}/${s.max_concurrent ?? '—'}</td>
       <td class="${s.banned ? 'iter-err' : s.busy ? 'iter-warn' : s.online === false ? 'iter-err' : 'iter-ok'}">${s.banned ? 'BANNED' : s.busy ? 'busy' : s.online === false ? 'offline' : 'ok'}</td>
       <td>${(s.stats ? `${s.stats.requests || 0} req · ${s.stats.failures || 0} fail${s.stats.avg_seconds ? ' · ' + Number(s.stats.avg_seconds).toFixed(0) + 's' : ''}` : '—')}</td>

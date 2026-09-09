@@ -52,23 +52,28 @@ deliberately tolerant, because LLMs decorate everything:
 | `RUN [<n>] [FOR <secs>] [WITH <k>] [ON <pid>]` | start evolution (forever by default), background. `<n>` = stop after n SCORED generations; `FOR <secs>` = time budget (paused time excluded — only burns while the engine runs); both = whichever comes first |
 | `RUN ALL [FOR <secs>] [WITH <k>]` | start every pool member at once — same budget and pipeline count each; everything about multi-engine mode is optional |
 | `BUDGET` | the in-flight run's budget: scored so far vs target + time remaining |
+| `BUDGET SERVER [<sid>] [SET max_tokens <n> reset <r> [max_generations <n>]]` | per-server usage budget (optional): caps tokens/generations inside a reset window; an exhausted server drops out of routing until it rolls over. `n` = `1000000` / `1M` / `2.5M`; `r` = `30s` / `5m` / `12h` / `3d` / `1w` / `12:00:00` (= 12h). Blank clears a limit |
 | `SCORE <path> [ON <pid>]` | score any file through the project's pipeline — no engine, no run (audit copy under `runs/score_*`) |
 | `FUZZY <n> [ON <pid>]` | opt-in prompt diversity: random top-N scored basis per generation; also feeds the prompt the last 10 scored outcomes. 0 = off (default). Runtime only |
 | `WAIT [<secs>]` | block until the in-flight run finishes (or snapshot) |
 | `PAUSE` / `RESUME` / `STOP [ON <pid>]` | engine controls |
 | `BEST [id]` | champion source + metrics — resolves real and temp projects (via `/api/projects/{pid}/best`) |
+| `GEN <n> [ON <pid>] [RAW\|CODE\|PROMPT\|DIFF]` | the full per-generation log: prompt sent, RAW LLM reply (reasoning included, un-truncated), extracted program, diff vs champion — reads the persistent `runs/gen_NNNN/` archive (one field arg returns just that part) |
 | `SMOKE [pid]` (also `ON <pid>`) | run the pipeline once on the baseline |
 | `SERVERS` | LLM servers with tier/smartness/cost/free slots |
 | `MODELS [skill]` | per-(model, skill) scoreboard: attempts, one-shots, wins, $ — which model does what best |
+| `TOOLCHAINS` | per-language toolchain/compiler status |
+| `ESTIMATE <in> [<out>]` | per-server cost/time estimate for a call of that size |
+| `MODELCHECK [<sid>]` | verify a server's STREAMING path (first-token latency, content reaches the stream, prefill tps) |
+| `LOGS [pid] [lines <n>] [grep <text>]` | engine log lines with filters |
 | `BASELINE [lang]` + code lines + `END` | stage the starting program |
 | `CANDIDATE [lang]` + code lines + `END` | queue code as a generation |
 | `SNAPSHOT [LIST\|TAKE\|RESTORE <id>]` | config/project snapshots |
-| `SERVERS` | LLM servers with tier/smartness/cost/free slots |
 | `GOAL <words> [TEMP]` | build a new project from a goal (suggest loop). TEMP: lives under the `temp/` root, wiped at server close/next startup |
 | `ACCEPT <id>` | keep the project built by the last GOAL (carries its TEMP flag) |
 | `CREATE <id> [TEMP] <spec-json>` | create a project from an explicit spec; TEMP = temp-rooted |
-| `FACTORY [ALGOS a,b] [LANGS c,python,rust,go] [CASES n]` | generate algorithm × language projects (each self-checked: baseline builds, passes its seeded fuzz gate vs reference, scores) and register them; existing ids are skipped |
-| `AUTOFIX [tries <n>] [repair <n\|off>]` | per-run compile-loop caps for the session project: deterministic autofix turns (default 5), LLM repair attempts (default 3; `off` = deterministic only, then fail) |
+| `FACTORY [ALGOS a,b] [LANGS c,python,rust,go] [CASES n] [BUILD_TIMEOUT sec] [CASE_TIMEOUT sec] [FORCE]` | generate algorithm × language projects (each self-checked: baseline builds, passes its seeded fuzz gate vs reference, scores) and register them; existing ids are skipped unless `FORCE` (delete + recreate) |
+| `AUTOFIX [tries <n>] [repair <n\|off>] [candidates <n>]` | per-run compile-loop caps for the session project: deterministic autofix turns (default 5), LLM repair attempts (default 3; `off` = deterministic only, then fail), candidate fallback blocks (default 3) |
 | `FORGE [<n>] [TIER <t>] [ON <pid>] [GOAL <words>]` | n parallel scored drafts (max 12) |
 | `HELP` | this reference |
 

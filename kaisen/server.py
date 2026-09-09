@@ -1996,7 +1996,6 @@ class DashboardServer:
                     agg_row["online"] = False
                 elif agg_row["online"] is None:
                     agg_row["online"] = sv.get("online")
-                agg_row["tps"] += float(st.get("last_tps", 0) or 0)
         active_tps: Dict[str, float] = {}
         agg = 0.0
         active = [s for s in sessions_all if s.get("status") == "generating"]
@@ -2220,17 +2219,6 @@ class DashboardServer:
         wid = int(request.match_info["wid"])
         ok = eng.kill_worker(wid)
         return _json({"ok": ok, "message": f"Worker {wid} terminated." if ok else f"Worker {wid} not found."})
-
-    async def _api_file_size(self, request):
-        p = request.query.get("path", "")
-        root = Path(__file__).resolve().parent.parent
-        try:
-            full = (root / p).resolve()
-            if full.exists() and full.is_file() and (full == root or root in full.parents):
-                return _json({"ok": True, "size": full.stat().st_size})
-        except Exception:
-            pass
-        return _json({"ok": False, "size": 0})
 
     async def _api_open_folder(self, request):
         path = request.match_info.get("path", "")
