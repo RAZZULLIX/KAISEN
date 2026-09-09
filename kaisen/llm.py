@@ -1695,6 +1695,15 @@ class ModelOrchestrator:
                 sid = self._pick_server(min_tier=min_tier, skill=skill,
                                         pipeline_key=pipeline_key)
                 if sid is not None:
+                    # Bind the server the moment it is picked: the live
+                    # modal, per-server pill stats, and active_counts all
+                    # key on session.server_id WHILE the stream runs.  The
+                    # old behavior bound it only in finish() — so a
+                    # generating session showed server_id=null, the modal
+                    # showed no server name / no live text, and the pill
+                    # fell back to stale last_tps ("random tps").
+                    if session is not None:
+                        session.server_id = sid
                     return sid
                 if cancel_event is not None and cancel_event.is_set():
                     raise GenerationCancelled("cancelled while waiting for a free LLM server")
@@ -1941,6 +1950,11 @@ class ModelOrchestrator:
                 "last_activity": self._status.get("last_activity"),
                 "active_ids": list(self._active_ids),
                 "servers": [self._servers[s].snapshot() for s in sorted(self._servers)],
+                # Who holds which endpoint slot (cap-fill allocator).  Every
+                # key is "engine_key|pipeline_id"; a held slot is occupied
+                # whether or not it is streaming right now.  Exposed so the
+                # pill/dashboard can show why a pipeline waits.
+                "pipeline_slots": dict(self._pipeline_slot),
             }
 
 

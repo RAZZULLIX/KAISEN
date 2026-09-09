@@ -2005,9 +2005,10 @@ class DashboardServer:
             by_server.setdefault(s.get("server_id") or "", []).append(s)
             sid = s.get("server_id") or ""
             active_tps[sid] = (active_tps.get(sid) or 0.0) + float(s.get("tps") or 0)
+        # LIVE tps only — no stale last_tps fallback.  The pill must show
+        # what is streaming RIGHT NOW; a pool with no active session shows
+        # 0 tps, not the speed of some request that finished minutes ago.
         agg = sum(active_tps.values())
-        if not agg:
-            agg = sum(r["tps"] for r in stat_sum.values())
         active_ids = set(llm.get("active_ids", []))
         rows = []
         for sv in llm.get("servers", []):
@@ -2060,7 +2061,11 @@ class DashboardServer:
                     "failures": ast["failures"],
                     "avg_seconds": st.get("avg_seconds"),
                     "last_error": st.get("last_error"),
-                    "tps": round(active_tps.get(sid) or ast["tps"] or 0, 1),
+                    # LIVE tps only: a server with no active session shows
+                    # 0.0, NOT its stale last_tps — the pill used to show
+                    # the speed of the last COMPLETED request, which looked
+                    # like a random number unrelated to anything live.
+                    "tps": round(active_tps.get(sid) or 0, 1),
                     "streaming": 0,
                     "budget": _server_budget_status(eng, sid),
                 })
@@ -2096,6 +2101,9 @@ class DashboardServer:
             "servers": rows,
             "model_id": None,
             "engines": self._engines_summary(),
+            # cap-fill allocator: who holds which endpoint slot (see
+            # ModelOrchestrator.status) — why a pipeline may wait.
+            "pipeline_slots": llm.get("pipeline_slots") or {},
         })
 
     async def _probe_server(self, sid: str, orch) -> None:
