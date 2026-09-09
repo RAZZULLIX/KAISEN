@@ -137,6 +137,35 @@ projects/<id>/
   state.json     — engine state (runtime)
 ```
 
+### Where a generation goes — the full per-generation log
+
+Every generation's complete record lives in `runs/gen_NNNNNN/`:
+
+| File | What it is |
+|---|---|
+| `prompt.txt` | the exact prompt sent to the LLM (goal + contract + champion code) |
+| `llm_raw.txt` | the model's RAW reply — reasoning/thinking included, un-truncated |
+| `candidate.<ext>` | the program actually extracted and pipelined (the final code) |
+| `diff.json` | diff of the candidate vs the champion/baseline |
+| `program` | the built artifact (after a successful build step) |
+| `repair.txt` | the compiler-error feedback sent to the LLM repair layer, if any |
+
+The **LIVE GENERATIONS** window streams these but scrolls/clears too fast to
+read a long reasoning trace. For a history that stays put, use **KAI:**
+
+```
+GEN 246                  # the full log of generation 246 (session project)
+GEN 246 CODE             # just the extracted program
+GEN 246 RAW              # just the raw LLM reply (thinking included)
+GEN 246 PROMPT           # just the prompt that was sent
+GEN 246 DIFF             # just the diff vs the champion
+GEN 246 ON fib-mod-rust  # explicit project
+```
+
+`GEN` reads the persistent archive (`runs/gen_NNNNNN/`), so it works for
+any finished generation regardless of how many have streamed since. Same
+data over HTTP: `GET /api/projects/<pid>/gen/<n>`.
+
 ### TEMP root — quick runs that leave no trace
 
 For one-off agent runs ("make this kernel faster, read BEST, move on"),
@@ -951,7 +980,9 @@ The GUI itself is an HTTP client; everything is available over
 - `GET /api/projects`, `POST /api/projects` (create, guardrail-scanned;
   `"temp": true` creates under `temp/`), `GET /api/projects/{pid}/spec`,
   `PUT` (update), `GET /api/projects/{pid}/best` (champion source + metrics,
-  works for temp projects too), `DELETE /api/projects/{pid}` (409 while its
+  works for temp projects too), `GET /api/projects/{pid}/gen/{n}` (the full
+  per-generation log — prompt + raw LLM reply + extracted program + diff),
+  `DELETE /api/projects/{pid}` (409 while its
   engine runs), `POST /api/projects/{pid}/smoke`
 - `POST /api/projects/suggest`, `POST /api/suggest/status` — the GOAL flow
 - `GET /api/active` — selected engine snapshot + `engines[]` pool

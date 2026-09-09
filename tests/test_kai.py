@@ -685,3 +685,45 @@ def test_budget_server_set_requires_sid_and_limit():
     s = _session({})
     with pytest.raises(KaiError, match="SET <sid>.*max_tokens"):
         s.cmd_budget("SERVER SET max_tokens 1M")
+
+
+# ----------------------------------------------------------------------
+# GEN — the full per-generation log (raw LLM + extracted program)
+# ----------------------------------------------------------------------
+
+def test_gen_returns_all_fields():
+    s = _session({("GET", "/api/projects/fib-mod-rust/gen/246"): {
+        "ok": True, "project_id": "fib-mod-rust", "generation": 246,
+        "language": "rust", "outcome": "valid", "fitness": 4.2,
+        "prompt": "Compute fib...", "llm_raw": "```rust\nfn main(){}\n```",
+        "candidate": "fn main(){}", "diff": "{...}"}})
+    s.project = "fib-mod-rust"
+    out = s.cmd_gen("246")
+    assert "OK fib-mod-rust gen 246" in out
+    assert "RAW LLM REPLY" in out and "EXTRACTED PROGRAM" in out and "DIFF" in out
+    assert "fn main(){}" in out
+
+
+def test_gen_field_selector():
+    s = _session({("GET", "/api/projects/fib-mod-rust/gen/246"): {
+        "ok": True, "project_id": "fib-mod-rust", "generation": 246,
+        "candidate": "fn main(){}", "llm_raw": "thinking...", "prompt": "P", "diff": "D"}})
+    s.project = "fib-mod-rust"
+    out = s.cmd_gen("246 CODE")
+    assert "EXTRACTED PROGRAM" in out and "RAW LLM REPLY" not in out
+
+
+def test_gen_requires_number():
+    s = _session({})
+    with pytest.raises(KaiError, match="GEN <n>"):
+        s.cmd_gen("")
+
+
+def test_gen_on_pid_overrides_session():
+    s = _session({("GET", "/api/projects/prime-counter/gen/42"): {
+        "ok": True, "project_id": "prime-counter", "generation": 42,
+        "candidate": "x"}})
+    s.project = "md5-speed"
+    out = s.cmd_gen("42 ON prime-counter")
+    assert "prime-counter" in out
+    assert s.client.calls[0][1].endswith("/prime-counter/gen/42")

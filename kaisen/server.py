@@ -338,6 +338,7 @@ class DashboardServer:
         r.add_get("/api/projects/{pid}/spec", self._api_project_spec)
         r.add_put("/api/projects/{pid}/spec", self._api_project_spec_update)
         r.add_get("/api/projects/{pid}/best", self._api_project_best)
+        r.add_get("/api/projects/{pid}/gen/{gen}", self._api_project_gen)
         r.add_post("/api/projects/{pid}/smoke", self._api_project_smoke)
         r.add_post("/api/projects/{pid}/score", self._api_project_score)
         r.add_post("/api/projects/{pid}/pipeline-suggest", self._api_project_pipeline_suggest)
@@ -903,6 +904,62 @@ class DashboardServer:
             "generation": generation,
             "metrics": metrics,
             "code": code[:40000],
+        })
+
+    async def _api_project_gen(self, request):
+        """The FULL per-generation log for one generation: the prompt sent
+        to the LLM, the RAW reply (reasoning included, un-truncated), the
+        extracted program, and the diff vs the champion/baseline.  The live
+        GENERATIONS window scrolls/clears too fast to read; this is the
+        persistent archive.  KAI `GEN <n> [ON <pid>]` reads it."""
+        pid = request.match_info["pid"]
+        try:
+            gen = int(request.match_info["gen"])
+        except (TypeError, ValueError):
+            return _json({"ok": False, "error": "generation must be an integer"}, 400)
+        try:
+            p = self._registry_for(pid)[0]
+        except KeyError:
+            return _json({"error": "project not found"}, 404)
+        from .languages import ext_from_lang
+        gen_dir = p.runs_dir / f"gen_{gen:06d}"
+        if not gen_dir.is_dir():
+            return _json({"ok": False, "error": f"no run dir for {pid} gen {gen}"}, 404)
+
+        def _read(name: str, limit: int) -> str:
+            f = gen_dir / name
+            if f.is_file():
+                try:
+                    return f.read_text(encoding="utf-8", errors="replace")[-limit:]
+                except Exception:
+                    return ""
+            return ""
+
+        # outcomes from the iteration history for this generation
+        outcome, detail, fitness = None, "", None
+        for h in (load_json(p.state_file, {}) or {}).get("history", []) or []:
+            try:
+                if int(h.get("generation", -1)) == gen:
+                    outcome = h.get("outcome")
+                    detail = (h.get("detail") or "")[:1000]
+                    fitness = h.get("fitness")
+                    break
+            except (TypeError, ValueError):
+                continue
+
+        return _json({
+            "ok": True,
+            "project_id": pid,
+            "generation": gen,
+            "language": p.spec.get("language", "c"),
+            "outcome": outcome,
+            "detail": detail,
+            "fitness": fitness,
+            "prompt": _read("prompt.txt", 12000),
+            "llm_raw": _read("llm_raw.txt", 80000),
+            "repair": _read("repair.txt", 12000),
+            "candidate": _read(f"candidate{ext_from_lang(p.spec.get('language', 'c'))}", 40000),
+            "diff": _read("diff.json", 4000),
         })
 
     async def _api_project_spec(self, request):

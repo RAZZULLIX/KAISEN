@@ -189,6 +189,14 @@ BARE command lines, never prefixed with OK. Commands (case-insensitive):
                              engine control — ON <pid> targets another pool
                              member without re-selecting it
   BEST                        champion source code
+  GEN <n> [ON <pid>] [RAW|CODE|PROMPT|DIFF]
+                             the FULL per-generation log: the prompt sent
+                             to the LLM, its RAW reply (reasoning included,
+                             un-truncated), the EXTRACTED program, and the
+                             diff vs the champion/baseline.  The live
+                             GENERATIONS window scrolls too fast — GEN reads
+                             the persistent archive (runs/gen_NNNN/). One
+                             field arg returns just that part.
   SMOKE [pid] | SMOKE ON <pid>
                              run pipeline once on the baseline
   BASELINE [lang]             stage starting code: lines until END
@@ -260,6 +268,7 @@ ALIASES: Dict[str, List[str]] = {
     "RESUME": ["RESUME", "UNPAUSE", "CONTINUE", "PLAY"],
     "STOP": ["STOP", "KILL", "OFF"],
     "BEST": ["BEST", "CHAMPION", "CHAMP", "WINNER"],
+    "GEN": ["GEN", "GENERATION", "SHOWGEN"],
     "SMOKE": ["SMOKE", "TEST", "CHECK"],
     "CANDIDATE": ["CANDIDATE", "SUBMIT", "INJECT", "CODE", "PATCH"],
     "SNAPSHOT": ["SNAPSHOT", "SNAP", "SAVE", "RESTORE", "ROLLBACK", "UNDO"],
@@ -935,6 +944,64 @@ class KaiSession:
                 f"PATH {res.get('source_path')}")
         return head + "\n" + (res.get("code") or "")
 
+    def cmd_gen(self, arg: str) -> str:
+        """GEN <n> [ON <pid>] — the FULL per-generation log: the prompt sent
+        to the LLM, its RAW reply (reasoning included, un-truncated), the
+        extracted program, and the diff vs the champion/baseline.  The live
+        GENERATIONS window scrolls/clears too fast to read; GEN reads the
+        persistent archive (runs/gen_NNNN/).  Defaults to the session
+        project.  `RAW`/`CODE`/`PROMPT`/`DIFF` select one field, else all."""
+        tokens = arg.split()
+        gen: Optional[int] = None
+        pid: Optional[str] = None
+        field = None
+        i = 0
+        while i < len(tokens):
+            w = tokens[i]
+            u = w.upper().rstrip(":,")
+            if w.isdigit() and gen is None:
+                gen = int(w)
+            elif u in ("ON", "PID", "PROJECT") and i + 1 < len(tokens):
+                pid = tokens[i + 1].lower()
+                i += 1
+            elif u in ("RAW", "LLM", "OUTPUT"):
+                field = "llm_raw"
+            elif u in ("CODE", "CANDIDATE", "PROGRAM", "EXTRACTED"):
+                field = "candidate"
+            elif u in ("PROMPT",):
+                field = "prompt"
+            elif u in ("DIFF",):
+                field = "diff"
+            i += 1
+        if gen is None:
+            raise KaiError("GEN <n> [ON <pid>] — the generation number to read")
+        pid = pid or self._need_project()
+        res = self.client.call("GET", f"/api/projects/{pid}/gen/{gen}", read_timeout=20.0)
+        if not res.get("ok"):
+            raise KaiError(res.get("error", f"gen {gen} unavailable"))
+        lines = [f"OK {pid} gen {gen} ({res.get('language')}): "
+                 f"{res.get('outcome') or '-'} fitness={res.get('fitness')}"]
+        if res.get("detail"):
+            lines.append(f"  detail: {res.get('detail')}")
+        if field in (None, "prompt"):
+            if res.get("prompt"):
+                lines.append(f"  PROMPT:\n{res['prompt']}")
+        if field in (None, "llm_raw"):
+            if res.get("llm_raw"):
+                lines.append(f"  RAW LLM REPLY:\n{res['llm_raw']}")
+        if field in (None, "candidate"):
+            if res.get("candidate"):
+                lines.append(f"  EXTRACTED PROGRAM:\n{res['candidate']}")
+        if field in (None, "diff"):
+            if res.get("diff"):
+                lines.append(f"  DIFF:\n{res['diff']}")
+        if res.get("repair"):
+            lines.append(f"  REPAIR:\n{res['repair']}")
+        # If no field produced output, tell the user why
+        if len(lines) == 1:
+            lines.append("  (no artifacts for this generation — it may not have reached the pipeline)")
+        return "\n".join(lines)
+
     def cmd_fuzzy(self, arg: str) -> str:
         """Opt-in prompt diversity (KAI FUZZY <n>): n = 0 keeps the champion
         as the prompt basis (default); n > 0 seeds each generation's prompt
@@ -1609,6 +1676,8 @@ class KaiSession:
                 return self.cmd_stop(rest)
             if cmd == "BEST":
                 return self.cmd_best(rest)
+            if cmd == "GEN":
+                return self.cmd_gen(rest)
             if cmd == "SMOKE":
                 return self.cmd_smoke(rest)
             if cmd == "CANDIDATE":

@@ -5,6 +5,23 @@ All notable changes to KAISEN are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [KAISEN 0.1.8-alpha (generation log)] — 2026-09-09
+
+The full per-generation log is readable on demand.
+
+### Added
+
+- **KAI `GEN <n> [ON <pid>] [RAW|CODE|PROMPT|DIFF]`** — the complete record
+  of a single generation: the prompt sent to the LLM, its RAW reply
+  (reasoning included, un-truncated — the LIVE GENERATIONS window scrolls
+  away too fast to read a long thinking trace), the extracted program, the
+  diff vs the champion/baseline, and any repair feedback. One field arg
+  (`GEN 246 CODE`) returns just that part. Backed by
+  `GET /api/projects/{pid}/gen/{n}`.
+- **MANUAL §5 "Where a generation goes"** — documents `runs/gen_NNNNNN/`
+  (`prompt.txt`, `llm_raw.txt`, `candidate.<ext>`, `diff.json`, `program`,
+  `repair.txt`) and the `GEN` command.
+
 ## [KAISEN 0.1.8-alpha (any-model extraction)] — 2026-09-09
 
 The code extractor now returns the FINAL answer for every language, not the
