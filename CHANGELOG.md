@@ -5,6 +5,27 @@ All notable changes to KAISEN are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [KAISEN 0.1.8-alpha (routing balance)] — 2026-09-09
+
+The model pool fills every slot instead of hammering the fastest box.
+
+### Fixed
+
+- **Routing no longer starves same-priority peers.** The latency guard
+  (`_slowness`, "prefer the box with a fast measured average") was a hard
+  sort key ahead of the round-robin cursor — so among equal tier/priority
+  servers, the fastest-measured one was ALWAYS picked first and the
+  round-robin never spread. Field symptom: three identical gpt-oss boxes
+  where one took ~128 requests while the others sat idle (~19 and ~1),
+  against a 7-slot pool that never filled (~0.13 req/s). That is the
+  opposite of the guard's intent. Now round-robin still spreads the load,
+  and a server is only *deprioritized* when it is a genuine wedge — its
+  measured average is both >= 3x the group's best AND >= 30 s. A modest
+  spread (106 s vs 157 s, same gpt-oss class) no longer overrides
+  rotation, so every server's slots get used. Verified live: gpt-oss-a/b/c
+  went from 19/128/111 lifetime requests (a starved) to an even 14/10/11
+  after restart, and a 1000x wedge (0.2 s vs 200 s) is still avoided.
+
 ## [KAISEN 0.1.8-alpha (candidate fallback + raw integrity)] — 2026-09-09
 
 Never lose a generation; never guess the delimiters.

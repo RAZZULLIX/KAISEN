@@ -1723,20 +1723,38 @@ class ModelOrchestrator:
             pos = {sid: i for i, sid in enumerate(candidates)}
             rot = lambda sid: (self._rr - pos[sid]) % n
 
-            # Measured responsiveness: among servers of the SAME priority,
-            # prefer the ones that actually ANSWER FAST.  A pathologically
-            # slow box (one llama.cpp wedge taking minutes for a call its
-            # peers finish in 0.2s) would otherwise be the round-robin
-            # victim and stall generations.  Only engaged once a server has
-            # a measured average seconds — with none measured yet, falls back
-            # to the default ordering (no assumption).
-            def _slowness(sid: str) -> float:
+            # Measured responsiveness: among servers of the SAME tier and
+            # priority, ROUND-ROBIN spreads the load so every server's slots
+            # get used (the whole pool is the throughput ceiling).  A box is
+            # only DEPRIORITIZED when it is a genuine wedge — its measured
+            # average is dramatically worse than the group's fast servers
+            # (the original bug: one llama.cpp wedge taking minutes for a
+            # call its peers finish in 0.2s).  A modest spread (106s vs
+            # 157s, same gpt-oss class) must NOT override rotation, or the
+            # fastest box saturates and the others' slots sit idle — the
+            # field symptom of only ~0.1 req/s against a 7-slot pool.
+            def _wedge(sid: str) -> float:
                 st = (self._servers[sid]._stats or {})
                 reqs = int(st.get("requests") or 0)
                 total = float(st.get("total_seconds") or 0.0)
                 if reqs < 3 or total <= 0:
-                    return 0.0
+                    return 0.0  # unmeasured = no assumption
                 return total / reqs
+
+            # Wedge threshold: a server is pathological only if it is BOTH
+            # much slower than the group's best (>=3x) and absolutely slow
+            # (>=30s avg, so a genuinely-fast cluster is never penalized).
+            _MIN = float("inf")
+            for sid in candidates:
+                a = _wedge(sid)
+                if a > 0:
+                    _MIN = min(_MIN, a)
+
+            def _wedge_penalty(sid: str) -> int:
+                a = _wedge(sid)
+                if a <= 0:
+                    return 0
+                return 1 if (_MIN > 0 and a >= 3 * _MIN and a >= 30.0) else 0
 
             if adaptive and skill:
                 # best measured quality-per-dollar for this skill first
@@ -1748,9 +1766,9 @@ class ModelOrchestrator:
                         max(self._skill_cost(sid), 0.0001),
                         TIER_RANK.get(self._servers[sid].tier, 1),
                         -int(getattr(self._servers[sid], "priority", 1) or 1),
-                        _slowness(sid),          # fast box first (0 = unmeasured)
+                        _wedge_penalty(sid),   # only a genuine wedge falls back
                         self._servers[sid]._inflight,
-                        rot(sid),
+                        rot(sid),              # otherwise spread across equals
                     ),
                 )
             else:
@@ -1759,9 +1777,9 @@ class ModelOrchestrator:
                     key=lambda sid: (
                         TIER_RANK.get(self._servers[sid].tier, 1),
                         -int(getattr(self._servers[sid], "priority", 1) or 1),
-                        _slowness(sid),          # fast box first (0 = unmeasured)
+                        _wedge_penalty(sid),   # only a genuine wedge falls back
                         self._servers[sid]._inflight,
-                        rot(sid),
+                        rot(sid),              # otherwise spread across equals
                     ),
                 )
             for sid in ordered:
