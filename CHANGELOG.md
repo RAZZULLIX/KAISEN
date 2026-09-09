@@ -25,6 +25,14 @@ The model pool fills every slot instead of hammering the fastest box.
   rotation, so every server's slots get used. Verified live: gpt-oss-a/b/c
   went from 19/128/111 lifetime requests (a starved) to an even 14/10/11
   after restart, and a 1000x wedge (0.2 s vs 200 s) is still avoided.
+- **Every usable endpoint gets used up to the concurrency level.** qwen
+  (a healthy 1-slot llama endpoint) had `priority: 1` vs gpt-oss's 2, so
+  it was a silent last-resort fallback — it sat at ~1 lifetime request
+  while gpt-oss took everything. Raised qwen to `priority: 2` (first-class
+  participant, same tier). Now with N concurrent generations the pool
+  spreads across all N available endpoints: verified live the 4 endpoints
+  went 5/6/7/2 (qwen getting its share when free, gpt-oss absorbing the
+  overflow when qwen's single slot is busy).
 
 ## [KAISEN 0.1.8-alpha (candidate fallback + raw integrity)] — 2026-09-09
 
