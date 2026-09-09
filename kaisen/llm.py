@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import queue
+import re
 import random
 import threading
 import time
@@ -217,10 +218,14 @@ def strip_reasoning(text: str) -> str:
 
     No marker (ordinary models, or a reply that never reached the final
     channel — e.g. truncated mid-thought) => returned unchanged; callers
-    then see raw thinking and fail downstream as before."""
+    then see raw thinking and fail downstream as before.  The turn-closing
+    `<|end|>` token is dropped too: gpt-oss emits it after the answer, and
+    marker-scanning consumers (e.g. DeepworkAgent's CoT cut) would
+    otherwise truncate a clean reply to nothing."""
     if not text or GPTOSS_FINAL_MARKER not in text:
         return text
-    return text.rsplit(GPTOSS_FINAL_MARKER, 1)[1]
+    seg = text.rsplit(GPTOSS_FINAL_MARKER, 1)[1]
+    return re.sub(r"\s*(<\|end\|>)\s*$", "", seg)
 
 # --------------------------------------------------------------------------- #
 # Process-wide server health

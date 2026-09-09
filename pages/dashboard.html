@@ -573,7 +573,7 @@
       <label>API key (openai — stored in secrets.json, 0600 + gitignored; env KAISEN_SERVER_&lt;ID&gt;_API_KEY overrides)</label><input id="as-apikey" type="password">
       <label>Max concurrent</label><input id="as-conc" type="number" value="1">
       <label>Timeout (s)</label><input id="as-timeout" type="number" value="1200">
-      <label>Params (JSON, llama)</label><input id="as-params" value='{"temperature": 0.7}'>
+      <label>Params (JSON, llama)</label><input id="as-params" placeholder='{"temperature": 0.6, "reasoning_effort": "high"} — blank = server/model defaults' style="font-family: monospace;">
       <div class="modal-actions">
         <button class="btn" onclick="closeModal('add-server-modal')">Cancel</button>
         <button class="btn btn-primary" onclick="addServer()">Add</button>

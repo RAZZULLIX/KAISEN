@@ -93,12 +93,14 @@ queue counter can run ahead of the workers).
 Agent-writer notes: for local llama.cpp servers the raw `/completion`
 endpoint applies no server-side chat template — but KAISEN opens gpt-oss
 prompts in the model's native channel format itself (and strips the
-reasoning channel from the captured reply), so command turns stay cheap
-and direct; every other model keeps plain raw prompts. On reasoning
+reasoning channel from the captured reply); every other model keeps plain
+raw prompts. gpt-oss thinks before it answers even on KAI turns — set
+`params.reasoning_effort: "low"` on that server for snappy command turns
+(`medium`/`high` buy deliberation at a latency cost). On reasoning
 OpenAI-compatible models, prefer `reasoning_effort: "none"` (or
 `chat_template_kwargs: {"enable_thinking": false}` on llama.cpp chat
-endpoints) for KAI tool-call turns, and never prefix model output with
-`OK` — the server does that.
+endpoints) for KAI tool-call turns. Never prefix model output with `OK` —
+the server does that.
 
 Full protocol reference: [`docs/KAI.md`](docs/KAI.md) — command table,
 grammar, session semantics, and the reliability contract.

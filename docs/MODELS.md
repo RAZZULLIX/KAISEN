@@ -28,15 +28,17 @@ For raw `/completion` servers, set `chat_template` on the server entry:
 `gptoss`, `chatml`, `qwen`, `llama3`, `llama2`, `gemma`, `mistral`,
 `deepseek`, `none`.
 
-- `auto` guesses from the model name and falls back to **ChatML** for unknown
-  names (the most common open format).  Existing gpt-oss-20b setups keep the
-  legacy `<|start|>role<|message|>…` format unchanged.
+- `auto` is resolved from the model name at server init and falls back to
+  **ChatML** for unknown names (the most common open format). For gpt-oss,
+  raw `/completion` prompts are opened in the native `<|start|>…<|end|>`
+  channel format by KAISEN itself — a bare prompt degrades gpt-oss into
+  erratic continuations.
 
 ## Field-tested models
 
 | Family | Example models | Template | Notes |
 |---|---|---|---|
-| GPT-OSS | gpt-oss-20b | `gptoss` | The original target.  Raw `/completion` works with the legacy format. |
+| GPT-OSS | gpt-oss-20b | `gptoss` | The original target. Hybrid-reasoning model: it thinks in an analysis channel before answering. KAISEN frames raw prompts natively and strips the reasoning channel from the captured answer (thinking stays visible live in the GUI). Tune deliberation with `params.reasoning_effort`: `low` / `medium` / `high`. Note: thinking tokens share the output budget with the answer — leave `n_predict` / `llm.max_tokens` headroom at high effort. |
 | Qwen | Qwen2.5-Coder-7B/14B/32B, Qwen3 | `chatml` (alias `qwen`) | ChatML variant; strong coding models. |
 | Gemma | gemma-2, gemma-3 | `gemma` | `<start_of_turn>` turns; system folded into first user turn. |
 | Llama 3 | Llama 3/3.1/3.2 | `llama3` | `<|start_header_id|>` headers, BOS once. |

@@ -5,6 +5,30 @@ All notable changes to KAISEN are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [KAISEN 0.1.8-alpha (follow-up)] — 2026-09-09
+
+Second-pass fixes from the review of the gpt-oss work.
+
+### Fixed
+
+- **Add-server modal no longer pre-fills `{"temperature": 0.7}`** — the
+  Params field is now blank by default (blank = server/model defaults),
+  with an example in the placeholder. This was the actual source of the
+  "base temperature 0.7" impression from the user discussion.
+- **Trailing `<|end|>` token dropped from captured gpt-oss replies.**
+  The model closes its turn with `<|end|>` after the final answer; left in
+  place, marker-scanning consumers (DeepworkAgent's CoT cut) truncated a
+  clean reply to nothing. `strip_reasoning` now removes it — captured
+  answers contain no `<token>` markup at all (verified live).
+
+### Changed
+
+- `docs/MODELS.md`: GPT-OSS row now documents hybrid reasoning, native
+  framing, channel stripping, and the `reasoning_effort` knob; the `auto`
+  bullet reflects init-time resolution.
+- README KAI notes: gpt-oss thinks on KAI turns too — set
+  `reasoning_effort: "low"` for snappy command turns.
+
 ## [KAISEN 0.1.8-alpha] — 2026-09-09
 
 gpt-oss reasons where it should, and the inference knobs are yours.

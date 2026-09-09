@@ -61,6 +61,16 @@ def test_strip_removes_analysis_prefix():
     assert L.strip_reasoning(text) == "the answer"
 
 
+def test_strip_drops_trailing_end_token():
+    """gpt-oss closes its turn with <|end|>; marker-scanning consumers
+    (DeepworkAgent's CoT cut) must never see a stray <token> in the
+    captured reply or they truncate it to nothing."""
+    text = f"<|channel|>analysis<|message|>thinking{MARKER}int main(){{return 0;}}\n<|end|>"
+    out = L.strip_reasoning(text)
+    assert out == "int main(){return 0;}"
+    assert "<|" not in out
+
+
 def test_strip_keeps_last_marker_when_repeated():
     text = f"junk{MARKER}first{MARKER}second"
     assert L.strip_reasoning(text) == "second"
