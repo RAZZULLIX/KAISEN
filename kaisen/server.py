@@ -2018,57 +2018,37 @@ class DashboardServer:
                                      "banned": False, "online": None, "tps": 0.0})
             name = (sv.get("label") or "").strip() or sv.get("url") or sid
             chats = by_server.get(sid, [])
-            if chats:
-                for s in chats:
-                    rows.append({
-                        "id": sid,
-                        "chat_slot": s.get("slot"),
-                        "label": sv.get("label") or "",
-                        "display": name + (f" {s.get('slot')}" if len(chats) > 1 else ""),
-                        "type": sv.get("type"),
-                        "model": sv.get("model"),
-                        "enabled": sv.get("enabled", True),
-                        "active": sid in active_ids,
-                        "busy": ast["busy"],
-                        "inflight": len(chats),
-                        "max_concurrent": sv.get("max_concurrent", 1),
-                        "banned": ast["banned"],
-                        "online": ast["online"],
-                        "requests": ast["requests"],
-                        "failures": ast["failures"],
-                        "avg_seconds": st.get("avg_seconds"),
-                        "last_error": st.get("last_error"),
-                        "tps": round(s.get("tps") or 0, 1),
-                        "streaming": 1 if (s.get("tps") or 0) > 0 else 0,
-                        "budget": _server_budget_status(eng, sid),
-                    })
-            else:
-                rows.append({
-                    "id": sid,
-                    "chat_slot": None,
-                    "label": sv.get("label") or "",
-                    "display": name,
-                    "type": sv.get("type"),
-                    "model": sv.get("model"),
-                    "enabled": sv.get("enabled", True),
-                    "active": sid in active_ids,
-                    "busy": ast["busy"],
-                    "inflight": 0,
-                    "max_concurrent": sv.get("max_concurrent", 1),
-                    "banned": ast["banned"],
-                    "online": ast["online"],
-                    "requests": ast["requests"],
-                    "failures": ast["failures"],
-                    "avg_seconds": st.get("avg_seconds"),
-                    "last_error": st.get("last_error"),
-                    # LIVE tps only: a server with no active session shows
-                    # 0.0, NOT its stale last_tps — the pill used to show
-                    # the speed of the last COMPLETED request, which looked
-                    # like a random number unrelated to anything live.
-                    "tps": round(active_tps.get(sid) or 0, 1),
-                    "streaming": 0,
-                    "budget": _server_budget_status(eng, sid),
-                })
+            # ONE ROW PER SERVER — never one per session.  A server with
+            # two concurrent chats used to render as two identical pill
+            # rows ("doubles"); the live modal already numbers each chat's
+            # slot, the pill must aggregate.
+            live_tps = sum(float(c.get("tps") or 0) for c in chats)
+            rows.append({
+                "id": sid,
+                "chat_slot": None,
+                "label": sv.get("label") or "",
+                "display": name,
+                "type": sv.get("type"),
+                "model": sv.get("model"),
+                "enabled": sv.get("enabled", True),
+                "active": sid in active_ids,
+                "busy": ast["busy"],
+                "inflight": len(chats),
+                "max_concurrent": sv.get("max_concurrent", 1),
+                "banned": ast["banned"],
+                "online": ast["online"],
+                "requests": ast["requests"],
+                "failures": ast["failures"],
+                "avg_seconds": st.get("avg_seconds"),
+                "last_error": st.get("last_error"),
+                # LIVE tps only: a server with no active session shows
+                # 0.0, NOT its stale last_tps — the pill used to show
+                # the speed of the last COMPLETED request, which looked
+                # like a random number unrelated to anything live.
+                "tps": round(live_tps, 1),
+                "streaming": 1 if live_tps > 0 else 0,
+                "budget": _server_budget_status(eng, sid),
+            })
 
         # Reachability is probed ONCE per activation: servers with unknown
         # state get a single background probe; the next poll reflects it.
