@@ -289,3 +289,20 @@ def test_apply_result_records_build_fail_when_no_candidates(tmp_path):
               "build_fixes": [], "metrics": {}}
     eng._apply_result(gen, job, result)
     assert any("build_fail" == h.get("outcome") for h in eng.state.history)
+
+
+def test_build_fail_records_autofix_turn_count(tmp_path):
+    """A generation that ran the deterministic fixer but STILL failed must
+    record how many autofix turns it burned — otherwise the sweep reads it
+    as a plain compile error and can't tell autofix worked at all."""
+    eng = _make_engine(tmp_path)
+    gen = 14
+    gen_dir = eng._make_gen_dir(gen)
+    eng._candidate_queue[gen] = []
+    job = {"gen_dir": str(gen_dir), "generation": gen, "baseline": False}
+    result = {"ok": False, "outcome": "build_fail", "reason": "compile error",
+              "build_fixes": ["did you mean 'x'?", "missing include"], "metrics": {}}
+    eng._apply_result(gen, job, result)
+    entry = next(h for h in eng.state.history if h.get("generation") == gen)
+    assert "AUTOFIX[2 turn(s)" in entry["detail"]
+    assert "did you mean" in entry["detail"]

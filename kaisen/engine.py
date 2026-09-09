@@ -1185,6 +1185,15 @@ class ProjectEngine:
                     and self._try_next_candidate(gen, job)):
                 return
             entry = {"generation": gen, "outcome": outcome, "detail": result.get("reason", "")[:800]}
+            # Autofix observability: a generation that ran the deterministic
+            # fixer but still failed must record HOW MANY turns it burned,
+            # or the failure looks like a plain compile error and the sweep
+            # can't tell "autofix worked and helped elsewhere" from "autofix
+            # ground away and lost".  The fixes list is only surfaced on the
+            # success path otherwise.
+            fixes = result.get("build_fixes") or []
+            if fixes and outcome == "build_fail":
+                entry["detail"] = f"AUTOFIX[{len(fixes)} turn(s): {', '.join(str(x) for x in fixes)[:160]}] {entry['detail']}"
             if baseline and not self.state.best.get("fitness"):
                 entry["detail"] = "BASELINE FAILED: " + entry["detail"]
             elif reeval:
