@@ -317,6 +317,41 @@ def test_concurrency_capped_at_detected_slots(tmp_cfg):
     assert s._capacity == 3
 
 
+def test_set_active_learns_slot_capacity(tmp_cfg, monkeypatch):
+    """A 1-slot server configured max_concurrent=2 must be capped to its REAL
+    slot count when activated — otherwise 2 concurrent requests queue behind
+    one slot (the 'prefill forever / looks dead' symptom).  set_active now
+    triggers eager slot learning, and _capacity respects the detected count."""
+    s, _ = _gptoss(tmp_cfg)
+    s.max_concurrent = 2
+    s._detected_slots = None
+    # simulate /slots reporting ONE physical slot
+    monkeypatch.setattr(s, "_learn_slots",
+                        lambda slots=None: setattr(s, "_detected_slots", 1))
+    s._learn_slots()
+    assert s._detected_slots == 1
+    assert s._capacity == 1               # capped from 2 -> 1
+
+
+def test_learn_server_caps_invoked_on_activate(tmp_cfg):
+    """set_active must trigger the eager capability learn (background) — the
+    guardrail that keeps the concurrency cap correct from the first call."""
+    s, _ = _gptoss(tmp_cfg)
+    s.max_concurrent = 2
+    orch = L.ModelOrchestrator(tmp_cfg)
+    orch._servers["q"] = s
+    called = []
+    orch._learn_server_caps = lambda sid: called.append(sid)
+    orch.set_active(["q"], persist=False)
+    # background thread fires; poll briefly
+    import time
+    for _ in range(20):
+        if called:
+            break
+        time.sleep(0.05)
+    assert called == ["q"]
+
+
 def test_cap_predict_no_cap_by_default(tmp_cfg):
     """The framework must NOT clamp generation output by default — a
     thinking model legitimately emits thousands of reasoning tokens before

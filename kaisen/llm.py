@@ -1405,6 +1405,11 @@ class ModelOrchestrator:
             if spec.get("enabled", True):
                 if sid not in self._active_ids:
                     self._active_ids.append(sid)
+            # Learn real capabilities (slot count, reasoning_format) so the
+            # concurrency cap is correct from the first call.  Background —
+            # a slow endpoint must not block server add.
+            threading.Thread(target=self._learn_server_caps, args=(sid,),
+                             daemon=True).start()
         self.persist()
         return self._servers[sid].snapshot()
 
@@ -1413,6 +1418,24 @@ class ModelOrchestrator:
             self._servers.pop(sid, None)
             self._active_ids = [i for i in self._active_ids if i != sid]
         self.persist()
+
+    def _learn_server_caps(self, sid: str) -> None:
+        """Eagerly (background) learn a server's REAL capabilities — the
+        llama.cpp slot count and reasoning_format — so the concurrency cap
+        and reasoning handling are correct from the FIRST call.  A 1-slot
+        server configured with max_concurrent=2 would otherwise accept 2
+        concurrent requests and queue the 2nd invisibly behind the 1st (the
+        'prefill forever / looks dead' symptom), until a health check
+        happened to run.  Free: GET /slots + /props, no tokens."""
+        s = self._servers.get(sid)
+        if s is None:
+            return
+        try:
+            s._learn_slots()
+            s._learn_caps()
+        except Exception:
+            pass
+
     def set_active(self, ids: List[str], persist: bool = True) -> None:
         with self._lock:
             new_ids = [i for i in ids if i in self._servers]
@@ -1422,6 +1445,12 @@ class ModelOrchestrator:
                     # probes exactly once.
                     self._servers[i].mark_online(None)
             self._active_ids = new_ids
+            # Eagerly learn capabilities for the newly-activated servers so
+            # the concurrency cap engages immediately (see _learn_server_caps).
+            for i in new_ids:
+                if not self._servers[i]._detected_slots:
+                    threading.Thread(target=self._learn_server_caps, args=(i,),
+                                     daemon=True).start()
         if persist:
             self.persist()
 
