@@ -148,19 +148,34 @@ def extract_code(text: str, language: str = "c") -> Optional[str]:
                 starts.append(m.start())
         if starts:
             return scope[min(starts):].strip().replace("`", "")
-    # 2. Fenced blocks — any tag, but the language's own tag wins.
-    blocks = re.findall(r"```([\w.+-]*)\s*\n?(.*?)```", text, re.DOTALL)
+    # 2. Fenced blocks — the ORIGINAL KAISEN semantics, generalized:
+    #    the final answer is the LAST ``` block that contains real code
+    #    (a starter like `#include` / `int main` / `fn` / `def`); scratch
+    #    snippets a reasoning model writes while thinking usually lack the
+    #    include/entry point and are skipped.  Among candidate blocks we
+    #    prefer the LAST one by position — "largest AND last [working
+    #    codeblock]" — and only fall back to the largest when the last
+    #    real-code block is trivially short (an aborted turn).
+    blocks = list(re.finditer(r"```([\w.+-]*)\s*\n?(.*?)```", text, re.DOTALL))
     if blocks:
-        tagged = [(tag.strip().lower(), b.strip()) for tag, b in blocks if b.strip()]
-        pref = [b for t, b in tagged if t == fence or t == lang]
+        tagged = [(m.group(1).strip().lower(), m.group(2).strip(), m.start())
+                  for m in blocks if m.group(2).strip()]
+        # candidate = language-tagged, else any block containing a starter
+        pref = [(p, b) for t, b, p in tagged
+                if (t == fence or t == lang) or
+                   (starters and any(re.search(s, b, re.M) for s in starters))]
+        if not pref:
+            pref = [(p, b) for _t, b, p in tagged]
         if pref:
-            return max(pref, key=len)
-        if starters:
-            hits = [b for _t, b in tagged if any(re.search(p, b, re.M) for p in starters)]
-            if hits:
-                return max(hits, key=len)
-        if tagged:
-            return max((b for _t, b in tagged), key=len)
+            # The LAST block is the final answer (reasoning models emit
+            # scratch snippets first).  Only a genuinely trivial trailing
+            # fragment (e.g. "abc", "}" — an aborted turn) falls back to the
+            # largest block; a real-but-short program like `print('hello')`
+            # must STILL win by position.
+            last = pref[-1][1]
+            if len(last) >= 8:
+                return last
+            return max((b for _p, b in pref), key=len)
     # 3. Bare scan on the language's starters.
     for pat in starters:
         m = re.search(pat, text, re.M)

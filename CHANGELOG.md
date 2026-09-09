@@ -5,6 +5,32 @@ All notable changes to KAISEN are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [KAISEN 0.1.8-alpha (any-model extraction)] — 2026-09-09
+
+The code extractor now returns the FINAL answer for every language, not the
+largest fenced snippet.
+
+### Fixed
+
+- **`extract_code` picks the last real code block, language-agnostic.** The
+  old logic returned `max(..., key=len)` — the LARGEST fenced block. But
+  reasoning models (Qwen, DeepSeek, gpt-oss) write many ```` ``` ````
+  scratch snippets while thinking, then the actual program LAST; when a
+  scratch snippet happened to be longer, it won and the real program was
+  discarded. Now the LAST block that contains real code wins by position
+  ("largest AND last working codeblock", matching the original hand-made
+  KAISEN), with a fallback to the largest only when the trailing block is a
+  genuinely trivial fragment (an aborted turn). Works for all 23 languages
+  via their starter patterns (`#include`/`int main`/`fn main`/`def`/…).
+  Regression tests in `tests/test_extract_code.py`. Verified live: a
+  DeepSeek reply (```python fenced, thinking about it, then the program)
+  extracts exactly `for i in range(1, 6): print(i)` with no reasoning leak.
+- **`BUDGET` command truly routes to BUDGET.** `"budget"` was an alias of
+  both `BUDGET` and `ESTIMATE`; the dict-order collision made `BUDGET`
+  silently run `ESTIMATE`. The alias index is now first-wins so a real
+  command name is never shadowed by a synonym. `BUDGET SERVER <sid>` status
+  and `…SET max_tokens N reset R` now work.
+
 ## [KAISEN 0.1.8-alpha (budget + polish)] — 2026-09-09
 
 Per-model usage budgets + a sticky topbar.
