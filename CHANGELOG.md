@@ -5,6 +5,37 @@ All notable changes to KAISEN are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [KAISEN 0.1.8-alpha (multi-model)] — 2026-09-09
+
+Every instruct model works on a raw `/completion` server — not just gpt-oss.
+
+### Added
+
+- **Native framing for every instruct model.** KAISEN now opens each raw
+  `/completion` prompt in THAT server's resolved `chat_template` (gptoss,
+  qwen/chatml, llama3, gemma, mistral, deepseek, …) — previously only
+  gpt-oss got native framing. A bare prompt degrades instruct models:
+  gpt-oss emits erratic continuations, Qwen3 emits **nothing** (2
+  whitespace tokens on a raw code-gen prompt — verified live). Roll-your-own
+  multi-turn loops (deepwork, project agent) pass `templated=True` so their
+  own continuation format is preserved; `chat_template: "none"` keeps
+  historical raw behavior.
+- **Qwen3/DeepSeek-R1 think-block stripped.** `strip_reasoning` now also
+  drops the `<think>...</think>` reasoning block (not just gpt-oss's
+  `<|channel|>final` marker). An unclosed `<think>` (budget exhausted
+  mid-thought) yields nothing usable → `""`. Qwen3 via KAISEN now returns
+  clean code with no reasoning in the captured reply (verified live).
+- **KAI `LOGS` command** — `LOGS [pid] [lines <n>] [grep <text>]` returns
+  recent engine log lines, backed by `GET /api/engine/logs` (reads the
+  engine's in-memory `_last_log` deque, filters by lines/grep). HELP +
+  aliases (`LOG`/`TAIL`).
+
+### Changed
+
+- `docs/MODELS.md` / README: the "other models keep raw prompts" claim is
+  gone — every instruct model is framed natively; `chat_template: "none"`
+  opts out.
+
 ## [KAISEN 0.1.8-alpha (follow-up)] — 2026-09-09
 
 Second-pass fixes from the review of the gpt-oss work.

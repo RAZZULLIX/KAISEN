@@ -356,6 +356,7 @@ class DashboardServer:
         r.add_get("/api/llm/modelstats", self._api_modelstats)
         r.add_get("/api/llm/live", self._api_llm_live_legacy)
         r.add_get("/api/debug/logs", self._api_debug_logs_legacy)
+        r.add_get("/api/engine/logs", self._api_engine_logs)
         r.add_get("/api/iterations", self._api_iterations_legacy)
         r.add_post("/api/workers/{wid}/kill", self._api_worker_kill_legacy)
         r.add_post("/api/workers/{wid}/kill-process", self._api_worker_kill_process_legacy)
@@ -1165,9 +1166,11 @@ class DashboardServer:
             self._agent_state["tokens"] = (self._agent_state.get("tokens", "") + token)[-6000:]
 
         def req(prompt: str) -> str:
+            # templated=True: the project agent is a multi-turn roll-your-own
+            # loop; the server must not re-frame each turn in the chat template.
             text, sid = orch.request_stream(prompt, on_token=sink,
                                             cancel_event=self._agent_cancel,
-                                            skill="agent")
+                                            skill="agent", templated=True)
             self._agent_state["_sid"] = sid
             return text
 
@@ -1484,6 +1487,26 @@ class DashboardServer:
             return _json({"ok": False, "error": "top_n must be a number"}, 400)
         n = eng.set_fuzzy(n)
         return _json({"ok": True, "project_id": eng.project.id, "top_n": n})
+
+    async def _api_engine_logs(self, request):
+        """Engine log lines from the in-memory _last_log deque. Query:
+        project_id (defaults to the selected engine), lines (default 100,
+        max 1000), grep (case-insensitive substring filter). Returns a
+        list of lines with the engine's own timestamp prefix."""
+        pid = request.query.get("project_id") or ""
+        eng = self._engine_for(pid) if pid else self.engine
+        if eng is None:
+            return _json({"ok": False, "error": "no engine running"}, 400)
+        try:
+            lines = int(request.query.get("lines", "100") or "100")
+        except (TypeError, ValueError):
+            lines = 100
+        lines = max(1, min(lines, 1000))
+        grep = (request.query.get("grep") or "").strip().lower()
+        logs = eng._last_log[-lines:]
+        if grep:
+            logs = [l for l in logs if grep in l.lower()]
+        return _json({"ok": True, "project_id": eng.project.id, "lines": logs})
 
     async def _api_engine_stop(self, request):
         data = await request.json() if request.can_read_body else {}

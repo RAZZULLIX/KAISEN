@@ -29,10 +29,12 @@ For raw `/completion` servers, set `chat_template` on the server entry:
 `deepseek`, `none`.
 
 - `auto` is resolved from the model name at server init and falls back to
-  **ChatML** for unknown names (the most common open format). For gpt-oss,
-  raw `/completion` prompts are opened in the native `<|start|>…<|end|>`
-  channel format by KAISEN itself — a bare prompt degrades gpt-oss into
-  erratic continuations.
+  **ChatML** for unknown names (the most common open format). KAISEN frames
+  every raw `/completion` prompt in that resolved native format — a bare
+  prompt makes instruct models degrade (gpt-oss emits erratic continuations,
+  Qwen3 emits nothing at all). Set `chat_template: "none"` to send prompts
+  exactly as-given, and `templated=True` (internal) for roll-your-own
+  multi-turn loops that already build their own continuation text.
 
 ## Field-tested models
 

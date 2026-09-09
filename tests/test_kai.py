@@ -541,3 +541,49 @@ def test_factory_posts_files_inside_spec(monkeypatch):
     assert "files" not in posted, \
         "top-level files key is silently dropped by the server"
     assert posted["spec"].get("files") == row["files"]
+
+
+# ----------------------------------------------------------------------
+# LOGS — the engine-log tail command
+# ----------------------------------------------------------------------
+
+def test_logs_default_path_and_lines():
+    """LOGS with no args hits /api/engine/logs (no query) and returns the
+    engine's lines with a count header."""
+    s = _session({("GET", "/api/engine/logs"): {"ok": True, "project_id": "md5-speed",
+                                                "lines": ["[..] gen 3: ok", "[..] gen 4: valid"]}})
+    out = s.cmd_logs("")
+    assert out.startswith("OK 2 line(s)"), out
+    assert "gen 4" in out
+
+
+def test_logs_parses_pid_lines_grep():
+    """LOGS pid lines N grep STR builds the right query string."""
+    s = _session({("GET", "/api/engine/logs"): {"ok": True, "project_id": "fib-mod-rust",
+                                                "lines": ["[..] LLM repair applied"]}})
+    out = s.cmd_logs("fib-mod-rust lines 300 grep repair")
+    # path carries project_id, lines and grep, URL-encoded
+    path = s.client.calls[0][1]
+    assert "project_id=fib-mod-rust" in path
+    assert "lines=300" in path
+    assert "grep=repair" in path
+    assert "LLM repair applied" in out
+
+
+def test_logs_bare_word_is_project_id():
+    s = _session({("GET", "/api/engine/logs"): {"ok": True, "project_id": "prime-counter",
+                                                "lines": ["[..] done"]}})
+    s.cmd_logs("prime-counter")
+    assert "project_id=prime-counter" in s.client.calls[0][1]
+
+
+def test_logs_empty_reply():
+    s = _session({("GET", "/api/engine/logs"): {"ok": True, "lines": []}})
+    out = s.cmd_logs("")
+    assert "no log lines" in out
+
+
+def test_logs_error_propagates():
+    s = _session({("GET", "/api/engine/logs"): {"ok": False, "error": "no engine running"}})
+    with pytest.raises(KaiError, match="no engine running"):
+        s.cmd_logs("")

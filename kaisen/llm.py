@@ -216,16 +216,32 @@ GPTOSS_FINAL_MARKER = "<|channel|>final<|message|>"
 def strip_reasoning(text: str) -> str:
     """Drop the reasoning channel from a hybrid-reasoning model's reply.
 
-    No marker (ordinary models, or a reply that never reached the final
-    channel — e.g. truncated mid-thought) => returned unchanged; callers
-    then see raw thinking and fail downstream as before.  The turn-closing
-    `<|end|>` token is dropped too: gpt-oss emits it after the answer, and
-    marker-scanning consumers (e.g. DeepworkAgent's CoT cut) would
-    otherwise truncate a clean reply to nothing."""
-    if not text or GPTOSS_FINAL_MARKER not in text:
+    Handles two marker families (a reply carries either, not both):
+      * gpt-oss `<|channel|>final<|message|>` — everything up to the LAST
+        final-channel marker is thinking.
+      * Qwen3 / DeepSeek-R1 `<think>...</think>` — the thinking block is
+        dropped, leaving the answer.  An unclosed `<think>` (the model ran
+        out of budget mid-thought) leaves nothing usable -> "".
+    A reply with no reasoning marker (ordinary models) is returned
+    unchanged.  The turn-closing `<|end|>` token is dropped too, so
+    marker-scanning consumers (e.g. DeepworkAgent's CoT cut) never see a
+    stray token."""
+    if not text:
         return text
-    seg = text.rsplit(GPTOSS_FINAL_MARKER, 1)[1]
-    return re.sub(r"\s*(<\|end\|>)\s*$", "", seg)
+    if GPTOSS_FINAL_MARKER in text:
+        seg = text.rsplit(GPTOSS_FINAL_MARKER, 1)[1]
+        stripped = True
+    elif "</think>" in text:
+        seg = text.split("</think>", 1)[1]
+        stripped = True
+    elif "<think>" in text:
+        # thinking opened but never closed — the whole reply is reasoning.
+        return ""
+    else:
+        seg = text
+        stripped = False
+    seg = re.sub(r"\s*(<\|end\|>)\s*$", "", seg)
+    return seg.lstrip() if stripped else seg
 
 # --------------------------------------------------------------------------- #
 # Process-wide server health
@@ -654,15 +670,20 @@ class Server:
             headers["Authorization"] = f"Bearer {self.api_key}"
         return headers
 
-    def _maybe_wrap_gptoss(self, prompt: str) -> str:
-        """Open a raw prompt in gpt-oss's NATIVE chat format.  gpt-oss is
-        trained on its own channel markup; a bare prompt degrades it into
-        erratic continuations (verified in the field), while the native
-        framing makes it behave — including entering the analysis channel
-        so reasoning_effort actually does something.  Other templates keep
-        the historical raw-prompt behavior: no regression surface."""
-        if self.type == "llama" and self.chat_template == "gptoss":
-            return _chat_transcript([{"role": "user", "content": prompt}], "gptoss")
+    def _maybe_wrap_native(self, prompt: str) -> str:
+        """Open a raw prompt in THIS server's native chat format.
+
+        Every instruct model is trained on its own framing; a bare prompt
+        degrades it and the model may emit nothing at all.  Verified live:
+        gpt-oss emits erratic continuations, Qwen3 on a bare prompt
+        produces only whitespace — both fix themselves once the native
+        template is applied.  `chat_template: "none"` opts out (historical
+        raw behavior).  Multi-turn roll-your-own loops (deepwork / project
+        agent) pass `templated=True` so their own continuation format is
+        preserved."""
+        if self.type == "llama" and self.chat_template in CHAT_TEMPLATES \
+                and self.chat_template != "none":
+            return _chat_transcript([{"role": "user", "content": prompt}], self.chat_template)
         return prompt
 
     def request(self, prompt: str, extra_params: Optional[Dict[str, Any]] = None,
@@ -673,7 +694,7 @@ class Server:
                 payload = dict(DEFAULT_PARAMS)
                 payload.update(self.params)
                 payload.update(extra_params or {})
-                payload["prompt"] = prompt if templated else self._maybe_wrap_gptoss(prompt)
+                payload["prompt"] = prompt if templated else self._maybe_wrap_native(prompt)
                 payload = _cap_predict(payload, self._global_cfg)
                 resp = requests.post(
                     self.url, json=payload,
@@ -782,7 +803,7 @@ class Server:
             return content
         try:
             if self.type == "llama":
-                sent = prompt if templated else self._maybe_wrap_gptoss(prompt)
+                sent = prompt if templated else self._maybe_wrap_native(prompt)
                 payload = dict(DEFAULT_PARAMS)
                 payload.update(self.params)
                 payload.update({"prompt": sent, "stream": True})
@@ -1351,6 +1372,7 @@ class ModelOrchestrator:
         session: Optional[Any] = None,
         min_tier: str = "tiny",
         skill: str = "unknown",
+        templated: bool = False,
     ) -> tuple:
         """Stream a completion token-by-token (see Server.request_stream).
 
@@ -1371,7 +1393,8 @@ class ModelOrchestrator:
                                            min_tier=min_tier, skill=skill)
                 s = self._servers[sid]
                 try:
-                    out = s.request_stream(prompt, on_token=on_token, cancel_event=cancel_event)
+                    out = s.request_stream(prompt, on_token=on_token, cancel_event=cancel_event,
+                                           templated=templated)
                     self._status.update({"state": "idle"})
                     self.record_call(sid, skill, self._call_cost(s, prompt, out))
                     return out, sid

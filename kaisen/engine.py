@@ -1387,8 +1387,11 @@ class ProjectEngine:
             prompt = prompt.replace("{briefing}", briefing)
 
             def req(prompt_text: str) -> str:
+                # templated=True: deepwork is a multi-turn roll-your-own
+                # loop (it appends "Assistant: ..." turns); the server must
+                # not re-frame each turn in the chat template.
                 out, sid = self.orchestrator.request_stream(
-                    prompt_text, skill="deepwork")
+                    prompt_text, skill="deepwork", templated=True)
                 self._deepwork_sid = sid
                 return out
 

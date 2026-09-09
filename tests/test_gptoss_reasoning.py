@@ -83,6 +83,26 @@ def test_strip_noop_without_marker():
     assert L.strip_reasoning(None) is None
 
 
+def test_strip_qwen_think_block():
+    """Qwen3/DeepSeek-R1 reply: `` before the answer. Thinking must
+    be dropped so extract_code sees only the code."""
+    text = ("<think>\nThe user wants a Rust program considering fast "
+            "doubling.\n</think>\n\n```rust\nfn main(){}\n```")
+    out = L.strip_reasoning(text)
+    assert out == "```rust\nfn main(){}\n```"
+
+
+def test_strip_qwen_unclosed_think_gives_empty():
+    """n_predict exhausted mid-thought: no closing tag -> nothing usable."""
+    assert L.strip_reasoning("<think>\nI will design a fast algorithm...") == ""
+
+
+def test_strip_qwen_think_with_answer_tag():
+    text = "<think>analyzing</think>\n<answer>\n```rust\nfn main(){}\n```\n</answer>"
+    out = L.strip_reasoning(text)
+    assert "fn main(){}" in out and "<think>" not in out and "</think>" not in out
+
+
 # --------------------------------------------------------------------------- #
 # prompt wrapping (request, non-stream)
 # --------------------------------------------------------------------------- #
@@ -99,12 +119,26 @@ def test_gptoss_raw_prompt_wrapped_and_reasoning_stripped(tmp_cfg, monkeypatch):
     assert out == "int main(void){return 0;}"
 
 
-def test_non_gptoss_prompt_not_wrapped(tmp_cfg, monkeypatch):
+def test_non_gptoss_native_template_wrapped(tmp_cfg, monkeypatch):
+    """Every instruct model on a raw /completion server gets its native
+    framing — not just gpt-oss. qwen template: ChatML-style im_start."""
     s, _ = _other(tmp_cfg)
     cap = _fake_post(monkeypatch, {"content": "hello", "tokens_predicted": 1})
     out = s.request("Say hello.")
-    assert cap["json"]["prompt"] == "Say hello."
+    sent = cap["json"]["prompt"]
+    assert sent.startswith("<|im_start|>system")
+    assert sent.rstrip().endswith("<|im_start|>assistant")
+    assert "Say hello." in sent
     assert out == "hello"
+
+
+def test_templated_true_skips_wrap(tmp_cfg, monkeypatch):
+    """Multi-turn roll-your-own loops (deepwork/agent) pass templated=True:
+    the server must NOT re-frame each turn in the chat template."""
+    s, _ = _other(tmp_cfg)
+    cap = _fake_post(monkeypatch, {"content": "ok", "tokens_predicted": 1})
+    s.request("Assistant: prior turn", templated=True)
+    assert cap["json"]["prompt"] == "Assistant: prior turn"
 
 
 def test_chat_template_none_disables_wrap(tmp_cfg, monkeypatch):

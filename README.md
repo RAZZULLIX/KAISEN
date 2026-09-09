@@ -91,16 +91,18 @@ the in-flight run. `RUN` reports progress in *scored* generations (the
 queue counter can run ahead of the workers).
 
 Agent-writer notes: for local llama.cpp servers the raw `/completion`
-endpoint applies no server-side chat template — but KAISEN opens gpt-oss
-prompts in the model's native channel format itself (and strips the
-reasoning channel from the captured reply); every other model keeps plain
-raw prompts. gpt-oss thinks before it answers even on KAI turns — set
-`params.reasoning_effort: "low"` on that server for snappy command turns
-(`medium`/`high` buy deliberation at a latency cost). On reasoning
-OpenAI-compatible models, prefer `reasoning_effort: "none"` (or
-`chat_template_kwargs: {"enable_thinking": false}` on llama.cpp chat
-endpoints) for KAI tool-call turns. Never prefix model output with `OK` —
-the server does that.
+endpoint applies no server-side chat template — but KAISEN frames every
+instruct model's prompt in ITS OWN native chat format (the resolved
+`chat_template`) and strips the reasoning channel from the captured reply.
+So gpt-oss and Qwen3 both work without you writing template markup; set
+`chat_template: "none"` on a server to send prompts exactly as-given.
+Reasoning models think before answering — gpt-oss: tune
+`params.reasoning_effort: "low"` for snappy turns (`medium`/`high` buy
+deliberation at a latency cost); Qwen3: it always thinks, so leave a
+generous `n_predict`. On reasoning OpenAI-compatible models, prefer
+`reasoning_effort: "none"` (or `chat_template_kwargs: {"enable_thinking":
+false}` on llama.cpp chat endpoints) for KAI tool-call turns. Never prefix
+model output with `OK` — the server does that.
 
 Full protocol reference: [`docs/KAI.md`](docs/KAI.md) — command table,
 grammar, session semantics, and the reliability contract.

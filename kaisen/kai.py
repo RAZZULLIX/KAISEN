@@ -188,6 +188,9 @@ BARE command lines, never prefixed with OK. Commands (case-insensitive):
   CANDIDATE [lang]            queue code into evolution: lines until END
   SNAPSHOT [LIST|TAKE|RESTORE <id>] [ON <pid>]
   SERVERS                     LLM servers + active set
+  LOGS [pid] [lines <n>] [grep <text>]
+                             recent engine log lines (default 100). grep is a
+                             case-insensitive substring; bare word = project id
   TOOLCHAINS                  per-language toolchain availability on this OS
   GOAL <words...> [TEMP]     AI designs + validates a project (blocking);
                              uses the staged BASELINE as the program.
@@ -236,6 +239,7 @@ ALIASES: Dict[str, List[str]] = {
     "PAUSE": ["PAUSE", "HALT", "FREEZE"],
     "WAIT": ["WAIT", "SYNC", "AWAIT", "JOIN"],
     "BUDGET": ["BUDGET", "TIME", "REMAINING", "LEFT"],
+    "LOGS": ["LOGS", "LOG", "TAIL"],
     "SERVERS": ["SERVERS", "LLM", "BACKENDS"],
     "MODELS": ["MODELS", "SCOREBOARD", "RANKINGS"],
     "TOOLCHAINS": ["TOOLCHAINS", "TOOLS", "COMPILERS", "LANGTOOLS"],
@@ -969,6 +973,52 @@ class KaiSession:
         lines.append(f"FREE SLOTS {free_total}")
         return "\n".join(lines)
 
+    def cmd_logs(self, arg: str) -> str:
+        """LOGS [pid] [lines <n>] [grep <text>] — the running engine's
+        recent log lines from the in-memory buffer. Defaults: the session
+        project (or the selected engine), last 100 lines. grep is a
+        case-insensitive substring match over the timestamped lines.
+        Args parse from any order; an unrecognized bare word is treated as
+        the project id (LOGS fib-mod-rust lines 200)."""
+        tokens = arg.split()
+        pid: Optional[str] = None
+        lines: Optional[int] = None
+        grep: Optional[str] = None
+        i = 0
+        while i < len(tokens):
+            u = tokens[i].upper().rstrip(":,")
+            if u in ("LINES", "N") and i + 1 < len(tokens) and tokens[i + 1].isdigit():
+                lines = int(tokens[i + 1])
+                i += 2
+            elif u in ("GREP", "MATCH") and i + 1 < len(tokens):
+                grep = " ".join(tokens[i + 1:])
+                i = len(tokens)
+            elif u in ("ON", "PID", "PROJECT") and i + 1 < len(tokens):
+                pid = tokens[i + 1].lower()
+                i += 2
+            else:
+                pid = pid or tokens[i].lower()
+                i += 1
+        from urllib.parse import quote
+        qs: List[str] = []
+        if pid:
+            qs.append(f"project_id={quote(pid)}")
+        if lines:
+            qs.append(f"lines={lines}")
+        if grep:
+            qs.append(f"grep={quote(grep)}")
+        path = "/api/engine/logs" + ("?" + "&".join(qs) if qs else "")
+        res = self.client.call("GET", path, read_timeout=10.0)
+        if not res.get("ok"):
+            raise KaiError(res.get("error", "logs failed"))
+        logs = res.get("lines") or []
+        if not logs:
+            return f"OK no log lines{' for ' + pid if pid else ''}"
+        head = f"OK {len(logs)} line(s)" + \
+            (f" for {pid}" if pid else "") + \
+            (f" matching '{grep}'" if grep else "")
+        return "\n".join([head] + list(logs))
+
     def cmd_models(self, arg: str) -> str:
         """MODELS [skill] — the per-(model, skill) scoreboard: attempts /
         one-shot successes / wins / accumulated $, so an agent can see
@@ -1414,6 +1464,8 @@ class KaiSession:
                 return self.cmd_snapshot(rest)
             if cmd == "SERVERS":
                 return self.cmd_servers(rest)
+            if cmd == "LOGS":
+                return self.cmd_logs(rest)
             if cmd == "MODELS":
                 return self.cmd_models(rest)
             if cmd == "GOAL":
