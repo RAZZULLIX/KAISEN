@@ -479,7 +479,12 @@ class DashboardServer:
         pid = str(data.get("id", "")).strip().lower()
         spec = data.get("spec") or {}
         temp = bool(data.get("temp"))
-        out = self._create_project(pid, spec, temp=temp)
+        # _create_project is synchronous (setup, harness validation, file
+        # writes) — run it OFF the event loop so a slow create (e.g. building
+        # a harness, validating) can never block the dashboard's HTTP for
+        # every other request.  Arbitrary code still runs in subprocesses;
+        # this keeps the CONTROL plane (the dashboard) responsive.
+        out = await asyncio.to_thread(self._create_project, pid, spec, temp=temp)
         return _json(out, 400 if not out.get("ok") else 200)
 
     def _create_project(self, pid: str, spec: Dict[str, Any], temp: bool = False) -> Dict[str, Any]:
@@ -552,7 +557,7 @@ class DashboardServer:
         if baseline.is_file():
             files["original.c"] = baseline.read_text(encoding="utf-8")
         spec["files"] = files
-        out = self._create_project("demo-prime", spec)
+        out = await asyncio.to_thread(self._create_project, "demo-prime", spec)
         return _json(out, 400 if not out.get("ok") else 200)
 
     async def _api_projects_suggest(self, request):
@@ -1055,7 +1060,10 @@ class DashboardServer:
             p = self._registry_for(pid)[0]
         except KeyError:
             return _json({"ok": False, "error": "project not found"}, 404)
-        return _json(self._smoke_project(p))
+        # A smoke run executes the FULL pipeline (build/verify/score) —
+        # compile and benchmark.  NEVER let that block the aiohttp event
+        # loop, or the dashboard freezes for every other request.
+        return _json(await asyncio.to_thread(self._smoke_project, p))
 
     def _smoke_project(self, p) -> Dict[str, Any]:
         """Shared smoke runner (endpoint + agent + config agent)."""
@@ -1460,7 +1468,9 @@ class DashboardServer:
         eng = self._require_engine()
         data = await request.json() if request.can_read_body else {}
         multi = int(data.get("multi", 1)) if isinstance(data, dict) else 1
-        eng.start(multi=multi)
+        # eng.start() boots the worker pool + producers — off the event loop
+        # so a heavy boot can't freeze the dashboard.
+        await asyncio.to_thread(eng.start, multi)
         err = getattr(eng, "_startup_error", "")
         if err and eng.engine_state == "stopped":
             return _json({"ok": False, "state": eng.engine_state, "error": err})
@@ -1544,7 +1554,9 @@ class DashboardServer:
             # never leak into the real projects/ tree.
             eng = ProjectEngine(project, orchestrator, reg,
                                 worker_count=project.default_workers, events=events)
-            eng.start(multi=project.default_multi, paused=self.cfg.engine_start_paused)
+            # Boot off the event loop — engine start spawns worker subprocesses.
+            await asyncio.to_thread(
+                eng.start, project.default_multi, paused=self.cfg.engine_start_paused)
             self.engines[pid] = eng
             started = True
             self._persist_engine_pool()

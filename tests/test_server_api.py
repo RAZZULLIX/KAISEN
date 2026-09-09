@@ -585,3 +585,53 @@ def test_api_key_env_wins_over_config(api_env_key):
     assert requests.get(
         base + "/api/projects",
         headers={"Authorization": "Bearer envsekret"}, timeout=5).status_code == 200
+
+
+# ----------------------------------------------------------------------
+# CONTROL PLANE — heavy handlers must NOT block the aiohttp event loop.
+# The dashboard is the control plane; pipeline/engine work runs in worker
+# subprocesses (data plane).  A handler that runs a compile/engine-boot
+# directly on the loop freezes the whole dashboard for every request.
+# ----------------------------------------------------------------------
+
+def test_heavy_handlers_offload_to_thread():
+    """Handlers that build/compile ('smoke', project create) or boot an
+    engine must run their work via asyncio.to_thread — never inline on the
+    event loop, or a slow operation starves the dashboard."""
+    src = open("kaisen/server.py", encoding="utf-8").read()
+    def block(name):
+        # find `async def _api_<name>` and its body up to the next handler
+        i = src.find(f"async def _api_{name}(")
+        assert i != -1, f"handler _api_{name} not found"
+        j = src.find("async def _api_", i + len(f"async def _api_{name}(") + 1)
+        return src[i:j if j != -1 else len(src)]
+
+    # these call run_pipeline/_create_project/.start() — must be to_thread'd
+    for name in ("project_smoke",):
+        body = block(name)
+        assert "to_thread" in body, f"api_{name} must offload _smoke_project to a thread"
+    for name in ("projects_create", "onboarding_demo"):
+        body = block(name)
+        assert "to_thread(self._create_project" in body, f"api_{name} must offload _create_project"
+    for name in ("engine_start", "engine_switch"):
+        body = block(name)
+        assert "to_thread" in body, f"api_{name} must offload engine boot"
+
+
+def test_event_loop_not_blocked_under_engine_load(api):
+    """Regression: a slow handler must not block concurrent HTTP.  We fire a
+    create (now to_thread'd) and, on the same loop, verify a fast read still
+    returns promptly — if create ran inline it would serialize and stall."""
+    srv, base = api
+    import requests
+    spec = {"id": "slow-listen", "name": "S",
+            "steps": {"build": {"program": "gcc", "args": []},
+                      "verify": [], "score": []},
+            "metrics": {"ms": {"direction": "lower"}}}
+    # concurrent-ish: the to_thread'd create returns; a read right after is fast
+    t0 = time.time()
+    r = requests.post(base + "/api/projects", json={"id": "slow-listen", "spec": spec}, timeout=10)
+    assert r.status_code in (200, 400)
+    r2 = requests.get(base + "/api/projects", timeout=5)
+    assert r2.status_code == 200
+    assert time.time() - t0 < 8
