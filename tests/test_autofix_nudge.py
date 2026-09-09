@@ -261,6 +261,28 @@ def test_d_semicolon_and_unbalanced():
     assert any(f[0] == "delim" for f in fixes2)
 
 
+def test_d_lowercase_integer_suffix_fix():
+    """The sweep's #1 D error: the model writes `1000000007ul` (valid C) but
+    D wants `...uL` — lower-case suffix 'l' is rejected."""
+    src = "enum uint64_t MOD = 1000000007ul;\nvoid main() {}\n"
+    fixes = d.parse("semi.d(4): Error: lower case integer suffix 'l' is not allowed. Please use 'L' instead", src)
+    assert fixes and fixes[0][0] == "raw"
+    out = engine._apply_nudge(src, fixes[0])
+    assert "1000000007uL" in out      # lower-case l fixed to L
+    assert "1000000007ul" not in out
+
+
+def test_d_undefined_identifier_type_fix():
+    """C-style `uint64_t`/`int64_t` are not D names — the model writes them
+    constantly.  nudge maps them to D's aliases."""
+    src = "import std.stdio;\nvoid main() {\n    uint64_t n = 5;\n    long x = 9;\n}\n"
+    fixes = d.parse("semi.d(3): Error: undefined identifier `uint64_t`", src)
+    assert fixes and fixes[0][0] == "raw"
+    out = engine._apply_nudge(src, fixes[0])
+    assert "ulong n = 5;" in out       # uint64_t -> ulong
+    assert "uint64_t" not in out
+
+
 def test_csharp_unbalanced():
     src = "class Program {\n  static void Main() {\n    if (true) {\n      System.Console.WriteLine(1);\n  }\n}\n"
     fixes = csharp.parse("unbal.cs(6,246): error CS1525: Unexpected symbol `end-of-file'", src)
