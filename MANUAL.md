@@ -724,6 +724,42 @@ tokens consume the same output cap as the answer (`n_predict`, or
 `llm.max_tokens` when unlimited), so leave headroom if you cap outputs and
 run high reasoning.
 
+### Usage budgets — don't let a frontier model bankrupt you
+
+Per-server, always **optional**: declare how many tokens / generations a
+model may consume inside a reset window, and KAISEN stops routing to it
+when the limit is reached until the window rolls over. This is the
+"1M free tokens every 3 hours" safety valve.
+
+```json
+"budget": {
+  "max_tokens": "1M",        // or 1000000 / "1,000,000" / "2.5M"
+  "max_generations": 50,     // LLM calls; hard safety limit; 0 = off
+  "reset": "3h"              // 30s | 5m | 12h | 3d | 1w | 12:00:00 (= 12h)
+}
+```
+
+- **Parsing is forgiving.** Tokens: `1000000`, `1M`, `1,000,000`, `2.5M`,
+  `500K`. Reset (spanning days): `30s`, `5m`, `12h`, `3d`, `1w`, or
+  clock-style `12:00:00` (= 12 h), `01:30:00` (= 90 min), `12:00`.
+- **Counts are real**, not estimates: tokens observed on the wire
+  (streaming included) plus one generation per LLM call.
+- **Behavior when exhausted:** the server drops out of routing; other
+  servers take the load. If **every** active server is exhausted,
+  generations wait until one resets — the pool never silently exceeds
+  the allowance.
+- **Reset is a rolling window** anchored at first use; absent `reset`
+  makes a limit a one-shot cap that never rolls.
+- **Configure via** GUI → Settings → LLM Servers → **budget** button on a
+  server row, or KAI `BUDGET SERVER <sid> SET max_tokens 1M reset 3h`
+  (status: `BUDGET SERVER` / `BUDGET SERVER <sid>`). Empty fields clear
+  a limit; all empty = unlimited.
+
+Sensible defaults the UI suggests: `reset` defaults to `3h`; leave
+`max_tokens`/`max_generations` blank for unlimited. A budget is
+per-server, independent of routing tier, and never gates **local** free
+endpoints unless you configure one — it only bites where you set it.
+
 Secrets: `KAISEN_SERVER_<ID>_API_KEY` (env, per server) or
 `KAISEN_OPENAI_API_KEY` (fallback). Never written back to config.
 
@@ -836,6 +872,7 @@ Complete reference — copy from `config.example.json`:
 | `llm.servers` | `[…]` | the server registry (§13) |
 | `llm.routing` | `"cost"` | `"cost"` (tier-first, default) or `"adaptive"` (best measured score-per-$ per skill, within allowlists) |
 | `llm.allowlists` | `{}` | per-skill model allowlists: `{"suggest": ["frontier-70b"], "llm_repair": ["tier:tiny"]}` — entries are server ids or `tier:<t>` |
+| `llm.servers[].budget` | `null` | per-server usage budget (optional): `{max_tokens, max_generations, reset}` — caps tokens/generations inside a reset window; an exhausted server drops out of routing until it rolls over (§13 usage budgets) |
 | `workers.default_count` | `4` | worker processes per engine |
 | `workers.max_count` | `32` | hard ceiling |
 | `workers.queue_size` | `8` | bounded pipeline queue |
@@ -930,6 +967,8 @@ The GUI itself is an HTTP client; everything is available over
 - `GET /api/iterations?project_id=` — generation history
 - `GET /api/llm/status`, `GET /api/llm/live` — pool-wide sessions/stats
 - `POST /api/servers/add|remove|active|health|label`,
+  `POST /api/servers/modelcheck/{sid}` (streaming-path self-check),
+  `GET/POST /api/servers/budget/{sid}` (usage-budget status / config),
   `GET/PUT /api/config` — server registry + config
 - `POST /api/swarm/start`, `GET /api/swarm/{id}`, `POST …/cancel` — swarms
 - `POST /api/projects/{pid}/agent/start`, `GET /api/agent/status`,

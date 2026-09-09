@@ -5,6 +5,49 @@ All notable changes to KAISEN are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [KAISEN 0.1.8-alpha (budget + polish)] — 2026-09-09
+
+Per-model usage budgets + a sticky topbar.
+
+### Added
+
+- **Per-server usage budget.** `llm.servers[].budget` = `{max_tokens,
+  max_generations, reset}` (optional). Caps how many tokens / generations a
+  model may consume inside a reset window; an exhausted server drops out of
+  routing until the window rolls over — the "1M free tokens every 3 hours"
+  safety valve for frontier models. Values parse forgivingly: tokens
+  `1000000` / `1M` / `1,000,000` / `2.5M` / `500K`; reset `30s` / `5m` /
+  `12h` / `3d` / `1w` / `12:00:00` (= 12 h). Counts are real (streaming
+  included); reset is a rolling window. Configure via GUI → Settings → LLM
+  Servers → **budget**, KAI `BUDGET SERVER <sid> SET max_tokens 1M reset
+  3h`, or `GET/POST /api/servers/budget/{sid}`. (`kaisen/budget.py`, wired
+  into `Server.record`/`acquire` so routing skips exhausted servers.)
+- **Sticky topbar.** The `.topbar` (brand + nav + status pill) now stays
+  pinned while scrolling — before, the bar scrolled away while the logo and
+  status pill stayed fixed, leaving them floating alone over content.
+  Brand/status are anchored to the sticky bar (absolute, not fixed); the
+  expanded status dropdown stays fixed so it floats above everything.
+- **KAI `MODELCHECK [<sid>]`** — verify a server's STREAMING path (what a
+  generation + the GUI live view use): first-token latency, whether content
+  reaches the stream, prefill tps. Catches "generates in the model log but
+  the KAISEN chat stays empty" (`POST /api/servers/modelcheck/{sid}`).
+- **`LOGS [pid] [lines <n>] [grep <text>]`** KAI command + `GET
+  /api/engine/logs` — engine log lines with filters.
+
+### Fixed
+
+- **Live-session prefill visibility.** A session that has started but not
+  yet received a token reports `prefill: true` (with elapsed wait), so the
+  live view shows "prefilling" instead of an empty box during a slow
+  single-slot prefill.
+- **Concurrency capped at real slot count.** Config `max_concurrent` can
+  over-subscribe a single-slot server (queuing N generations invisibly
+  behind one slot); the effective capacity is now capped at the detected
+  `/slots` count, learned at health/probe time.
+- **Thinking-model streaming regression test** — the engine's streaming path
+  returns clean code (reasoning stripped) for Qwen3/DeepSeek-R1 `…`
+  replies.
+
 ## [KAISEN 0.1.8-alpha (multi-model)] — 2026-09-09
 
 Every instruct model works on a raw `/completion` server — not just gpt-oss.

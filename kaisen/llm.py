@@ -478,6 +478,12 @@ class Server:
         self._stats = {"requests": 0, "failures": 0, "total_seconds": 0.0,
                        "last_tps": 0.0, "last_ttft": None,
                        "prefill_tps": 0.0, "last_error": None}
+        # Per-server usage budget (max_tokens/max_generations/reset window).
+        # Optional; when configured and exhausted, the server drops out of
+        # routing until the window rolls over — a frontier model cannot
+        # silently burn its allowance.
+        from .budget import Budget
+        self.budget = Budget.from_spec(cfg)
         # Number of llama.cpp slots the server actually has, once known.
         # Config max_concurrent may be HIGHER than the real slot count
         # (a single-slot box configured with max_concurrent: 2/8) — that
@@ -505,6 +511,10 @@ class Server:
         with self._lock:
             if (self._inflight >= self._capacity or self._health.banned
                     or not self.enabled):
+                return False
+            # Budget cap: an exhausted server must not take another call —
+            # routing skips it until its reset window rolls over.
+            if self.budget is not None and self.budget.exhausted():
                 return False
             self._inflight += 1
             return True
@@ -718,6 +728,11 @@ class Server:
             self._stats["total_seconds"] += seconds
             if seconds > 0 and tokens > 0:
                 self._stats["last_tps"] = tokens / seconds
+        # Budget: count REAL tokens observed on the wire (streaming included)
+        # plus one generation per call.  Counting here — not at call sites —
+        # means every path (request, request_stream, chat) is measured.
+        if self.budget is not None and self.budget.configured and ok and tokens > 0:
+            self.budget.record(tokens=tokens, generations=1)
 
     def estimate(self, tokens_in: int, tokens_out: int = 0) -> Dict[str, Any]:
         """Cost/time estimate for one call: expected tokens, wall seconds
@@ -753,6 +768,7 @@ class Server:
                 "inflight": self._inflight,
                 "max_concurrent": self.max_concurrent,
                 "detected_slots": self._detected_slots,
+                "budget": self.budget.status() if self.budget else None,
                 "banned": self.banned,
                 "tier": self.tier,
                 "priority": self.priority,
@@ -1293,6 +1309,7 @@ class ModelOrchestrator:
             "model": s.model, "params": s.params, "chat_template": s.chat_template,
             "payload_template": s.payload_template, "max_concurrent": s.max_concurrent,
             "timeout": s.timeout, "enabled": s.enabled,
+            "budget": getattr(s, "budget", None) and s.budget.config or None,
             "tier": s.tier, "priority": s.priority, "context_window": s.context_window,
             "smartness": s.smartness, "cost_in": s.cost_in, "cost_out": s.cost_out,
         }

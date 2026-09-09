@@ -631,3 +631,57 @@ def test_modelcheck_no_server_error():
     s = _session({("GET", "/api/config"): {"llm": {"active_ids": []}}})
     with pytest.raises(KaiError, match="no active server"):
         s.cmd_modelcheck("")
+
+
+# ----------------------------------------------------------------------
+# BUDGET SERVER — per-server usage budget
+# ----------------------------------------------------------------------
+
+def test_budget_server_status_single():
+    s = _session({("GET", "/api/servers/budget/qwen"): {
+        "ok": True, "budget": {"configured": True, "exhausted": False,
+                               "tokens_used": 250000, "max_tokens": 1000000,
+                               "generations_used": 12, "max_generations": 50,
+                               "window_reset_in_s": 3600.0}}})
+    out = s.cmd_budget("SERVER qwen")
+    assert "OK qwen budget" in out
+    assert "OK" in out
+    assert "250,000/1,000,000" in out
+
+
+def test_budget_server_unconfigured_message():
+    s = _session({("GET", "/api/servers/budget/qwen"): {
+        "ok": True, "budget": {"configured": False}}})
+    out = s.cmd_budget("SERVER qwen")
+    assert "not configured" in out
+
+
+def test_budget_server_set_posts_patch():
+    s = _session({("POST", "/api/servers/budget/qwen"): {
+        "ok": True, "budget": {"configured": True, "exhausted": False,
+                               "tokens_used": 0, "max_tokens": 1000000,
+                               "max_generations": None, "window_reset_in_s": 10800.0}}})
+    s.cmd_budget("SERVER qwen SET max_tokens 1M reset 3h")
+    # the patch body carries the parsed-friendly human values, sent raw
+    patch = s.client.calls[0][2]
+    assert patch["max_tokens"] == "1M"
+    assert patch["reset"] == "3h"
+
+
+def test_budget_server_list_all():
+    cfg = {"llm": {"servers": [
+        {"id": "qwen", "budget": {"configured": True, "tokens_used": 5,
+                                  "max_tokens": 1000, "max_generations": None,
+                                  "window_reset_in_s": 10.0}},
+        {"id": "gpt", "budget": {}},
+    ]}}
+    s = _session({("GET", "/api/config"): cfg})
+    out = s.cmd_budget("SERVER")
+    assert "2 server(s) budget" in out
+    assert "qwen" in out and "gpt" in out
+
+
+def test_budget_server_set_requires_sid_and_limit():
+    s = _session({})
+    with pytest.raises(KaiError, match="SET <sid>.*max_tokens"):
+        s.cmd_budget("SERVER SET max_tokens 1M")

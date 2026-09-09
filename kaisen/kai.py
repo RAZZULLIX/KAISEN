@@ -168,6 +168,13 @@ BARE command lines, never prefixed with OK. Commands (case-insensitive):
                              pipeline count each — optional: everything about
                              multi-engine mode is opt-in
   BUDGET                      in-flight run's budget: scored so far + time left
+  BUDGET SERVER [<sid>] [SET max_tokens <n> reset <r> max_generations <n>]
+                             per-server usage budget (optional). Caps tokens /
+                             generations inside a reset window so a frontier
+                             model cannot burn its allowance; an exhausted
+                             server drops out of routing until it rolls over.
+                             n = 1000000 | 1M | 1,000,000 | 2.5M; r = 30s | 5m
+                             | 12h | 3d | 1w | 12:00:00 (= 12h). Blank clears.
   FORGE [<n>] [TIER <tiny|small|large>] [ON <pid>] [GOAL <words...>]
                              n parallel drafts, each pipeline-scored
   SCORE <path> [ON <pid>]     score any file through build+verify+score —
@@ -267,7 +274,17 @@ ALIASES: Dict[str, List[str]] = {
     "QUIT": ["QUIT", "EXIT", "BYE", "DONE", "END-SESSION"],
 }
 
-_ALIAS_INDEX: Dict[str, str] = {w.lower(): cmd for cmd, ws in ALIASES.items() for w in ws}
+# First-wins: an alias that collides with a REAL command name never shadows
+# it.  (ESTIMATE lists "BUDGET" as a synonym; BUDGET is also its own command.
+# Without this the later dict entry overwrote the real BUDGET, so `BUDGET`
+# silently became ESTIMATE — the per-server budget was unreachable via the
+# command that is named after it.)
+_ALIAS_INDEX: Dict[str, str] = {}
+for _cmd, _ws in ALIASES.items():
+    for _w in _ws:
+        _k = _w.lower()
+        if _k not in _ALIAS_INDEX:
+            _ALIAS_INDEX[_k] = _cmd
 
 
 def _split(line: str) -> Tuple[str, str]:
@@ -741,8 +758,23 @@ class KaiSession:
         return f"OK {len(finished)}/{len(goals)} finished — WAIT again or STOP"
 
     def cmd_budget(self, arg: str) -> str:
-        """Show the session's in-flight run budget: generations scored so far
-        vs target, and time remaining (paused time excluded via WAIT)."""
+        """Two forms:
+          BUDGET                       — in-flight RUN budget (scored vs target, time left)
+          BUDGET SERVER [<sid>] [SET max_tokens N reset R [max_generations N]]
+                                       — per-server usage-budget status, or SET limits.
+        The per-server budget caps how many tokens / generations a server may
+        consume inside a reset window (e.g. "1M tokens every 3h").  Values
+        parse forgivingly: N = 1000000 | 1M | 1,000,000 | 2.5M; R = 30s | 5m
+        | 12h | 3d | 1w | 12:00:00 (= 12h).  An exhausted server drops out of
+        routing until the window rolls over.  SET max_tokens '' clears a
+        limit (0/off); BUDGET SERVER with no args shows every server's usage."""
+        tokens = arg.split()
+        # Per-server form: BUDGET SERVER ...
+        if tokens and tokens[0].upper().rstrip(":,") in ("SERVER", "SERVERS", "LLM"):
+            rest = tokens[1:]
+            return self._budget_server(rest)
+
+        # Else: in-flight RUN budget (existing behavior).
         if self._run_goals:
             lines = [f"OK {len(self._run_goals)} runs in flight:"]
             for g in self._run_goals:
@@ -764,6 +796,86 @@ class KaiSession:
         if goal["ts_deadline"]:
             parts.append(f"{max(0.0, goal['ts_deadline'] - time.time()):.0f}s remaining")
         return f"OK budget on {goal['pid']}: " + ", ".join(parts)
+
+    def _budget_server(self, tokens: List[str]) -> str:
+        """BUDGET SERVER [<sid>] [SET max_tokens <n> reset <r> max_generations <n>].
+        No SET -> show status (all servers when no sid).  SET reconfigure the
+        budget; a blank value ('' / 0 / off) clears that limit."""
+        sid: Optional[str] = None
+        set_mode = False
+        patch: Dict[str, Any] = {}
+        i = 0
+        while i < len(tokens):
+            u = tokens[i].upper().rstrip(":,")
+            if u in ("SET", "SETTINGS", "CONFIG"):
+                set_mode = True
+                i += 1
+            elif u in ("MAX_TOKENS", "TOKENS", "TOKEN") and i + 1 < len(tokens):
+                patch["max_tokens"] = tokens[i + 1].strip()
+                i += 2
+            elif u in ("MAX_GENERATIONS", "GENERATIONS", "GENS", "MAX_GENS") and i + 1 < len(tokens):
+                patch["max_generations"] = tokens[i + 1].strip()
+                i += 2
+            elif u in ("RESET", "EVERY", "WINDOW") and i + 1 < len(tokens):
+                patch["reset"] = tokens[i + 1].strip()
+                i += 2
+            elif u in ("ON",):
+                # BUDGET SERVER ON <pid> is NOT a thing; ignore for clarity
+                i += 1
+            else:
+                sid = sid or tokens[i].lower()
+                i += 1
+        if set_mode:
+            target = sid
+            if not target:
+                raise KaiError("BUDGET SERVER SET <sid> max_tokens <n> reset <r>")
+            if not patch:
+                raise KaiError("BUDGET SERVER SET needs at least one limit "
+                               "(max_tokens/max_generations/reset)")
+            res = self.client.call("POST", f"/api/servers/budget/{target}", patch, read_timeout=30.0)
+            if not res.get("ok"):
+                raise KaiError(res.get("error", "budget set failed"))
+            return self._budget_status_str(target, res.get("budget"))
+        # Status mode
+        if sid:
+            res = self.client.call("GET", f"/api/servers/budget/{sid}", read_timeout=10.0)
+            if not res.get("ok"):
+                raise KaiError(res.get("error", "unknown server"))
+            return self._budget_status_str(sid, res.get("budget"))
+        # Summarize every server from /api/config + live /api/llm/status.
+        cfg = self.client.call("GET", "/api/config", read_timeout=10.0)
+        servers = (cfg.get("llm") or {}).get("servers", [])
+        if not servers:
+            return "OK no servers configured"
+        live = {}
+        try:
+            st = self.client.call("GET", "/api/llm/status", read_timeout=10.0)
+            for r in (st.get("servers") or []):
+                if r.get("budget"):
+                    live[str(r.get("id"))] = r["budget"]
+        except KaiError:
+            pass
+        lines = [f"OK {len(servers)} server(s) budget (BUDGET SERVER <sid> for detail):"]
+        for s in servers:
+            b = live.get(s.get("id")) or (s.get("budget") or {})
+            flag = " EXHAUSTED" if b.get("exhausted") else ""
+            lines.append(
+                f"  {s.get('id'):10s} tokens {b.get('tokens_used', 0)}/{b.get('max_tokens') or '∞'}"
+                f" gens {b.get('generations_used', 0)}/{b.get('max_generations') or '∞'}"
+                f" reset_in {b.get('window_reset_in_s') or 'n/a'}s{flag}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _budget_status_str(sid: str, b: Dict[str, Any]) -> str:
+        if not b or not b.get("configured"):
+            return f"OK {sid} budget: not configured (unlimited) — BUDGET SERVER {sid} SET max_tokens 1M reset 3h"
+        state = "EXHAUSTED" if b.get("exhausted") else "OK"
+        mt = "∞" if b.get("max_tokens") is None else f"{b.get('max_tokens'):,}"
+        mg = "∞" if b.get("max_generations") is None else f"{b.get('max_generations'):,}"
+        left = b.get("window_reset_in_s")
+        left_s = "n/a" if left is None else f"{left:.0f}s"
+        return (f"OK {sid} budget: {state} | tokens {b.get('tokens_used', 0):,}/{mt} "
+                f"gens {b.get('generations_used', 0):,}/{mg} reset_in {left_s}")
 
     def cmd_pause(self, arg: str) -> str:
         body: Dict[str, Any] = {"paused": True}

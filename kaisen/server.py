@@ -23,6 +23,7 @@ except ImportError:  # pragma: no cover
     web = None
 
 from .config import TEMP_ROOT, FrameworkConfig, PROJECTS_DIR, get_config, save_secret
+from .budget import Budget
 from .engine import STATE_PAUSED, STATE_STOPPED, STATE_STOPPING, ProjectEngine
 from .projects import ProjectRegistry
 from .guardrails import check_command, guardrail_state
@@ -43,6 +44,20 @@ def _deep_update(base: Dict[str, Any], new: Dict[str, Any]) -> None:
             _deep_update(base[k], v)
         else:
             base[k] = v
+
+
+def _server_budget_status(eng, sid: str):
+    """Live usage-budget status for a server row, or None when the step
+    has no orchestrator (status polled before any engine is up)."""
+    try:
+        if eng is None or not hasattr(eng, "orchestrator"):
+            return None
+        s = eng.orchestrator._servers.get(sid)
+        if s is None or s.budget is None:
+            return None
+        return s.budget.status()
+    except Exception:
+        return None
 
 
 def _auth_middleware(api_key: str):
@@ -385,6 +400,8 @@ class DashboardServer:
         r.add_post("/api/servers/active", self._api_server_active)
         r.add_post("/api/servers/health/{sid}", self._api_server_health)
         r.add_post("/api/servers/modelcheck/{sid}", self._api_server_modelcheck)
+        r.add_get("/api/servers/budget/{sid}", self._api_server_budget_get)
+        r.add_post("/api/servers/budget/{sid}", self._api_server_budget_set)
         r.add_post("/api/servers/label", self._api_server_label)
         r.add_post("/api/onboarding/complete", self._api_onboarding_complete)
         r.add_post("/api/onboarding/demo", self._api_onboarding_demo)
@@ -1620,6 +1637,44 @@ class DashboardServer:
         result = await asyncio.to_thread(self._orch().check_model, sid, prompt, max_tokens)
         return _json(result)
 
+    async def _api_server_budget_get(self, request):
+        """Per-server usage-budget status: tokens/generations used vs the
+        configured limits, and seconds until the reset window rolls over."""
+        sid = request.match_info["sid"]
+        s = self._orch()._servers.get(sid)
+        if s is None:
+            return _json({"ok": False, "error": f"unknown server '{sid}'"}, 404)
+        return _json({"ok": True, "id": sid, "budget": s.budget.status()})
+
+    async def _api_server_budget_set(self, request):
+        """Configure a server's usage budget (optional). Accepts any of
+        max_tokens (int or '1M'/'1,000,000'), max_generations (int), reset
+        ('30s'/'5m'/'12h'/'3d'/'12:00:00' = 12h). Keys pass through the
+        same forgiving parsers as KAI. Clears the limit when given null/''."""
+        from .budget import parse_duration, parse_tokens
+        sid = request.match_info["sid"]
+        data = await request.json() if request.can_read_body else {}
+        orch = self._orch()
+        s = orch._servers.get(sid)
+        if s is None:
+            return _json({"ok": False, "error": f"unknown server '{sid}'"}, 404)
+        cfg = dict(s.budget.config) if s.budget else {}
+        if "max_tokens" in data:
+            mt = parse_tokens(data.get("max_tokens"))
+            cfg.pop("max_tokens", None) if mt is None else cfg.__setitem__("max_tokens", mt)
+        if "max_generations" in data:
+            mg = parse_tokens(data.get("max_generations"))
+            cfg.pop("max_generations", None) if mg is None else cfg.__setitem__("max_generations", mg)
+        if "reset" in data:
+            rw = parse_duration(data.get("reset"))
+            cfg.pop("reset", None) if rw is None else cfg.__setitem__("reset", rw)
+        if not cfg:
+            s.budget = Budget()          # no limits configured
+        else:
+            s.budget = Budget(cfg)
+        orch.persist()
+        return _json({"ok": True, "id": sid, "budget": s.budget.status()})
+
     async def _api_server_label(self, request):
         data = await request.json()
         try:
@@ -1912,6 +1967,7 @@ class DashboardServer:
                         "last_error": st.get("last_error"),
                         "tps": round(s.get("tps") or 0, 1),
                         "streaming": 1 if (s.get("tps") or 0) > 0 else 0,
+                        "budget": _server_budget_status(eng, sid),
                     })
             else:
                 rows.append({
@@ -1934,6 +1990,7 @@ class DashboardServer:
                     "last_error": st.get("last_error"),
                     "tps": round(active_tps.get(sid) or ast["tps"] or 0, 1),
                     "streaming": 0,
+                    "budget": _server_budget_status(eng, sid),
                 })
 
         # Reachability is probed ONCE per activation: servers with unknown

@@ -22,10 +22,18 @@ body {
   align-items: center; 
   justify-content: center;
   gap: 24px;
+  /* Keep the whole bar (background + nav) pinned while scrolling.  Before
+     this the bar scrolled away while .brand/.status-pill stayed fixed,
+     leaving the logo floating alone over content. */
+  position: sticky;
+  top: 0;
+  z-index: 120;
 }
 
 .brand {
-  position: fixed;
+  /* Anchored to the sticky .topbar (absolute, not fixed) so the logo
+     scrolls WITH the bar instead of floating alone over content. */
+  position: absolute;
   top: 20px;
   left: 32px;
   z-index: 50;
@@ -61,7 +69,10 @@ body {
   color: var(--text2);
   cursor: pointer; 
   transition: all 0.2s ease; 
-  position: fixed;
+  /* Anchored to the sticky .topbar (absolute, not fixed) so it scrolls
+     WITH the bar.  The EXPANDED state stays fixed so the dropdown floats
+     above everything (see .status-pill.expanded). */
+  position: absolute;
   top: 20px;
   right: 32px;
   z-index: 50;

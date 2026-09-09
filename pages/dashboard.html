@@ -582,6 +582,21 @@
   </div>
 
 
+  <div id="budget-modal" class="modal-overlay" role="dialog" aria-modal="true" aria-label="Server usage budget" style="display: none;">
+    <div class="modal-content">
+      <h3>Usage Budget — <span id="budget-sid" style="color:var(--accent);"></span></h3>
+      <p class="modal-desc">Cap how many tokens / generations this server may consume inside a reset window, so a frontier model can't silently burn its allowance. When it reaches a limit it drops out of routing until the window rolls over. Leave a field blank to clear that limit; leave all blank for <b>unlimited</b>.</p>
+      <div class="form-row"><label>Max tokens (blank = unlimited)</label><input id="budget-max-tokens" placeholder="e.g. 1000000 · 1M · 1,000,000 · 2.5M"></div>
+      <div class="form-row"><label>Max generations (blank = unlimited)</label><input id="budget-max-gens" type="number" min="0" placeholder="e.g. 50 — LLM calls per window"></div>
+      <div class="form-row"><label>Reset window (blank = never — one-shot cap)</label><input id="budget-reset" placeholder="e.g. 30s · 5m · 12h · 3d · 1w · 12:00:00 (= 12h)"></div>
+      <div style="font-size:12px;color:var(--muted);line-height:1.5;">Example: a subscription with 1M free tokens every 3 hours → <code>max_tokens 1M</code>, <code>reset 3h</code>. Same via KAI: <code>BUDGET SERVER &lt;sid&gt; SET max_tokens 1M reset 3h</code>.</div>
+      <div class="modal-actions">
+        <button class="btn" onclick="closeBudgetModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="saveBudgetModal()">Save Budget</button>
+      </div>
+    </div>
+  </div>
+
   <div id="system-modal" class="modal-overlay" role="dialog" aria-modal="true" style="display: none;">
     <div class="modal-content">
       <h3>System Message</h3>

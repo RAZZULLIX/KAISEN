@@ -186,6 +186,7 @@ function switchView(viewName) {
 // settings view — General / Active Project / LLM Servers
 // ------------------------------------------------------------------ //
 let settingsTab = 'general';
+let budgetSid = null;
 function openSettingsBar(tab) {
   switchView('config');
   if (tab) switchSettingsTab(tab);
@@ -1065,7 +1066,8 @@ function renderServers(llm) {
       <td>${escapeHtml(s.model || '')}</td><td>${escapeHtml(s.tier || 'small')}</td><td>${escapeHtml(s.priority ?? 1)}</td><td>${s.context_window ? s.context_window : '?'}</td><td>${s.inflight ?? 0}/${s.max_concurrent ?? '—'}</td>
       <td class="${s.banned ? 'iter-err' : s.busy ? 'iter-warn' : s.online === false ? 'iter-err' : 'iter-ok'}">${s.banned ? 'BANNED' : s.busy ? 'busy' : s.online === false ? 'offline' : 'ok'}</td>
       <td>${(s.stats ? `${s.stats.requests || 0} req · ${s.stats.failures || 0} fail${s.stats.avg_seconds ? ' · ' + Number(s.stats.avg_seconds).toFixed(0) + 's' : ''}` : '—')}</td>
-      <td><button class="btn btn-sm" title="Rename this endpoint" onclick="startRenameServer('${s.id}')">✎</button> <button class="btn btn-sm" title="Probe the endpoint" onclick="healthCheck('${s.id}')">health</button> <button class="btn btn-sm" title="Remove this endpoint" style="border-color:var(--danger);color:var(--danger);" onclick="removeServer('${s.id}')">✕</button></td>`;
+      <td>${renderBudgetCell(s)}</td>
+      <td><button class="btn btn-sm" title="Rename this endpoint" onclick="startRenameServer('${s.id}')">✎</button> <button class="btn btn-sm" title="Probe the endpoint" onclick="healthCheck('${s.id}')">health</button> <button class="btn btn-sm" title="Set usage budget (max tokens / generations / reset)" onclick="openBudgetModal('${s.id}')">budget</button> <button class="btn btn-sm" title="Remove this endpoint" style="border-color:var(--danger);color:var(--danger);" onclick="removeServer('${s.id}')">✕</button></td>`;
     tbody.appendChild(tr);
   });
 }
@@ -1159,6 +1161,62 @@ async function healthCheck(id) {
     const r = await api(`/api/servers/health/${id}`, { method: 'POST' });
     systemAlert(r.ok ? `health OK: ${r.reply}` : `health FAIL: ${r.error}`);
   } catch (e) { systemAlert('Health check failed: ' + e.message); }
+}
+
+// ---- per-server usage budget -------------------------------------------
+function renderBudgetCell(s) {
+  const b = s.budget || {};
+  if (!b.configured) return '<span class="iter-prompt" style="color:var(--muted);">unlimited</span>';
+  const mt = b.max_tokens == null ? '∞' : fmtBudgetNum(b.max_tokens);
+  const mg = b.max_generations == null ? '∞' : b.max_generations;
+  const cls = b.exhausted ? 'iter-err' : b.tokens_used >= (b.max_tokens || 0) ? 'iter-warn' : 'iter-ok';
+  const reset = b.window_reset_in_s == null ? 'never' : humanReset(b.window_reset_in_s);
+  return `<span class="${cls}" title="reset in ${reset}">${fmtBudgetNum(b.tokens_used || 0)}/${mt} tok · ${b.generations_used || 0}/${mg} gen${b.exhausted ? ' ⛔' : ''}</span>`;
+}
+function fmtBudgetNum(n) {
+  n = Number(n) || 0;
+  if (n >= 1e9) return (n / 1e9).toFixed(n % 1e9 ? 1 : 0) + 'B';
+  if (n >= 1e6) return (n / 1e6).toFixed(n % 1e6 ? 1 : 0) + 'M';
+  if (n >= 1e3) return (n / 1e3).toFixed(n % 1e3 ? 1 : 0) + 'K';
+  return String(n);
+}
+function humanReset(secs) {
+  secs = Number(secs) || 0;
+  if (secs >= 86400) return (secs / 86400).toFixed(secs % 86400 ? 1 : 0) + 'd';
+  if (secs >= 3600) return (secs / 3600).toFixed(secs % 3600 ? 1 : 0) + 'h';
+  if (secs >= 60) return (secs / 60).toFixed(secs % 60 ? 1 : 0) + 'm';
+  return Math.round(secs) + 's';
+}
+function openBudgetModal(id) {
+  budgetSid = id;
+  document.getElementById('budget-sid').textContent = id;
+  // seed from live config so the user sees current limits
+  api('/api/config').then(c => {
+    const s = (c.llm && (c.llm.servers || []).find(x => x.id === id)) || {};
+    const b = s.budget || {};
+    document.getElementById('budget-max-tokens').value = b.max_tokens || '';
+    document.getElementById('budget-max-gens').value = b.max_generations || '';
+    // reset may be stored as seconds (from a previous save) — show it as a
+    // human duration so the field stays editable ("3h" not "10800").
+    document.getElementById('budget-reset').value =
+      (b.reset && typeof b.reset === 'number') ? humanReset(b.reset) : (b.reset || '3h');
+  }).catch(() => {});
+  document.getElementById('budget-modal').style.display = 'flex';
+}
+function closeBudgetModal() { document.getElementById('budget-modal').style.display = 'none'; }
+async function saveBudgetModal() {
+  const body = {
+    max_tokens: document.getElementById('budget-max-tokens').value.trim(),
+    max_generations: document.getElementById('budget-max-gens').value.trim(),
+    reset: document.getElementById('budget-reset').value.trim(),
+  };
+  // blank = clear that limit (server treats ''/0 as unset)
+  try {
+    await api(`/api/servers/budget/${budgetSid}`, { method: 'POST', body: JSON.stringify(body) });
+    closeBudgetModal();
+    toast('Budget updated.');
+    loadActive();
+  } catch (e) { systemAlert('Budget update failed: ' + e.message); }
 }
 
 // ------------------------------------------------------------------ //
