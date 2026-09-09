@@ -904,7 +904,7 @@ Complete reference — copy from `config.example.json`:
 | `llm.max_retries` | `3` | per-server retries |
 | `llm.retry_backoff` | `2.0` | backoff multiplier |
 | `llm.reprobe_interval` | `30` | how often offline servers are re-probed in the background (s); 0 disables — a crashed llama.cpp that comes back rejoins the pool automatically |
-| `llm.max_tokens` | `8192` | cap for UNLIMITED generations |
+| `llm.max_tokens` | `0` | framework cap on UNBOUNDED generation output. **0 = no cap (default)** — call the model as-is; a thinking model legitimately emits thousands of reasoning tokens before the answer, and a low default truncates the thinking block (the reply never reaches `</think>`/the final channel, looking like no-code). The server's own context budget applies server-side. Set >0 only to enforce a hard ceiling |
 | `llm.active_ids` | `[]` | which servers are active (checkbox set) |
 | `llm.servers` | `[…]` | the server registry (§13) |
 | `llm.routing` | `"cost"` | `"cost"` (tier-first, default) or `"adaptive"` (best measured score-per-$ per skill, within allowlists) |

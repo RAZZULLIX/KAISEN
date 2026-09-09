@@ -46,6 +46,14 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "read_timeout": 1200,
         "connect_timeout": 15,
         "nodata_timeout": 120,
+        # Framework cap on UNBOUNDED generation output.  0 = NO cap (default):
+        # call the model as-is — a thinking model legitimately emits thousands
+        # of reasoning tokens before the answer, and a low default would
+        # truncate the thinking block so the reply never reaches </think> /
+        # the final channel (generation looks like no-code).  The server's own
+        # context budget applies server-side.  Set >0 only to enforce a hard
+        # ceiling.  Per-server: n_predict / max_tokens in that server's params.
+        "max_tokens": 0,
         # Max silence BEFORE the first token (s). 0 = no limit (default):
         # wait as long as the server needs to prefill; set >0 to hard-fail.
         "first_token_timeout": 0,

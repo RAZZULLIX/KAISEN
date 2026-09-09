@@ -317,6 +317,23 @@ def test_concurrency_capped_at_detected_slots(tmp_cfg):
     assert s._capacity == 3
 
 
+def test_cap_predict_no_cap_by_default(tmp_cfg):
+    """The framework must NOT clamp generation output by default — a
+    thinking model legitimately emits thousands of reasoning tokens before
+    the answer, and an 8k default truncates the thinking block so the reply
+    never reaches </think> (looks like no-code).  Call the model AS-IS."""
+    p = L._cap_predict({"n_predict": -1}, tmp_cfg)   # tmp_cfg: max_tokens=0
+    assert p["n_predict"] == -1                       # clean call, no clamp
+
+
+def test_cap_predict_clamps_only_when_explicit(tmp_cfg):
+    tmp_cfg.data["llm"]["max_tokens"] = 8192
+    p = L._cap_predict({"n_predict": -1}, tmp_cfg)
+    assert p["n_predict"] == 8192                      # user opted in
+    p2 = L._cap_predict({"n_predict": 32768}, tmp_cfg)
+    assert p2["n_predict"] == 32768                    # server-declared wins
+
+
 def test_slots_snapshot_learns_capacity(tmp_cfg, monkeypatch):
     s, _ = _gptoss(tmp_cfg)
     calls = {}

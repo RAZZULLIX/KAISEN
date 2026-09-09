@@ -194,13 +194,23 @@ def _chat_transcript(messages: List[Dict[str, str]], template: str = "auto") -> 
 
 
 def _cap_predict(payload: Dict[str, Any], global_cfg: FrameworkConfig) -> Dict[str, Any]:
-    """Prevent runaway generations: unless a server declares its own
-    finite n_predict, cap it at the framework default (llm.max_tokens).
-    An unlimited cap lets a degenerating model loop until context end —
-    burning minutes of compute on garbage."""
+    """Cap unbounded output ONLY when the user asked for it.
+
+    KAISEN must not impose a reasoning/output budget by default — a
+    thinking model (Qwen, DeepSeek-R1, gpt-oss) legitimately emits
+    thousands of reasoning tokens before the answer, and a default 8k cap
+    truncates the thinking block (the reply never reaches `</think>` / the
+    final channel, so the generation looks like no-code).  Call the model
+    AS-IS: pass n_predict/max_tokens through untouched.  An explicit
+    `llm.max_tokens` (or the server's own n_predict/max_tokens in params) is
+    the ONLY thing that caps — a default of 0/None means "no framework cap;
+    the server decides" (server context-window budget applies server-side).
+    A degenerate stream is already rejected by the '?'-ratio guard in
+    _consume_stream, so un-capping does not admit garbage."""
     if payload.get("n_predict") in (None, -1):
-        cap = int(global_cfg.llm.get("max_tokens", 8192) or 8192)
-        payload["n_predict"] = max(1, cap)
+        cap = global_cfg.llm.get("max_tokens") or 0
+        if cap and int(cap) > 0:
+            payload["n_predict"] = max(1, int(cap))
     return payload
 
 # gpt-oss (and other channel-style hybrid-reasoning models) emit their

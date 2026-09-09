@@ -201,11 +201,19 @@ def test_ban_blocks_acquire(tmp_cfg):
     assert not s.acquire()
 
 
-def test_cap_predict_caps_unlimited(orch):
+def test_cap_predict_no_cap_by_default(orch):
+    """KAISEN must NOT clamp generation output by default — a thinking model
+    emits thousands of reasoning tokens before the answer; an 8k default
+    truncates the thinking block (reply never reaches </think>). Call the
+    model AS-IS: unlimited stays unlimited unless max_tokens is set."""
     out = _cap_predict({"n_predict": -1}, orch.cfg)
-    assert 0 < out["n_predict"] <= 8192
+    assert out["n_predict"] == -1
     out2 = _cap_predict({"n_predict": None}, orch.cfg)
-    assert 0 < out2["n_predict"] <= 8192
+    assert out2["n_predict"] is None
+    # explicit opt-in clamps
+    orch.cfg.data["llm"]["max_tokens"] = 4096
+    out3 = _cap_predict({"n_predict": -1}, orch.cfg)
+    assert out3["n_predict"] == 4096
 
 
 def test_cap_predict_explicit_value_untouched(orch):
