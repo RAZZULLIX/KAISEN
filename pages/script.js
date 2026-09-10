@@ -1409,7 +1409,7 @@ function renderProjects() {
         <button class="btn btn-sm btn-primary" title="Open project" onclick="switchProject('${p.id}')">Open</button>
         <button class="btn btn-sm" title="Edit spec" onclick="editProjectSpec('${p.id}')">Edit</button>
         ${(eng && (eng.engine_state === 'running' || eng.engine_state === 'paused' || eng.paused === true)) ? `<button class="btn btn-sm btn-danger-soft" title="Stop engine" onclick="stopEngine('${p.id}')">Stop</button>` : ''}
-        <button class="btn btn-sm btn-danger-soft" title="Delete project" data-id="${p.id}" data-name="${escapeHtml(p.name)}" onclick="openDeleteProjectModal(this)">✕</button>
+        <button class="btn btn-sm btn-danger-soft" title="Delete project" data-id="${p.id}" data-name="${escapeHtml(p.name)}" onclick="openDeleteProjectModal(this)">Delete</button>
       </td>`;
     tbody.appendChild(tr);
   });

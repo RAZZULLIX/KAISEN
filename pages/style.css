@@ -601,7 +601,7 @@ img.footer-mark { height: 14px; width: 14px; object-fit: cover; border-radius: 3
 .valid-fill.mid { background: var(--warning); }
 .valid-fill.high { background: var(--accent); }
 .valid-pct { font-family: monospace; font-size: 10px; color: var(--muted); margin-top: 3px; }
-.col-actions { width: 176px; text-align: right; white-space: nowrap; }
+.col-actions { width: 208px; text-align: right; white-space: nowrap; display: flex; justify-content: flex-end; gap: 6px; align-items: center; }
 .col-actions .btn { padding: 4px 8px; font-size: 11px; }
 .proj-name { font-weight: 600; color: var(--text); display: flex; align-items: center; gap: 8px; }
 .proj-sub { font-size: 11px; color: var(--muted); margin-top: 3px; }
