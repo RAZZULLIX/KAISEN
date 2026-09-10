@@ -267,6 +267,7 @@ class ProjectRegistry:
                 "id": p.id,
                 "name": p.name,
                 "description": p.spec.get("description", ""),
+                "language": p.spec.get("language", ""),
                 "path": str(p.path),
                 "metrics": p.spec.get("metrics", {}),
             }

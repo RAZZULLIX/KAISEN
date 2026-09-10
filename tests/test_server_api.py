@@ -179,15 +179,18 @@ def test_projects_list_empty_then_created(api, registry):
     assert requests.get(base + "/api/projects", timeout=5).json()["projects"] == []
 
     spec = {"id": "demo-proj", "name": "Demo",
+            "language": "python",
             "steps": {"build": {"program": "gcc", "args": ["-O3", "{candidate}", "-o", "{artifact}"]},
                       "verify": [], "score": []},
             "metrics": {"ms": {"direction": "lower", "weight": 1.0}}}
     r = requests.post(base + "/api/projects", json={"id": "demo-proj", "spec": spec}, timeout=5)
     assert r.status_code == 200 and r.json()["ok"]
-    ids = [p["id"] for p in requests.get(base + "/api/projects", timeout=5).json()["projects"]]
+    items = requests.get(base + "/api/projects", timeout=5).json()["projects"]
+    ids = [p["id"] for p in items]
     assert "demo-proj" in ids
-    spec_back = requests.get(base + "/api/projects/demo-proj/spec", timeout=5).json()["spec"]
-    assert spec_back["name"] == "Demo"
+    listed = next(p for p in items if p["id"] == "demo-proj")
+    assert listed["language"] == "python"   # the projects table filters on it
+    assert listed["metrics"]["ms"]["direction"] == "lower"
 
 
 def test_project_create_rejects_guardrail_violation(api):

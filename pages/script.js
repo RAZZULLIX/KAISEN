@@ -1276,6 +1276,13 @@ async function saveBudgetModal() {
 // ------------------------------------------------------------------ //
 // projects
 // ------------------------------------------------------------------ //
+// projects view — one informative row per project, search + language filter
+// ------------------------------------------------------------------ //
+let projectsData = [];
+let projectsEngines = {};
+let langFilterValue = null;
+let langFilterVisible = false;
+
 async function loadProjects() {
   try {
     const [r, active] = await Promise.all([
@@ -1283,51 +1290,178 @@ async function loadProjects() {
       api('/api/active').catch(() => ({})),
     ]);
     activeProjectId = r.active_id;
-    renderProjects(r.projects, active);
+    projectsData = r.projects || [];
+    projectsEngines = {};
+    (active.engines || []).forEach(eng => {
+      if (eng && eng.project_id != null) projectsEngines[eng.project_id] = eng;
+    });
+    if (langFilterValue && !projectsData.some(p => p.language === langFilterValue)) {
+      langFilterValue = null;    // the filtered language no longer exists
+    }
+    renderProjects();
   } catch (e) { console.error(e); }
 }
-function renderProjects(projects, active = {}) {
-  const engines = {};
-  (active.engines || []).forEach(eng => { if (eng && eng.project_id != null) engines[eng.project_id] = eng; });
-  const c = document.getElementById('projects-list');
-  c.innerHTML = '';
-  if (!projects.length) { c.innerHTML = '<div class="empty-state"><span>No projects yet — create one.</span></div>'; return; }
-  projects.forEach(p => {
-    const activeProj = p.id === activeProjectId;
-    const mkeys = Object.keys(p.metrics || {}).join(', ');
-    const eng = engines[p.id];
-    let engineChip = '';
-    let stopBtn = '';
-    if (eng) {
-      const gen = eng.generation != null ? eng.generation : '?';
-      const running = eng.engine_state === 'running';
-      const paused = eng.engine_state === 'paused' || eng.paused === true;
-      if (running) {
-        engineChip = `<span class="engine-chip running">● running gen=${escapeHtml(String(gen))}</span>`;
-      } else if (paused) {
-        engineChip = `<span class="engine-chip paused">⏸ paused gen=${escapeHtml(String(gen))}</span>`;
-      } else {
-        engineChip = `<span class="engine-chip stopped">■ stopped</span>`;
-      }
-      if (running || paused) {
-        stopBtn = `<button class="btn" style="border-color: var(--danger); color: var(--danger);" onclick="stopEngine('${p.id}')">Stop engine</button>`;
-      }
-    }
-    const el = document.createElement('div');
-    el.className = `project-card ${activeProj ? 'active' : ''}`;
-    el.innerHTML = `
-      <div class="project-name">${escapeHtml(p.name)}${activeProj ? '<span class="chip chip-accent">ACTIVE</span>' : ''}${engineChip}</div>
-      <div class="project-desc">${escapeHtml(p.description || '')}</div>
-      <div class="project-meta">metrics: ${escapeHtml(mkeys || 'none')}</div>
-      <div class="action-row" style="margin-top:12px;">
-        <button class="btn btn-primary" onclick="switchProject('${p.id}')">Run</button>
-        <button class="btn" onclick="editProjectSpec('${p.id}')">Edit Spec</button>
-        ${stopBtn}
-        <button class="btn" style="border-color: var(--danger); color: var(--danger); margin-left:auto;" data-id="${p.id}" data-name="${escapeHtml(p.name)}" onclick="openDeleteProjectModal(this)">Delete</button>
-      </div>`;
-    c.appendChild(el);
+
+function visibleProjects() {
+  const q = (document.getElementById('projects-search')?.value || '').trim().toLowerCase();
+  return projectsData.filter(p => {
+    if (langFilterValue && (p.language || '') !== langFilterValue) return false;
+    if (q && !(p.name + ' ' + p.id).toLowerCase().includes(q)) return false;
+    return true;
   });
 }
+
+const ENGINE_ORDER = { running: 0, paused: 1, stopping: 2, pausing: 2, stopped: 3 };
+
+function sortProjects(list) {
+  return [...list].sort((a, b) => {
+    const ea = projectsEngines[a.id];
+    const eb = projectsEngines[b.id];
+    const ra = ea ? (ENGINE_ORDER[ea.engine_state] ?? 4) : 4;
+    const rb = eb ? (ENGINE_ORDER[eb.engine_state] ?? 4) : 4;
+    if (ra !== rb) return ra - rb;
+    if ((a.id === activeProjectId) !== (b.id === activeProjectId)) return a.id === activeProjectId ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
+}
+
+function engineCell(eng, p) {
+  if (!eng) return '<span class="eng-off">not started</span>';
+  const gen = eng.generation != null ? eng.generation : '?';
+  const sub = [];
+  if (eng.multi != null) sub.push(`m${eng.multi}`);
+  if (eng.autofix && (eng.autofix.max_tries != null || eng.autofix.repair_max != null)) {
+    sub.push(`fix ${eng.autofix.max_tries ?? 0}/${eng.autofix.repair_max ?? 0}`);
+  }
+  const subHtml = sub.length ? `<span class="eng-sub">${sub.join(' · ')}</span>` : '';
+  const st = eng.engine_state;
+  if (st === 'running') return `<span class="eng-run">● running gen ${escapeHtml(String(gen))}</span>${subHtml}`;
+  if (st === 'paused' || st === 'pausing' || eng.paused === true) return `<span class="eng-paused">⏸ paused gen ${escapeHtml(String(gen))}</span>${subHtml}`;
+  if (st === 'stopping') return `<span class="eng-stop">◼ stopping</span>${subHtml}`;
+  if (eng.engine_error) return `<span class="eng-err" title="${escapeHtml(eng.engine_error)}">✖ error</span>`;
+  return `<span class="eng-off">■ stopped</span>${subHtml}`;
+}
+
+function bestCell(p) {
+  const eng = projectsEngines[p.id];
+  const metrics = (eng && eng.best_metrics) || {};
+  const entries = Object.entries(metrics);
+  if (!entries.length) {
+    const f = eng && eng.best_fitness;
+    return f != null ? `<span class="best-val">${escapeHtml(String(f))}</span>` : '<span class="muted">—</span>';
+  }
+  const schema = p.metrics || {};
+  return entries.map(([k, v]) => {
+    const unit = (schema[k] && schema[k].unit) || '';
+    const n = typeof v === 'number' ? (Number.isInteger(v) ? v : v.toFixed(2)) : escapeHtml(String(v));
+    return `<span class="best-val" title="${escapeHtml(k)}">${n}${unit ? ' ' + escapeHtml(unit) : ''}</span>`;
+  }).join('<span class="best-sep"> · </span>');
+}
+
+function stateDot(p) {
+  const eng = projectsEngines[p.id];
+  const st = eng && eng.engine_state;
+  if (st === 'running') return '<span class="proj-dot running" title="running"></span>';
+  if (st === 'paused' || st === 'pausing' || (eng && eng.paused === true)) return '<span class="proj-dot paused" title="paused"></span>';
+  if (eng && eng.engine_error) return '<span class="proj-dot error" title="error"></span>';
+  if (eng) return '<span class="proj-dot stopped" title="stopped"></span>';
+  return '<span class="proj-dot idle" title="not started"></span>';
+}
+
+function renderProjects() {
+  const tbody = document.getElementById('projects-tbody');
+  const empty = document.getElementById('projects-empty');
+  const count = document.getElementById('projects-count');
+  if (!tbody) return;
+  const list = sortProjects(visibleProjects());
+  const langs = {};
+  projectsData.forEach(p => { const l = p.language || '?'; langs[l] = (langs[l] || 0) + 1; });
+  const langLabel = document.getElementById('lang-filter-label');
+  if (langLabel) langLabel.textContent = langFilterValue ? langFilterValue : 'All languages';
+  const langBtn = document.getElementById('lang-filter-btn');
+  if (langBtn) langBtn.classList.toggle('active', !!langFilterValue);
+  if (count) count.textContent = `${list.length} of ${projectsData.length} projects`;
+  tbody.innerHTML = '';
+  empty.style.display = list.length ? 'none' : '';
+  list.forEach(p => {
+    const eng = projectsEngines[p.id];
+    const tr = document.createElement('tr');
+    tr.className = p.id === activeProjectId ? 'row-active' : '';
+    tr.title = `Open ${p.name}`;
+    tr.addEventListener('click', () => switchProject(p.id));
+    const valid = eng && eng.valid_rate != null ? `${Math.round(eng.valid_rate * 100)}%` : '—';
+    tr.innerHTML = `
+      <td class="col-state">${stateDot(p)}</td>
+      <td class="col-project">
+        <div class="proj-name">${escapeHtml(p.name)}${p.id === activeProjectId ? ' <span class="chip chip-accent">ACTIVE</span>' : ''}</div>
+        <div class="proj-sub"><span class="proj-id">${escapeHtml(p.id)}</span>${p.description ? ` · <span class="proj-desc">${escapeHtml(p.description)}</span>` : ''}</div>
+      </td>
+      <td class="col-lang"><span class="lang-chip">${escapeHtml(p.language || '?')}</span></td>
+      <td class="col-engine">${engineCell(eng, p)}</td>
+      <td class="col-best">${bestCell(p)}</td>
+      <td class="col-valid"><span class="valid-val">${escapeHtml(valid)}</span></td>
+      <td class="col-actions" onclick="event.stopPropagation()">
+        <button class="btn btn-sm btn-primary" title="Open project" onclick="switchProject('${p.id}')">Open</button>
+        <button class="btn btn-sm" title="Edit spec" onclick="editProjectSpec('${p.id}')">Edit</button>
+        ${(eng && (eng.engine_state === 'running' || eng.engine_state === 'paused' || eng.paused === true)) ? `<button class="btn btn-sm btn-danger-soft" title="Stop engine" onclick="stopEngine('${p.id}')">Stop</button>` : ''}
+        <button class="btn btn-sm btn-danger-soft" title="Delete project" data-id="${p.id}" data-name="${escapeHtml(p.name)}" onclick="openDeleteProjectModal(this)">✕</button>
+      </td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+// ---- language filter (combobox with its own search) --------------------
+function toggleLangFilter(event) {
+  if (event) event.stopPropagation();
+  const pop = document.getElementById('lang-filter-pop');
+  langFilterVisible = !langFilterVisible;
+  pop.style.display = langFilterVisible ? '' : 'none';
+  const btn = document.getElementById('lang-filter-btn');
+  btn.setAttribute('aria-expanded', String(langFilterVisible));
+  if (langFilterVisible) {
+    const search = document.getElementById('lang-filter-search');
+    search.value = '';
+    filterLangList('');
+    search.focus();
+  }
+}
+function filterLangList(q) {
+  q = (q || '').trim().toLowerCase();
+  const langs = {};
+  projectsData.forEach(p => { const l = p.language || '?'; langs[l] = (langs[l] || 0) + 1; });
+  const list = document.getElementById('lang-filter-list');
+  const items = Object.entries(langs)
+    .filter(([l]) => !q || l.toLowerCase().includes(q))
+    .sort((a, b) => a[0].localeCompare(b[0]));
+  list.innerHTML = '';
+  const all = document.createElement('div');
+  all.className = 'lang-item' + (langFilterValue === null ? ' selected' : '');
+  all.textContent = `All languages (${projectsData.length})`;
+  all.onclick = () => setLangFilter(null);
+  list.appendChild(all);
+  items.forEach(([l, n]) => {
+    const el = document.createElement('div');
+    el.className = 'lang-item' + (langFilterValue === l ? ' selected' : '');
+    el.textContent = `${l} (${n})`;
+    el.onclick = () => setLangFilter(l);
+    list.appendChild(el);
+  });
+  if (!items.length && q) list.innerHTML = '<div class="lang-item muted">No language matches</div>';
+}
+function setLangFilter(l) {
+  langFilterValue = l;
+  langFilterVisible = false;
+  document.getElementById('lang-filter-pop').style.display = 'none';
+  document.getElementById('lang-filter-btn').setAttribute('aria-expanded', 'false');
+  renderProjects();
+}
+document.addEventListener('click', (e) => {
+  if (langFilterVisible && !document.getElementById('lang-filter').contains(e.target)) {
+    langFilterVisible = false;
+    document.getElementById('lang-filter-pop').style.display = 'none';
+    document.getElementById('lang-filter-btn').setAttribute('aria-expanded', 'false');
+  }
+});
 
 async function switchProject(id) {
   try {

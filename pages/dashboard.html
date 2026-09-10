@@ -171,7 +171,37 @@
             <button class="btn btn-primary" onclick="openNewProjectModal()">+ New Project</button>
           </div>
         </header>
-        <div id="projects-list" class="projects-grid"></div>
+        <div class="projects-toolbar">
+          <input type="search" id="projects-search" class="projects-search" placeholder="Search projects…" oninput="renderProjects()">
+          <div class="lang-filter" id="lang-filter">
+            <button class="btn lang-filter-btn" id="lang-filter-btn" onclick="toggleLangFilter(event)" aria-haspopup="listbox" aria-expanded="false">
+              <span id="lang-filter-label">All languages</span>
+              <span class="lang-filter-caret">▾</span>
+            </button>
+            <div class="lang-filter-pop" id="lang-filter-pop" style="display:none;">
+              <input type="search" id="lang-filter-search" class="lang-filter-search" placeholder="Type a language…" oninput="filterLangList(this.value)">
+              <div class="lang-filter-list" id="lang-filter-list"></div>
+            </div>
+          </div>
+          <span class="projects-count" id="projects-count"></span>
+        </div>
+        <div class="projects-table-wrap">
+          <table class="projects-table">
+            <thead>
+              <tr>
+                <th class="col-state" title="Engine state"></th>
+                <th>Project</th>
+                <th>Language</th>
+                <th>Engine</th>
+                <th>Best</th>
+                <th>Valid</th>
+                <th class="col-actions">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="projects-tbody"></tbody>
+          </table>
+          <div id="projects-empty" class="empty-state" style="display:none;">No projects match.</div>
+        </div>
       </div>
 
 
