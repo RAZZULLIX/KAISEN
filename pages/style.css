@@ -582,7 +582,7 @@ img.footer-mark { height: 14px; width: 14px; object-fit: cover; border-radius: 3
 .lang-item.muted { color: var(--muted); cursor: default; }
 .projects-count { font-size: 12px; color: var(--muted); margin-left: auto; }
 .projects-table-wrap { border: 1px solid var(--border); border-radius: var(--radius-md); overflow-x: auto; overflow-y: hidden; }
-.projects-table { width: 100%; border-collapse: collapse; table-layout: fixed; min-width: 860px; }
+.projects-table { width: auto; max-width: 100%; border-collapse: collapse; table-layout: fixed; min-width: 860px; }
 .projects-table thead th { position: sticky; top: 0; background: #161616; text-align: left; font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); padding: 9px 12px; border-bottom: 1px solid var(--border2); z-index: 2; }
 .projects-table td { padding: 9px 12px; border-bottom: 1px solid var(--border); vertical-align: middle; font-size: 13px; }
 .projects-table tbody tr { cursor: pointer; }
@@ -590,6 +590,7 @@ img.footer-mark { height: 14px; width: 14px; object-fit: cover; border-radius: 3
 .projects-table tbody tr.row-active { background: rgba(0,232,124,0.04); }
 .projects-table tbody tr:last-child td { border-bottom: none; }
 .col-state { width: 34px; text-align: center; }
+.col-project { max-width: 768px; }
 .col-lang { width: 84px; }
 .col-engine { width: 118px; font-size: 12px; }
 .col-best { width: 118px; }
