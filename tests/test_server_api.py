@@ -422,6 +422,34 @@ def test_engine_pool_persist_and_restore(tmp_cfg, registry):
     srv2.engines["pool-a"].stop()
 
 
+def test_engines_share_one_orchestrator(tmp_cfg, registry):
+    """Every engine must share ONE process-wide orchestrator.  A private
+    orchestrator per engine let N engines each run `max_concurrent`
+    requests per box (N x the real capacity) — the oversubscription that
+    showed up as dozens of bound sessions on a single-slot box while the
+    pill mixed private counters with shared sessions."""
+    import json as _json
+    registry.create("pool-o1", _spec("pool-o1"))
+    registry.create("pool-o2", _spec("pool-o2"))
+    pool_file = tmp_cfg.path.parent / "engine_pool.json"
+    pool_file.write_text(_json.dumps({
+        "selected": "pool-o1",
+        "engines": {"pool-o1": {"multi": 1}, "pool-o2": {"multi": 1}},
+    }))
+    srv = DashboardServer(registry, tmp_cfg, engine=None,
+                          host="127.0.0.1", port=8080,
+                          temp_root=tmp_cfg.path.parent / "temp")
+    try:
+        assert set(srv.engines) == {"pool-o1", "pool-o2"}
+        o1 = srv.engines["pool-o1"].orchestrator
+        o2 = srv.engines["pool-o2"].orchestrator
+        assert o1 is o2                # ONE shared acquire gate + servers
+        assert o1 is srv._shared_orchestrator()
+    finally:
+        for eng in srv.engines.values():
+            eng.stop()
+
+
 def test_score_endpoint_scores_file(api, tmp_path):
     """SCORE any file: full build+verify+score pipeline, no engine needed."""
     srv, base = api

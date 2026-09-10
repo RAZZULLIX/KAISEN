@@ -13,6 +13,26 @@ from kaisen.llm import ModelOrchestrator
 from kaisen.projects import ProjectRegistry
 
 
+@pytest.fixture(autouse=True)
+def _healthy_llm(monkeypatch):
+    """The health registry + re-probe loop are PROCESS-WIDE: a failed
+    probe on a dummy test URL marks that server id OFFLINE for every
+    later test (fresh Server objects read the same health record) and the
+    acquire then parks forever.  Keep probes healthy and the loop idle so
+    these unit tests are hermetic."""
+    import kaisen.llm as _llm
+
+    class _R:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return []
+
+    monkeypatch.setattr("kaisen.llm.requests.get", lambda *a, **kw: _R())
+    monkeypatch.setattr(_llm, "_reprobe_cycle", lambda: None)
+
+
 # ----------------------------------------------------------------------
 # session tps = real decode rate of the CURRENT generation
 # ----------------------------------------------------------------------
@@ -108,25 +128,26 @@ def test_acquire_queues_waiters_until_slot_frees(tmp_path):
     cfg.llm["active_ids"] = ["one"]
     orch = ModelOrchestrator(cfg)
     sA, sB = Session(0, "code", 1, "p"), Session(1, "code", 2, "p")
-    got = {}
+    outA, outB = {}, {}
 
     def acquire(sess, out):
         out["sid"] = orch._acquire_server(session=sess, min_tier="tiny")
 
-    tA = threading.Thread(target=acquire, args=(sA, got))
+    tA = threading.Thread(target=acquire, args=(sA, outA), daemon=True)
     tA.start()
     tA.join(timeout=5)
-    assert got["sid"] == "one" and sA.server_id == "one"
+    assert outA.get("sid") == "one" and sA.server_id == "one"
     assert sA.waiting is False
 
     # The single slot is held: B must QUEUE, not bind to the busy server.
-    tB = threading.Thread(target=acquire, args=(sB, got))
+    tB = threading.Thread(target=acquire, args=(sB, outB), daemon=True)
     tB.start()
     time.sleep(0.3)
-    assert tB.is_alive()
-    assert sB.server_id is None and sB.waiting is True
-
-    orch.release("one")               # slot frees -> the waiter wakes
+    try:
+        assert tB.is_alive()
+        assert sB.server_id is None and sB.waiting is True
+    finally:
+        orch.release("one")           # slot frees -> the waiter wakes
     tB.join(timeout=5)
     assert not tB.is_alive()
     assert sB.server_id == "one" and sB.waiting is False

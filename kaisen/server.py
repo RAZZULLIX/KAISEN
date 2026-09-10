@@ -135,6 +135,11 @@ class DashboardServer:
         # Crash recovery: bring back the pool that was running when the
         # daemon died.  Temp projects are wiped at startup so only REAL
         # projects restore; restore_paused=True (tests) boots them paused.
+        # Server management must work BEFORE any engine exists (first run):
+        # fall back to a bare orchestrator when no project engine is up.
+        # Initialized BEFORE _restore_engine_pool: restored engines share
+        # this one process-wide orchestrator.
+        self._base_orchestrator = None
         self._restore_paused = restore_paused
         self._restore_engine_pool(registry)
         self.app.on_cleanup.append(self._on_cleanup)
@@ -150,9 +155,6 @@ class DashboardServer:
         # its PROJECT selection between requests (see docs/KAI.md).
         self._kai_sessions: Dict[str, Any] = {}
         self._kai_lock = threading.Lock()
-        # Server management must work BEFORE any engine exists (first run):
-        # fall back to a bare orchestrator when no project engine is up.
-        self._base_orchestrator = None
         self._swarm = None
         self._agent_state: Dict[str, Any] = {"running": False, "turns": [], "summary": "", "tokens": "", "started": None}
         self._agent_cancel = threading.Event()
@@ -246,10 +248,15 @@ class DashboardServer:
                 if project is None:
                     continue
                 from .engine import EngineEvent, ProjectEngine
-                from .llm import ModelOrchestrator
                 eng = ProjectEngine(
                     project,
-                    ModelOrchestrator(self.cfg),
+                    # ONE process-wide orchestrator: every engine's acquire
+                    # gate, cap-fill reservations and Server objects must be
+                    # SHARED.  A private orchestrator per engine let N
+                    # engines each run max_concurrent requests per box
+                    # (N x the real capacity) and made the pill mix
+                    # private counters with shared sessions.
+                    self._shared_orchestrator(),
                     registry,
                     worker_count=project.default_workers,
                     events=EngineEvent(),
@@ -298,15 +305,24 @@ class DashboardServer:
             out.append(row)
         return out
 
+    def _shared_orchestrator(self):
+        """ONE orchestrator for every engine in this process: the acquire
+        gate, cap-fill reservation pool and Server objects are SHARED.
+        A private orchestrator per engine let N engines each run
+        `max_concurrent` requests per box (N x the real capacity — the
+        oversubscription the pill exposed) and mixed private counters
+        with shared sessions."""
+        if getattr(self, "_base_orchestrator", None) is None:
+            from .llm import ModelOrchestrator
+            self._base_orchestrator = ModelOrchestrator(self.cfg)
+        return self._base_orchestrator
+
     def _orch(self):
         """Engine orchestrator when a project runs, else a bare one —
         both read/write the same config.json registry."""
         if self.engine is not None:
             return self.engine.orchestrator
-        if self._base_orchestrator is None:
-            from .llm import ModelOrchestrator
-            self._base_orchestrator = ModelOrchestrator(self.cfg)
-        return self._base_orchestrator
+        return self._shared_orchestrator()
 
     def _swarm_coord(self):
         """Swarm coordinator, created on first use (orchestrator-backed)."""
@@ -1547,8 +1563,7 @@ class DashboardServer:
         eng = self.engines.get(pid)
         if eng is None:
             from .engine import EngineEvent, ProjectEngine
-            from .llm import ModelOrchestrator
-            orchestrator = ModelOrchestrator(self.cfg)
+            orchestrator = self._shared_orchestrator()   # see _restore_engine_pool
             events = EngineEvent()
             # Use the project's OWN registry (temp registry for temp
             # projects) so its workers resolve candidates/data under the
@@ -2107,8 +2122,8 @@ class DashboardServer:
             # ?debug=1: per-engine session dumps — the full truth behind
             # the aggregated rows (which sessions are bound, waiting,
             # prefilling) for field diagnosis without touching the boxes.
-            **({"debug_sessions": {pid: e.sessions.snapshot()
-                                   for pid, e in pool.items()}}
+            **({"debug_sessions": {e.project.id: e.sessions.snapshot()
+                                   for e in pool}}
                if request.query.get("debug") else {}),
         })
 

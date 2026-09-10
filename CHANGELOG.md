@@ -44,11 +44,22 @@ than LLM slots queue instead of piling onto the boxes.
 
 ### Changed
 
-- **LLM requests queue like the workers.** `_acquire_server` waiters now
-  park on a FIFO condition queue woken the moment a slot frees
-  (`release()` notifies), instead of every pipeline polling on its own
-  1s timer.  The acquire gate itself was verified sound (one bound
-  stream per box); the queue makes the wait orderly and instant.
+- **Every engine owned a PRIVATE orchestrator — the root cause.** The
+  engine-pool restore (and the engine-start API) built one
+  `ModelOrchestrator` per engine, so N engines had N independent
+  acquire gates, Server objects and cap-fill reservation pools.  Each
+  gate allowed `max_concurrent` requests per box — 29 engines could
+  legally open 29 streams on a 1-slot box (the box then queues them
+  internally: the "llama.cpp is working but I see no stream" symptom) —
+  and the pill mixed one engine's private counters with every engine's
+  sessions.  Now ONE process-wide orchestrator is shared by all engines
+  (`_shared_orchestrator()`), exactly like the shared worker pool: the
+  FIFO wait queue and the per-box capacity are global truths.
+- **Requests queue like the workers.** `_acquire_server` waiters park
+  on a FIFO condition queue woken the moment a slot frees (`release()`
+  notifies), instead of every pipeline polling on its own 1s timer.
+  With the shared orchestrator, more requests than LLM slots now QUEUE
+  (the pill shows `· N queued`) instead of piling onto the boxes.
 - **`/api/llm/status` rows** carry `streaming` (bound-generating),
   `queued` (waiters), `acquired` (server-side acquire counter) and
   `detected_slots` — the pill and KAI now report reality, and a leak is
