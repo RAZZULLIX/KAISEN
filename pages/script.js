@@ -868,7 +868,7 @@ function filterIterations() { renderIterations(); }
 function toggleArchiveFilter() {
   showArchivedNotes = !showArchivedNotes;
   const btn = document.getElementById('archive-toggle-btn');
-  if (btn) btn.textContent = showArchivedNotes ? 'Show Active' : 'Show Archived';
+  if (btn) btn.textContent = showArchivedNotes ? 'Active' : 'Archived';
   // reload + re-render the notes view with the flipped archive filter
   loadNotes();
 }
@@ -3127,8 +3127,12 @@ function filterNotes(query) {
   });
   if (filtered.length === 0) {
     container.innerHTML = `<div class="empty-state"><div class="pulse"></div><span>${showArchivedNotes ? 'No archived notes.' : 'No operational notes recorded.'}</span></div>`;
+    const cnt0 = document.getElementById('notes-count');
+    if (cnt0) cnt0.textContent = `0 of ${notesData.length} notes`;
     return;
   }
+  const cnt = document.getElementById('notes-count');
+  if (cnt) cnt.textContent = `${filtered.length} of ${notesData.length} notes`;
   filtered.forEach(note => {
     const el = document.createElement('div');
     el.className = `note-item ${note.archived ? 'note-archived' : ''}`;
@@ -3202,9 +3206,7 @@ function openNoteDetail(id) {
   if (!note) return;
   document.getElementById('notes-list').style.display = 'none';
   document.getElementById('note-detail').style.display = 'flex';
-  document.querySelector('.fab').style.display = 'none';
-  document.querySelector('#view-notes .main-header').style.display = 'none';
-  document.getElementById('notes-search').style.display = 'none';
+  document.querySelector('#view-notes .view-toolbar').style.display = 'none';
   document.getElementById('note-detail-title-display').textContent = note.title || 'Untitled';
   document.getElementById('note-detail-title-editor').value = note.title || '';
   document.getElementById('note-detail-display').textContent = note.text || '';
@@ -3226,9 +3228,7 @@ function closeNoteDetail() {
   activeNoteId = null;
   document.getElementById('notes-list').style.display = 'flex';
   document.getElementById('note-detail').style.display = 'none';
-  document.querySelector('.fab').style.display = 'flex';
-  document.querySelector('#view-notes .main-header').style.display = '';
-  document.getElementById('notes-search').style.display = '';
+  document.querySelector('#view-notes .view-toolbar').style.display = '';
   filterNotes(document.getElementById('notes-search').value);
 }
 function renderColorPicker(activeColor) {

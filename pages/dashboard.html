@@ -166,9 +166,9 @@
 
       <div id="view-projects" style="display: none;">
         <div class="projects-panel">
-          <div class="projects-toolbar">
-            <span class="projects-view-title">Projects</span>
-            <input type="search" id="projects-search" class="projects-search" placeholder="Search projects…" oninput="renderProjects()">
+          <div class="view-toolbar">
+            <span class="view-title">Projects</span>
+            <input type="search" id="projects-search" class="view-search" placeholder="Search projects…" oninput="renderProjects()">
             <div class="lang-filter" id="lang-filter">
               <button class="btn lang-filter-btn" id="lang-filter-btn" onclick="toggleLangFilter(event)" aria-haspopup="listbox" aria-expanded="false">
                 <span id="lang-filter-label">All languages</span>
@@ -204,15 +204,17 @@
 
 
       <div id="view-notes" style="display: none;">
-        <header class="main-header">
-          <div><div class="breadcrumbs">SYSTEM · NOTES</div><div class="project-title">Operational Notes</div></div>
-          <div class="header-actions">
-            <button class="btn" id="archive-toggle-btn" onclick="toggleArchiveFilter()">Show Archived</button>
+        <div class="notes-panel">
+          <div class="view-toolbar">
+            <span class="view-title">Notes</span>
+            <input type="search" id="notes-search" class="view-search" placeholder="Search notes…" oninput="filterNotes(this.value)">
+            <span class="toolbar-label">Filter by color</span>
+            <div id="color-filters-container" class="color-filters-container"></div>
+            <span class="projects-count" id="notes-count"></span>
+            <button class="btn" id="archive-toggle-btn" onclick="toggleArchiveFilter()">Archived</button>
+            <button class="btn btn-primary" onclick="openNoteModal()">+ New Note</button>
           </div>
-        </header>
-        <div class="notes-container">
-          <div id="color-filters-container" class="color-filters-container"></div>
-          <input type="text" id="notes-search" class="notes-search" placeholder="Search notes..." oninput="filterNotes(this.value)">
+          <div class="notes-container">
           <div id="notes-list" class="notes-list"></div>
           <div id="note-detail" class="note-detail" style="display: none;">
             <div class="note-detail-header">
@@ -244,9 +246,8 @@
               <button class="btn" style="margin-left: auto; border-color: var(--danger); color: var(--danger);" onclick="deleteNote()">Delete Note</button>
             </div>
           </div>
+          </div>
         </div>
-
-        <button class="fab" aria-label="New note" title="New note" onclick="openNoteModal()">+</button>
       </div>
     <div id="view-config" class="settings-bar" style="display: none;">
       <div class="settings-bar-head">

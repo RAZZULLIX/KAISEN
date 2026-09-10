@@ -188,8 +188,8 @@ textarea { min-height: 80px; resize: vertical; }
 @keyframes glowRed { 0% { text-shadow: 0 0 0 rgba(255, 75, 106, 0); } 25% { text-shadow: 0 0 15px rgba(255, 75, 106, 0.9), 0 0 30px rgba(255, 75, 106, 0.7), 0 0 45px rgba(255, 75, 106, 0.5); } 50% { text-shadow: 0 0 0 rgba(255, 75, 106, 0); } 75% { text-shadow: 0 0 15px rgba(255, 75, 106, 0.9), 0 0 30px rgba(255, 75, 106, 0.7), 0 0 45px rgba(255, 75, 106, 0.5); } 100% { text-shadow: 0 0 0 rgba(255, 75, 106, 0); } }
 .config-input { background: #0a0a0a; border: 1px solid var(--border2); color: var(--accent); padding: 10px; border-radius: 8px; font-family: monospace; font-size: 13px; width: 100%; margin-top: 6px; }
 .config-input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 8px rgba(0, 232, 124, 0.3); }
-.notes-container { display: flex; flex-direction: column; gap: 20px; flex: 1; min-height: 0; max-height: calc(100vh - 220px); overflow: hidden; width: 100%; max-width: 1024px; margin: 0 auto; }
-.notes-search { padding: 12px; background: #111; border: 1px solid var(--border2); color: var(--text); border-radius: 8px; font-size: 13px; }
+.notes-panel { display: flex; flex-direction: column; gap: 14px; width: 100%; max-width: 1024px; margin: 0 auto; flex: 1; min-height: 0; }
+.notes-container { display: flex; flex-direction: column; gap: 20px; flex: 1; min-height: 0; max-height: calc(100vh - 220px); overflow: hidden; width: 100%; }
 .notes-list { display: flex; flex-direction: column; gap: 14px; flex: 1; overflow-y: auto; padding-right: 12px; scrollbar-width: thin; scrollbar-color: var(--border2) transparent; }
 .notes-list::-webkit-scrollbar { width: 8px; }
 .notes-list::-webkit-scrollbar-track { background: transparent; }
@@ -235,8 +235,6 @@ textarea { min-height: 80px; resize: vertical; }
 .note-comment-input:focus { outline: none; border-color: var(--accent); }
 .note-comment-bubble { display: inline-flex; align-items: center; justify-content: center; background: rgba(232, 232, 232, 0.12); color: var(--text); border: 1px solid rgba(--text); border-radius: 999px; padding: 4px 10px; font-size: 11px; font-weight: 600; letter-spacing: 0.04em; gap: 6px; box-shadow: 0 2px 8px rgba(232, 232, 232, 0.15); min-width: 48px;}
 .note-detail-actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 6px; }
-.fab { position: fixed; bottom: 32px; right: 32px; width: 60px; height: 60px; border-radius: 50%; background: linear-gradient(135deg, var(--accent), var(--accent2)); color: #02140a; border: none; font-size: 28px; font-weight: bold; cursor: pointer; box-shadow: 0 4px 16px rgba(0,232,124,0.5); display: flex; align-items: center; justify-content: center; transition: transform 0.2s, box-shadow 0.2s; z-index: 100; }
-.fab:hover { transform: scale(1.05); box-shadow: 0 6px 20px rgba(0,232,124,0.7); }
 .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.75); backdrop-filter: blur(4px); display: flex; align-items: center; justify-content: center; z-index: 200; overflow-y: auto; }
 .modal-content { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 24px; width: 90%; max-width: 600px; max-height: calc(100vh - 32px); overflow-y: auto; margin: auto; display: flex; flex-direction: column; gap: 16px; box-shadow: var(--shadow-soft); }
 .modal-content h3 { font-size: 18px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text2); margin-bottom: 6px; }
@@ -305,12 +303,12 @@ textarea { min-height: 80px; resize: vertical; }
 .color-filters-container {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 6px;
   align-items: center;
 }
 .color-filter-chip {
-  width: 22px;
-  height: 22px;
+  width: 18px;
+  height: 18px;
   border-radius: 50%;
   cursor: grab;
   border: 2px solid transparent;
@@ -580,10 +578,10 @@ img.footer-mark { height: 14px; width: 14px; object-fit: cover; border-radius: 3
 
 /* projects — one informative row per project */
 .projects-panel { width: fit-content; max-width: 100%; margin: 0 auto; }
-.projects-view-title { font-size: 20px; font-weight: 500; color: var(--text); white-space: nowrap; margin-right: 6px; }
-.projects-toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; }
-.projects-search { flex: 1 1 260px; max-width: 420px; background: rgba(255,255,255,0.03); border: 1px solid var(--border2); border-radius: var(--radius-md); color: var(--text); padding: 9px 14px; font-size: 13px; outline: none; }
-.projects-search:focus { border-color: var(--accent); }
+.view-title { font-size: 20px; font-weight: 500; color: var(--text); white-space: nowrap; margin-right: 6px; }
+.view-toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; }
+.view-search { flex: 0 1 240px; min-width: 130px; max-width: 420px; background: rgba(255,255,255,0.03); border: 1px solid var(--border2); border-radius: var(--radius-md); color: var(--text); padding: 9px 14px; font-size: 13px; outline: none; }
+.view-search:focus { border-color: var(--accent); }
 .lang-filter { position: relative; }
 .lang-filter-btn { display: inline-flex; align-items: center; gap: 8px; white-space: nowrap; }
 .lang-filter-btn.active { border-color: var(--accent); color: var(--accent); }
@@ -595,6 +593,7 @@ img.footer-mark { height: 14px; width: 14px; object-fit: cover; border-radius: 3
 .lang-item:hover { background: rgba(255,255,255,0.06); }
 .lang-item.selected { color: var(--accent); background: rgba(0,232,124,0.08); }
 .lang-item.muted { color: var(--muted); cursor: default; }
+.toolbar-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; white-space: nowrap; }
 .projects-count { font-size: 12px; color: var(--muted); margin-left: auto; }
 .projects-table-wrap { width: fit-content; max-width: 100%; background: rgba(20,20,20,0.98); border: 1px solid var(--border); border-radius: var(--radius-lg); box-shadow: var(--shadow-soft); overflow-x: auto; overflow-y: hidden; }
 .projects-table { width: auto; max-width: 100%; border-collapse: collapse; table-layout: fixed; min-width: 860px; }
@@ -763,7 +762,6 @@ input:focus-visible, select:focus-visible, textarea:focus-visible, summary:focus
 .console-header { font-size: 14px; }
 .llm-name { font-size: 13px; }
 .llm-model, .llm-stats, .llm-chats { font-size: 12px; }
-.notes-search { font-size: 14px; }
 #last-update { font-size: 12px; color: var(--muted); margin-left: 12px; }
 
 /* buttons: bigger hit areas */
