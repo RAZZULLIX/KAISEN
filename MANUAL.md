@@ -42,7 +42,7 @@ hardcoded guardrails — KAISEN never trusts the model's word alone.
 | **Fitness** | The weighted composite of all metrics; the champion is the best fitness. |
 | **Pipeline** | The per-candidate sequence: build → verify* → score*. |
 | **Engine** | The background evolution loop for one project. Several engines run concurrently (the pool). |
-| **Worker** | A process that executes pipelines; several workers evaluate candidates in parallel. |
+| **Worker** | A process that executes pipelines; a SHARED pool of workers drains one FIFO job queue across ALL projects (never N projects × N worker sets). |
 
 ---
 
@@ -203,7 +203,7 @@ projects/<id>/
 | `steps.score` | list of score commands; must emit parseable metrics. A score step may declare `stage: "screen"|"confirm"` — the CONFIRM step's metric is what selects the champion (robust measurement); screen steps are cheap filters (§6) |
 | `metrics` | `{key: {direction: lower\|higher, weight: float, unit?: str, constraint?: float}}` — at least one required. A `constraint` is a HARD gate: violating it rejects the candidate outright (outcome `constraint_violated`) — no fitness weighting can compensate. Enforce "without changing the output" here, not in a prompt |
 | `telemetry` | `{enabled, progress_token, live_fields}` — harness progress protocol (§6) |
-| `engine` | `{workers, multi, autofix, retention, build_cache}` — startup sizing (project > config > 1/1); `autofix: {tries, repair}` sets per-project compile-loop caps (KAI override > spec > config); `retention: {enabled, keep_last, keep_best}` opt-in pruning of old `runs/gen_*` dirs (§8); `build_cache: true` routes the build through a per-project ccache masquerade (`CCACHE_DIR` = `projects/<id>/.kaisen_cache`) so unchanged translation units reuse across generations — off by default, needs ccache on PATH (§6) |
+| `engine` | `{workers, multi, autofix, retention, build_cache}` — startup sizing (project > config > 1/1). `workers` is a MINIMUM for the SHARED pool (§8): the pool is process-wide, so N projects each asking 4 workers still yield 4 workers, not 4N; `autofix: {tries, repair}` sets per-project compile-loop caps (KAI override > spec > config); `retention: {enabled, keep_last, keep_best}` opt-in pruning of old `runs/gen_*` dirs (§8); `build_cache: true` routes the build through a per-project ccache masquerade (`CCACHE_DIR` = `projects/<id>/.kaisen_cache`) so unchanged translation units reuse across generations — off by default, needs ccache on PATH (§6) |
 | `select.hysteresis` | champion replacement threshold; 1 = any improvement, 1.1 = must beat the champion by 10% (values < 1 are clamped to 1) |
 | `guardrails` | `{enabled, allow_extra, deny_extra}` — extra command rules |
 | `prompts` | `{generation_dir, goal, study, lesson}` — prompt templates |
@@ -494,8 +494,17 @@ One engine per running project; several engines form the pool.
 
 - **Producer threads** ask the LLM for the next candidate (prompt =
   project prompts + champion code + memory/lessons + tier-aware boost).
-- **Workers** (processes) run pipelines in parallel; the queue is
-  bounded (`workers.queue_size`).
+- **Workers — ONE shared pool.** Worker processes are process-wide
+  (like the LLM orchestrator): every project's jobs go into a single
+  FIFO queue drained by a fixed worker set in submission order.  Twenty
+  projects at once means twenty job SUBMITTERS, never twenty worker
+  sets — the old per-engine pools scaled worker processes with the
+  project count and could exhaust the machine.  A project's
+  `engine.workers` is a MINIMUM the shared pool grows to; the global
+  ceiling is `workers.max_count`.  Producers apply backpressure on the
+  shared queue depth (`workers.queue_size`), so the backlog stays
+  bounded no matter how many engines are asking.  Each worker's
+  telemetry card names the project it is serving right now.
 - **Baseline** — the user's original program is evaluated first; it is
   SACRED: never rewritten, never repaired, always available as the
   comparison point.
@@ -943,9 +952,9 @@ Complete reference — copy from `config.example.json`:
 | `llm.routing` | `"cost"` | `"cost"` (tier-first, default) or `"adaptive"` (best measured score-per-$ per skill, within allowlists) |
 | `llm.allowlists` | `{}` | per-skill model allowlists: `{"suggest": ["frontier-70b"], "llm_repair": ["tier:tiny"]}` — entries are server ids or `tier:<t>` |
 | `llm.servers[].budget` | `null` | per-server usage budget (optional): `{max_tokens, max_generations, reset}` — caps tokens/generations inside a reset window; an exhausted server drops out of routing until it rolls over (§13 usage budgets) |
-| `workers.default_count` | `4` | worker processes per engine |
-| `workers.max_count` | `32` | hard ceiling |
-| `workers.queue_size` | `8` | bounded pipeline queue |
+| `workers.default_count` | `4` | worker processes in the SHARED pool (process-wide — every project's jobs drain through the same queue) |
+| `workers.max_count` | `32` | hard global ceiling on worker processes |
+| `workers.queue_size` | `8` | bounded shared job-queue backlog (producers pause when the queue fills) |
 | `workers.affinity` | `""` | pin worker processes to cores (e.g. `"0,2"` or `"1-3"`) — empty = no pinning (§18 quiet benchmarking) |
 | `workers.quiet` | `false` | run workers at lower priority (nice +10) so scorers don't starve the dashboard/LLMs |
 | `engine.start_paused` | `true` | new engines boot paused |

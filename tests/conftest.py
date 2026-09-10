@@ -24,3 +24,13 @@ def registry(tmp_path):
     root = tmp_path / "projects"
     root.mkdir()
     return ProjectRegistry(root)
+
+
+@pytest.fixture(autouse=True)
+def _reset_shared_workers():
+    """The worker pool is a process-wide singleton — reset it between tests
+    so no test inherits another's worker processes or handlers."""
+    from kaisen.workers import reset_worker_pool
+    reset_worker_pool()
+    yield
+    reset_worker_pool()

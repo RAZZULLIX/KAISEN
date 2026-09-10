@@ -13,7 +13,7 @@ import pytest
 
 from kaisen.engine import ProjectEngine
 from kaisen.projects import ProjectRegistry
-from kaisen.workers import WorkerPool
+from kaisen.workers import get_worker_pool
 
 
 def _make_engine(tmp_path):
@@ -155,10 +155,13 @@ def test_shrink_to_empty_pool_ok(tmp_path):
     root = tmp_path / "projects"
     root.mkdir()
     registry = ProjectRegistry(root)
-    pool = WorkerPool(registry, "proj")  # no workers started
+    from kaisen.workers import reset_worker_pool, get_worker_pool
+    reset_worker_pool()
+    pool = get_worker_pool()  # no workers started
     assert pool.shrink_to(0) == 0
     assert pool.shrink_to(2) == 0        # nothing to remove; target lowered
     assert pool._target == 2
+    reset_worker_pool()
 
 
 # ----------------------------------------------------------------------

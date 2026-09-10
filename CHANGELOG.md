@@ -5,6 +5,38 @@ All notable changes to KAISEN are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [KAISEN 0.1.8-alpha (shared worker pool)] — 2026-09-10
+
+One worker pool for the whole process — every project's jobs drain one
+FIFO queue.
+
+### Changed
+
+- **Workers are shared across projects** (like the LLM orchestrator).
+  Before, each engine owned its own `WorkerPool` and its own worker
+  processes — N running projects meant N×workers, so a wide campaign
+  could exhaust the machine ("20 projects × 4 workers = 80 processes").
+  Now one process-wide pool (`get_worker_pool()`) holds a fixed worker
+  set (config `workers.default_count`, global ceiling
+  `workers.max_count`); every engine submits to the SAME FIFO queue and
+  workers drain it in submission order.  A project's `engine.workers` is
+  a MINIMUM the pool grows to, never a per-project process budget.
+- **Jobs carry `project_id` + `registry_root`** — workers resolve the
+  right project per job (temp projects stay isolated under `temp/`).
+  Results/progress route back to the owning engine by project id; a
+  stopped engine unregisters its handlers and its stragglers are
+  dropped, while OTHER projects' workers keep running untouched.
+- **Backpressure is global.** Producers pause when the SHARED queue
+  depth hits `workers.queue_size` — one bounded backlog regardless of
+  how many engines are submitting.
+- **Worker telemetry names the project.** Each worker card now shows
+  the project it is serving right now (live from the worker's progress
+  messages), so a shared pool stays readable at a glance.
+- `POST /api/engine/workers` resizes the shared pool (docstring
+  updated). Regression tests in `tests/test_shared_pool.py`: singleton
+  identity, N engines → one pool (no multiplication), per-project
+  result routing, job context tagging, worker project attribution.
+
 ## [KAISEN 0.1.8-alpha (cap-fill allocation)] — 2026-09-09
 
 `multi` pipelines fill the model pool across endpoints — priority-first,

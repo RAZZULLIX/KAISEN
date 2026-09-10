@@ -34,7 +34,6 @@ from .languages import ext_from_lang, fence_from_lang
 from .state import ProjectState
 from .telegram import pin_message, send_message
 from .util import file_sha256, load_json, save_json
-from .workers import WorkerPool
 
 # Engine states: the system's ACTUAL state (shown in the status pill).
 STATE_STOPPED = "stopped"    # hard stop: nothing runs until play
@@ -224,6 +223,7 @@ class ProjectEngine:
         events: Optional[EngineEvent] = None,
     ):
         from .llm import get_orchestrator
+        from .workers import get_worker_pool
         from .projects import ProjectRegistry as _Reg
         self.project = project
         self._code_ext = ext_from_lang(self.project.spec.get("language", "c"))
@@ -235,8 +235,11 @@ class ProjectEngine:
         self.state = ProjectState(project)
         self.memory = ProjectMemory(project, self.state)
         self.results = skills_mod.ResultsStore(project.path)
-        self.pool = WorkerPool(registry, project.id, progress_cb=self._on_progress)
-        self.pool.set_result_handler(self._on_result)
+        # The worker pool is process-wide SHARED (like the orchestrator):
+        # N projects submit to one FIFO queue drained by a fixed worker
+        # count — never N×workers.  This engine registers its handlers on
+        # start() and unregisters on stop().
+        self.pool = get_worker_pool()
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._state = STATE_STOPPED
@@ -329,8 +332,12 @@ class ProjectEngine:
         self.state.save()
         self._check_baseline_source()
         self._bootstrap_baseline()
-        if not self.pool.worker_count():
-            self.pool.start(self._worker_count)
+        # Route THIS project's results/progress to this engine's handlers.
+        # The pool is shared: registering is per-project, never exclusive.
+        self.pool.register(self.project.id, self._on_result, self._on_progress)
+        # Shared pool sizing: ensure AT LEAST this engine's requested count
+        # (pool.start only grows; other projects' requests don't multiply).
+        self.pool.start(self._worker_count)
         if self._pump_thread is None or not self._pump_thread.is_alive():
             self._pump_thread = threading.Thread(target=self._pump_loop, daemon=True)
             self._pump_thread.start()
@@ -400,7 +407,10 @@ class ProjectEngine:
         self._set_state(STATE_STOPPING)
         self._stop.set()
         self.sessions.cancel_all()
-        self.pool.stop_all()
+        # The worker pool is SHARED: stopping one engine must NOT kill
+        # other projects' workers.  Unregister this project's handlers —
+        # its queued jobs may still run, but their results are dropped.
+        self.pool.unregister(self.project.id)
         # The engine's pipelines are gone: release their endpoint
         # reservations so the slots go back to the pool.
         try:
@@ -487,12 +497,12 @@ class ProjectEngine:
                 self._refresh_spec()
                 self._check_baseline_source()
                 qsize = int(get_config().workers.get("queue_size", 15))
-                # Legacy-style queueing: producers keep preparing programs
-                # while the workers test.  Pause only when the WAITING
-                # backlog (in-flight beyond what the workers can hold at
-                # once) fills the queue.
-                waiting = max(0, len(self._in_flight) - self.pool.worker_count())
-                if waiting >= max(1, qsize):
+                # Queue-based backpressure on the SHARED pool: producers
+                # keep preparing while the workers test; they pause only
+                # when the shared queue backlog fills.  Every engine sees
+                # the same queue depth, so N projects share one bounded
+                # backlog instead of N independent in-flight counts.
+                if self.pool.pending() >= max(1, qsize):
                     time.sleep(1.0)
                     continue
                 gen = self.state.next_generation()
@@ -621,6 +631,11 @@ class ProjectEngine:
             "candidate": candidate,
             "workdir": str(gen_dir),
             "baseline": baseline,
+            # The shared pool's workers resolve the project PER JOB — the
+            # engine's own registry root so temp projects never leak into
+            # the real projects/ tree.
+            "project_id": self.project.id,
+            "registry_root": str(self.registry.root),
             "context": context,
         }
         job.update(extra)

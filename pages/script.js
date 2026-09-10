@@ -420,6 +420,9 @@ async function renderWorkers(workers, schema, telemetry, bestMetrics) {
       if (activeTab == id) panel.classList.add('active');
       let cards = '';
       cards += `<div class="metric-card"><div class="metric-label">Current Stage</div><div class="metric-val ${isIdle ? 'ok' : 'warn'}">${stageDisplay}</div></div>`;
+      // Shared worker pool: WHICH project this worker is serving right now.
+      const projLabel = w.project_name || w.project_id || (isIdle ? '—' : 'queued');
+      cards += `<div class="metric-card"><div class="metric-label">Project</div><div class="metric-val" title="${escapeHtml(String(projLabel))}">${escapeHtml(String(projLabel))}</div></div>`;
       cards += `<div class="metric-card"><div class="metric-label">Generation</div><div class="metric-val">${w.generation ?? 'N/A'}</div></div>`;
       // One card per project metric (the project's custom cards).
       for (const key of liveFields) {

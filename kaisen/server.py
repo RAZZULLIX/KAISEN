@@ -1498,9 +1498,11 @@ class DashboardServer:
                       "max_candidates": max_cand})
 
     async def _api_engine_workers(self, request):
-        """Runtime resource knob: resize one engine's worker pool to exactly
+        """Runtime resource knob: resize the SHARED worker pool to exactly
         `count` processes (adds or removes; removing a busy worker kills its
-        in-flight evaluation). POST {"project_id", "count"}."""
+        in-flight evaluation). The pool is global — one queue, one worker
+        set, every project's jobs drain through it. POST
+        {"project_id", "count"}."""
         data = await request.json() if request.can_read_body else {}
         pid = str(data.get("project_id") or "") if isinstance(data, dict) else ""
         try:
@@ -1917,6 +1919,10 @@ class DashboardServer:
                 "status": "running" if running else "idle",
                 "current_stage": stage,
                 "generation": w.get("generation"),
+                # Shared pool: name WHICH project this worker is serving
+                # right now (the dashboard's project attribution card).
+                "project_id": w.get("project_id") or "",
+                "project_name": w.get("project_name") or "",
                 "temp_dir": w.get("temp_dir") or "",
                 "model": gen_server.get(w.get("generation"), "—"),
                 "live": w.get("live") or {},
