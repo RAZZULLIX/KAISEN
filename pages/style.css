@@ -110,6 +110,16 @@ body {
 .nav-item.active .nav-item-icon { border-color: rgba(0,232,124,0.7); }
 .nav-item:hover { background: rgba(255,255,255,0.02); }
 .main { background: radial-gradient(circle at top left, #181818 0, #090909 55%, #050505 100%); padding: 24px 32px 32px; display: flex; flex-direction: column; gap: 20px; flex: 1; }
+/* ONE surface for every main view — the same flat dark gradient the
+   Settings view uses, bled to the app edges.  The radial .main wash used
+   to show through around the panels, so Projects/Dashboard/Notes looked
+   like a different product from Settings. */
+#view-dashboard, #view-projects, #view-notes {
+  background: linear-gradient(180deg, #0d0d0d 0, #080808 100%);
+  margin: -24px -32px -32px;
+  padding: 24px 32px 32px;
+  flex: 1;
+}
 .main-header { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding-bottom: 16px; }
 .breadcrumbs { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.16em; }
 .project-title { margin-top: 4px; font-size: 22px; font-weight: 500; display: flex; align-items: center; gap: 12px; }
