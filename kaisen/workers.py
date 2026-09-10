@@ -40,6 +40,9 @@ from .projects import Project, ProjectRegistry
 from .config import get_config
 
 WORKER_START_TIMEOUT = 15.0
+# A removed worker gets this long to finish its in-flight job before the
+# pool falls back to terminate+requeue (the job is never lost either way).
+WORKER_RETIRE_TIMEOUT = 30.0
 
 
 def _setup_build_cache(project: Project) -> None:
@@ -85,6 +88,7 @@ def _worker_main(
     jobs_q: "multiprocessing.Queue",
     results_q: "multiprocessing.Queue",
     progress_q: "multiprocessing.Queue",
+    retire_evt: "multiprocessing.Event" = None,
 ) -> None:
     """Worker process entry point: drain the shared FIFO job queue."""
     from .pipeline import run_pipeline
@@ -144,6 +148,12 @@ def _worker_main(
 
     emit("idle", {})
     while True:
+        # A removed worker retires AFTER its current job (never mid-job):
+        # the pool signals this event, the worker drains the job it holds,
+        # reports the result, and only then exits.  No job is ever lost to
+        # a resize.
+        if retire_evt is not None and retire_evt.is_set():
+            break
         try:
             job = jobs_q.get(timeout=1.0)
         except Exception:
@@ -162,7 +172,8 @@ def _worker_main(
                 reg.scan()
                 project = reg.require(pid)
             emit("starting", {"generation": job.get("generation"),
-                              "gen_dir": job.get("workdir")}, pid, project.name)
+                              "gen_dir": job.get("workdir"),
+                              "job_id": job.get("job_id")}, pid, project.name)
             _setup_build_cache(project)
             result = run_pipeline(
                 project,
@@ -198,6 +209,10 @@ class WorkerPool:
         self._handlers: Dict[str, Dict[str, Callable[[Dict[str, Any]], None]]] = {}
         self._stop = multiprocessing.Event()
         self._workers_state: Dict[int, Dict[str, Any]] = {}
+        # Job payloads kept from submit() until the result is delivered.
+        # A killed/crashed worker's in-flight job is re-queued from here so
+        # a resize can never destroy a queued job.
+        self._job_payloads: Dict[str, Dict[str, Any]] = {}
         self._target = 0  # intended worker count; crashed workers respawn to it
         # The pool is shared by every engine + the GUI: guard mutations
         # (spawn/remove/register) so concurrent polls can't race a resize.
@@ -257,9 +272,10 @@ class WorkerPool:
             return {"error": f"global worker cap reached ({cap})"}
         wid = self._next_id
         self._next_id += 1
+        retire_evt = multiprocessing.Event()
         p = multiprocessing.Process(
             target=_worker_main,
-            args=(wid, self.jobs_q, self.results_q, self.progress_q),
+            args=(wid, self.jobs_q, self.results_q, self.progress_q, retire_evt),
             daemon=True,
             name=f"kaisen-worker-{wid}",
         )
@@ -267,7 +283,8 @@ class WorkerPool:
         self._procs[wid] = p
         self._workers_state[wid] = {
             "worker_id": wid, "pid": p.pid, "status": "starting", "stage": "idle",
-            "generation": None, "started_at": time.time(),
+            "generation": None, "job_id": None, "started_at": time.time(),
+            "_retire_evt": retire_evt,
         }
         return self._workers_state[wid]
 
@@ -276,49 +293,104 @@ class WorkerPool:
             self._target += 1
             return self._spawn_worker()
 
-    def remove_worker(self, worker_id: int, kill: bool = False) -> bool:
+    def _requeue_held_job(self, worker_id: int) -> None:
+        """Re-queue the job a dying worker still holds.  The payload is
+        re-submitted with the SAME job_id so the owning engine resolves the
+        same in-flight generation; an already-delivered result makes this a
+        no-op (idempotent)."""
+        st = self._workers_state.get(worker_id)
+        if not st:
+            return
+        job_id = st.get("job_id")
+        if not job_id:
+            return
+        payload = self._job_payloads.pop(job_id, None)
+        if payload is None:
+            return
+        st["job_id"] = None
+        self.jobs_q.put(payload)
+
+    def remove_worker(self, worker_id: int, kill: bool = False, requeue: bool = True) -> bool:
+        """Remove one worker.  Non-kill removal is GRACEFUL: the worker is
+        signalled to retire, finishes its in-flight job (result delivered
+        normally), and exits — the queue is untouched.  If it does not
+        retire within WORKER_RETIRE_TIMEOUT (or `kill` was requested), it is
+        terminated and its held job is re-queued, so a resize can never
+        destroy a queued job."""
+        # Refresh the worker state first: the "starting" progress message
+        # (which claims the job_id) may still be sitting in the progress
+        # queue, and a kill must know WHICH job the worker holds.
+        self.pump()
         with self._lock:
-            p = self._procs.pop(worker_id, None)
-            if p is None or not p.is_alive():
+            p = self._procs.get(worker_id)
+            if p is None:
                 self._workers_state.pop(worker_id, None)
                 return False
-            if kill:
-                p.kill()
-            else:
-                p.terminate()
-            p.join(timeout=3)
-            if p.is_alive():
-                p.kill()
-            self._workers_state.pop(worker_id, None)
+            if not p.is_alive():
+                # Crash: recover its held job, then drop it.
+                if requeue:
+                    self._requeue_held_job(worker_id)
+                self._procs.pop(worker_id, None)
+                self._workers_state.pop(worker_id, None)
+                self._target = max(0, self._target - 1)
+                return False
+            st = self._workers_state.get(worker_id) or {}
+            retire_evt = st.get("_retire_evt")
+            # Drop from _procs NOW so polls/self-heal see the shrink while
+            # we wait for retirement (outside the lock — the dashboard must
+            # not freeze for the grace period).
+            del self._procs[worker_id]
             self._target = max(0, self._target - 1)
-            return True
+        if kill:
+            if requeue:
+                with self._lock:
+                    self._requeue_held_job(worker_id)
+            p.kill()
+        else:
+            if retire_evt is not None:
+                retire_evt.set()
+            p.join(timeout=WORKER_RETIRE_TIMEOUT)
+            if p.is_alive():
+                if requeue:
+                    with self._lock:
+                        self._requeue_held_job(worker_id)
+                p.terminate()
+                p.join(timeout=3)
+        if p.is_alive():
+            p.kill()
+        p.join(timeout=3)
+        with self._lock:
+            self._workers_state.pop(worker_id, None)
+        return True
 
     def kill_worker(self, worker_id: int) -> bool:
         return self.remove_worker(worker_id, kill=True)
 
     def stop_all(self) -> None:
+        # Shutdown intent: no re-queueing (the process is going away and
+        # the jobs die with it — re-queueing would just delay the exit).
         with self._lock:
             self._target = 0
             for wid in list(self._procs.keys()):
-                self.remove_worker(wid, kill=True)
+                self.remove_worker(wid, kill=True, requeue=False)
 
     def worker_count(self) -> int:
         with self._lock:
-            alive = 0
             for wid, p in list(self._procs.items()):
                 if not p.is_alive():
+                    # Crashed worker: its in-flight job must survive.
+                    self._requeue_held_job(wid)
                     self._procs.pop(wid, None)
                     self._workers_state.pop(wid, None)
-                else:
-                    alive += 1
             # Self-heal: crashed workers respawn up to the intended target so
             # the pool silently recovers instead of losing capacity forever.
             self._top_up()
             return len(self._procs)
 
     def shrink_to(self, n: int) -> int:
-        """Remove workers until the pool holds at most `n` processes
-        (graceful terminate; a busy worker's in-flight evaluation dies).
+        """Remove workers until the pool holds at most `n` processes.
+        A busy worker's in-flight job is re-queued (never lost) — the
+        evaluation restarts on a surviving worker or waits in the queue.
         REMOVES only — it never spawns (growth is the caller's job, so the
         self-heal inside worker_count() cannot fight a shrink)."""
         n = max(0, int(n))
@@ -336,13 +408,15 @@ class WorkerPool:
     def list_workers(self) -> List[Dict[str, Any]]:
         self.worker_count()
         with self._lock:
-            return list(self._workers_state.values())
+            return [{k: v for k, v in st.items() if k != "_retire_evt"}
+                    for st in self._workers_state.values()]
 
     # -- job submission ---------------------------------------------------
 
     def submit(self, job: Dict[str, Any]) -> None:
         job = dict(job)
         job.setdefault("job_id", f"{int(time.time()*1000)}-{os.getpid()}")
+        self._job_payloads[str(job["job_id"])] = job
         self.jobs_q.put(job)
 
     def pending(self) -> int:
@@ -374,6 +448,15 @@ class WorkerPool:
         try:
             while True:
                 msg = self.results_q.get_nowait()
+                # A delivered result retires the job's payload copy AND the
+                # worker's job_id claim: the kill/requeue path must not
+                # re-run a job whose result is already on the way.
+                job_id = msg.get("job_id")
+                if job_id:
+                    self._job_payloads.pop(str(job_id), None)
+                    st = self._workers_state.get(msg.get("worker_id"))
+                    if st is not None and st.get("job_id") == job_id:
+                        st["job_id"] = None
                 with self._lock:
                     h = self._handlers.get(str(msg.get("project_id") or ""))
                 if h and h.get("result"):
@@ -401,8 +484,11 @@ class WorkerPool:
             # A plain idle beat (no job context): the worker is truly free.
             st["project_id"] = None
             st["project_name"] = None
+            st["job_id"] = None
         if extra.get("generation") is not None:
             st["generation"] = extra["generation"]
+        if extra.get("job_id") is not None:
+            st["job_id"] = extra["job_id"]
         if extra.get("gen_dir"):
             st["temp_dir"] = extra["gen_dir"]
         if extra.get("live") is not None:

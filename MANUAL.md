@@ -505,6 +505,13 @@ One engine per running project; several engines form the pool.
   shared queue depth (`workers.queue_size`), so the backlog stays
   bounded no matter how many engines are asking.  Each worker's
   telemetry card names the project it is serving right now.
+- **Worker resizes never lose jobs.** Adding workers is pure growth
+  (the queue is untouched).  Removing a worker is graceful: it finishes
+  its in-flight job and delivers the result, THEN exits.  A forced kill
+  (or a crashed worker) re-queues the job it held with the same job_id,
+  so the owning engine resolves the same generation when it completes.
+  Shrinking the pool to zero leaves every queued job waiting for the
+  next worker.
 - **Baseline** — the user's original program is evaluated first; it is
   SACRED: never rewritten, never repaired, always available as the
   comparison point.
@@ -1082,8 +1089,8 @@ The GUI itself is an HTTP client; everything is available over
 - `POST /api/engine/multi` — parallel pipelines per project
 - `POST /api/engine/workers` — runtime worker-count control:
   `{"project_id", "count"}` resizes one engine's pool (adds idle workers,
-  or removes workers — removing a busy worker kills its in-flight
-  evaluation); `STATUS` shows the current count
+  or removes workers — a busy worker's in-flight job is finished or
+  re-queued, never lost); `STATUS` shows the current count
 - `POST /api/active/custom_code`, `POST /api/queue/custom_code` —
   inject code as a generation
 - `GET /api/iterations?project_id=` — generation history

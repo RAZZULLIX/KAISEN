@@ -1863,8 +1863,8 @@ class ProjectEngine:
 
     def set_workers(self, n: int) -> int:
         """Runtime resource knob: resize the worker pool to exactly `n`
-        processes (adds idle workers, or removes workers — removing a busy
-        worker kills its in-flight evaluation). Returns the effective
+        processes (adds idle workers, or removes workers — a busy worker's
+        in-flight job is re-queued, never lost). Returns the effective
         count."""
         n = max(1, int(n))
         self.pool.shrink_to(n)

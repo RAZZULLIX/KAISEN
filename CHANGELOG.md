@@ -5,6 +5,39 @@ All notable changes to KAISEN are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [KAISEN 0.1.8-alpha (worker resize keeps the queue)] — 2026-09-10
+
+Adding or erasing workers must never touch queued jobs.
+
+### Fixed
+
+- **Killing a busy worker destroyed its in-flight job.** The worker was
+  terminated mid-pipeline with no result delivered, so the job it had
+  pulled vanished and the owning engine's `_in_flight` entry never
+  resolved — after a resize the queue looked empty and stopped moving.
+  Worker removal is now GRACEFUL: the worker is signalled to retire,
+  finishes its current job (the result is delivered normally), and only
+  then exits (`WORKER_RETIRE_TIMEOUT` grace before terminate fallback).
+  A forced kill (`Kill Worker`, shrink) instead RE-QUEUES the held job
+  with the SAME `job_id` — the pool keeps a payload copy per submitted
+  job and tracks which job each worker holds via its `starting` progress
+  message — so the engine resolves the same generation when it completes.
+- **Crashed workers dropped their jobs too.** The self-heal in
+  `worker_count()` now re-queues a dead worker's held job before
+  respawning the replacement.
+- **Shrinking the pool lost everything it held.** `shrink_to` /
+  `set_workers` route through the lossless removal, so resizing to zero
+  leaves every job (queued or held) waiting in the queue for the next
+  worker.
+- Adding workers was already lossless (spawn-only) and stays that way.
+
+### Added
+
+- Regression tests `tests/test_worker_resize_queue.py`: real worker
+  subprocesses against a sleeping build harness prove add / kill-busy /
+  graceful-erase / erase-idle / shrink-to-zero / SIGKILL-crash all keep
+  every submitted job deliverable.
+
 ## [KAISEN 0.1.8-alpha (projects view)] — 2026-09-10
 
 The Projects view is a real data table now.
