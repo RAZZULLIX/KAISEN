@@ -165,14 +165,9 @@
       </div>
 
       <div id="view-projects" style="display: none;">
-        <header class="main-header">
-          <div><div class="breadcrumbs">MANAGEMENT</div><div class="project-title">Projects</div></div>
-          <div class="header-actions">
-            <button class="btn btn-primary" onclick="openNewProjectModal()">+ New Project</button>
-          </div>
-        </header>
         <div class="projects-panel">
           <div class="projects-toolbar">
+            <span class="projects-view-title">Projects</span>
             <input type="search" id="projects-search" class="projects-search" placeholder="Search projects…" oninput="renderProjects()">
             <div class="lang-filter" id="lang-filter">
               <button class="btn lang-filter-btn" id="lang-filter-btn" onclick="toggleLangFilter(event)" aria-haspopup="listbox" aria-expanded="false">
@@ -185,6 +180,7 @@
               </div>
             </div>
             <span class="projects-count" id="projects-count"></span>
+            <button class="btn btn-primary" onclick="openNewProjectModal()">+ New Project</button>
           </div>
           <div class="projects-table-wrap">
             <table class="projects-table">
