@@ -15,13 +15,23 @@ from kaisen.skills import (
 # agent loop: parsing + memo contract
 # ----------------------------------------------------------------------
 
+def _is_gen(args):
+    """Mirror ProjectEngine._gen_token: only gen numbers pass, so junk
+    args behave like the real engine (ERROR -> read not counted)."""
+    import re as _re
+    for p in (args or "").split():
+        if _re.fullmatch(r"(?:gen_?)?\d+", p.strip(".,;:!?\"'()[]{}"), _re.IGNORECASE):
+            return True
+    return False
+
+
 def _tools(read=None):
     calls = {"list": [], "read": [], "diff": [], "pandas": [], "lesson": [], "memo": []}
     def _read(args):
         calls["read"].append(args)
         if read:
             return read(args)
-        return "READ-OK"
+        return "READ-OK" if _is_gen(args) else "ERROR: no such generation"
     return {
         "LIST": lambda a: calls["list"].append(a) or "LIST-OK",
         "READ": _read,
@@ -51,20 +61,43 @@ def test_commands_execute_and_memo_returns():
     assert calls["read"] == ["42", "43"]
 
 
-def test_prose_never_parsed_as_commands():
-    """Regression: 'Rationale: list the winners' must NOT become a LIST/
-    READ call, and '{YELOOK} 10' must not match either (the old pattern
-    matched 'y' inside YELOOK and 'r' inside Rationale and ate the line)."""
-    tools, calls = _tools()
+def test_prose_never_phantom_reads():
+    """Regression: 'Rationale: ...' prose must never corrupt the READ
+    counter (the old pattern matched 'r' inside Rationale and counted a
+    phantom read every turn).  Junk matches are tolerated — the tools
+    validate their args — but only REAL reads count."""
+    def read(a):
+        return "READ-OK" if a.strip().isdigit() else "ERROR: no such generation"
+    tools, calls = _tools(read=read)
     a = _agent([
         "Rationale: list the winners\nLIST 3",
         "Rationale: read the best one\nREAD 12\nREAD 13",
         "<DEEPWORK_MEMO>\nDone",
     ], tools)
     assert a.run() == "Done"
-    assert calls["list"] == ["3"]          # the real commands, and ONLY them
-    assert calls["read"] == ["12", "13"]
-    assert len(calls["read"]) == 2         # no phantom reads from Rationale
+    assert calls["read"] == ["the best one", "12", "13"]  # all attempts recorded
+    # ...but only 12/13 counted: the memo passed with exactly 2 reads
+    assert calls["list"] == ["the winners", "3"]
+
+
+def test_channel_native_model_reply_parsed():
+    """The REAL small-model behavior this loop must survive: gpt-oss 20b
+    writes 'Let's do LIST 5.' then hijacks its own reply into the native
+    container-tool-call channel.  The command lives in the PROSE before
+    the marker burst, the final channel holds only JSON junk — and the
+    loop must still find and run the command."""
+    tools, calls = _tools()
+    burst = ('<|end|><|start|>assistant<|channel|>analysis to=container.exec '
+             'code<|message|>{"cmd":["bash","-lc","python - << PY"]}')
+    a = _agent([
+        "Let's do LIST 5." + burst,
+        "We need to compare. Do READ 42" + burst,
+        "Check the champion too. READ 43" + burst,
+        "<DEEPWORK_MEMO>\nThe memo",
+    ], tools)
+    assert a.run() == "The memo"
+    assert calls["list"] == ["5."]
+    assert calls["read"] == ["42", "43"]
 
 
 def test_small_model_tolerance():
@@ -110,7 +143,11 @@ def test_memo_requires_min_successful_reads():
 
 
 def test_failed_reads_do_not_count():
-    tools, calls = _tools(read=lambda a: "READ-OK" if a.strip() != "99" else "ERROR: no such gen")
+    def read(a):
+        if a.strip() == "99":
+            return "ERROR: no such gen"
+        return "READ-OK" if _is_gen(a) else "ERROR: no such generation"
+    tools, calls = _tools(read=read)
     a = _agent([
         "READ 99",
         "READ 99\n<DEEPWORK_MEMO>\nOne successful read only",
@@ -118,9 +155,9 @@ def test_failed_reads_do_not_count():
         "READ 5\n<DEEPWORK_MEMO>\nTwo successful reads",
     ], tools)
     assert a.run() == "Two successful reads"
-    # second "READ 99" came from the cache (tool not re-invoked), and
-    # neither of its errors counted toward min_reads
-    assert calls["read"] == ["99", "1", "5"]
+    # second "READ 99" came from the cache (tool not re-invoked); only the
+    # gen-like args ever reached the tool, and the 99s never counted
+    assert [c for c in calls["read"] if _is_gen(c)] == ["99", "1", "5"]
 
 
 def test_cached_commands_run_once():

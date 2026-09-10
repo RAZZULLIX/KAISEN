@@ -644,16 +644,17 @@ class DeepworkAgent:
     def run(self) -> str:
         conversation = self.prompt
         cot_re = re.compile(r"<\|[^|]+\|>")
-        # One command per line, whole word, line-anchored: prose lines
-        # ("Rationale: ...", "{YELOOK} ...", stray mentions) can never be
-        # misread as commands. The old pattern matched single letters
-        # inside words, phantom-read every turn and ate the real command.
-        # Small-model tolerance: any case, optional ':'/'-' after the
-        # command, trailing prose ignored (args are taken loosely by the
-        # tools themselves).
+        # Command matching is DELIBERATELY loose: small, channel-native
+        # models (gpt-oss) answer raw-text turns with their native marker
+        # bursts ("Let's do LIST 5." followed by a <|channel|> tool-call)
+        # instead of clean bare command lines.  Match any whole-word
+        # invocation anywhere in the reply; the tools validate their own
+        # arguments, so a junk match ("list the winners") is harmless —
+        # a failed READ never counts.  The profound guardrail is the fixed
+        # tool set + strict arg validation, not the regex.
         tool_re = re.compile(
-            r"^\s*(LIST|READ|DIFF|PANDAS|LESSON|MEMO)\b\s*[:：\-–]?\s*(.*?)\s*$",
-            re.IGNORECASE | re.MULTILINE,
+            r"\b(LIST|READ|DIFF|PANDAS|LESSON|MEMO)\b(?:[:\-–]?[^\S\n]*(\S+(?:[^\S\n]+\S+){0,2}))?",
+            re.IGNORECASE,
         )
         reads = 0
         cache: Dict[str, str] = {}
@@ -662,10 +663,22 @@ class DeepworkAgent:
             raw = self.request(conversation)
             markers = list(cot_re.finditer(raw))
             clean = raw[markers[-1].end():].strip() if markers else raw.strip()
-            conversation += f"\n\nAssistant: {clean}"
 
-            clean_no_cot = cot_re.sub("", clean)
-            matches = list(tool_re.finditer(clean_no_cot))
+            # The useful text may sit BEFORE the marker burst (the final
+            # channel holds only tool-call JSON for channel-native models):
+            # try the final-channel text first, then the prose prefix.
+            prefix = cot_re.split(raw)[0].strip() if markers else clean
+            candidates = [clean] if clean == prefix else [clean, prefix]
+            matches = []
+            acted_on = clean
+            for cand in candidates:
+                ms = list(tool_re.finditer(cot_re.sub("", cand)))
+                if ms:
+                    matches, acted_on = ms, cand
+                    break
+            # Append the text we actually acted on — a channel-native
+            # model's tool-call JSON noise never enters the conversation.
+            conversation += f"\n\nAssistant: {acted_on}"
 
             # Execute commands FIRST: a small model often bundles its last
             # READ with the memo in one reply — those reads must count
@@ -690,7 +703,7 @@ class DeepworkAgent:
             if results:
                 conversation += "\n\n" + "\n\n".join(results)
 
-            memo = _extract_memo(clean)
+            memo = _extract_memo(clean) or (None if prefix == clean else _extract_memo(prefix))
             if memo is not None:
                 if reads < self.min_reads:
                     conversation += (

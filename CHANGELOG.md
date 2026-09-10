@@ -35,11 +35,17 @@ Deepwork fixed, made generic over any project, and hard-guardrailed.
   `PANDAS` / `LESSON` / `MEMO`), the same names in the prompt, the
   parser, and the tool map. `DIFF` is new: a cheap unified diff vs the
   champion to choose WHAT to study before a full `READ`.
-- **Small-model tolerance.** Line-anchored whole-word parsing: prose
-  can never be misread as a command; case, `LIST: 10`, `READ-42`,
-  `gen 43`, trailing punctuation/prose all parse; commands bundled in
-  the same reply as the memo still execute before the memo is judged;
-  only successful READs count toward `min_reads`.
+- **Small-model tolerance.** A REAL gpt-oss-20b session showed what the
+  loop must survive: the model writes "Let's do LIST 5." and then
+  hijacks its own reply into its native tool-call channel, never
+  emitting a bare command line.  The parser therefore finds commands
+  ANYWHERE in the reply (final channel first, then the prose before the
+  marker burst), tolerates any case, `LIST: 10`, `READ-42`,
+  `gen 43`, trailing punctuation/prose; commands bundled in the same
+  reply as the memo still execute before the memo is judged; only
+  successful READs count toward `min_reads`.  Junk matches are harmless
+  by design: every tool validates its own arguments (failed READs never
+  count), so loose extraction cannot be turned into a capability.
 - **Profoundly guardrailed.** The fixed tool set is the ONLY thing the
   agent can do. Generation arguments resolve to run folders only —
   paths (`../`, `..`) never pass. The pandas tool runs expression-only

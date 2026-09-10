@@ -580,11 +580,15 @@ Optional brain features, all per project (`skills`):
   never pass), and the pandas tool is expression-only AST — no
   statements, no builtins, no modules, and file-I/O methods
   (`to_csv`/`read_*`/`query`/`eval`/...) are rejected before evaluation.
-  Parsing tolerates small-model mistakes (any case, `LIST: 10`,
-  `READ-42`, trailing prose) and commands bundled with the memo still
-  execute.  Memos land in `memos/`; the latest one feeds the generation
-  prompt. (pandas is optional — the query tool errors gracefully without
-  it.)
+  Parsing tolerates small-model mistakes — commands are found anywhere
+  in the reply (a gpt-oss model typically writes "Let's do LIST 5."
+  and then hijacks its own reply into its native tool-call channel),
+  any case, `LIST: 10`, `READ-42`, trailing prose — and commands
+  bundled with the memo still execute.  Junk matches are harmless:
+  every tool validates its own arguments, and only successful READs
+  count toward `min_reads`.  Memos land in `memos/`; the latest one
+  feeds the generation prompt. (pandas is optional — the query tool
+  errors gracefully without it.)
 - **memory** — history blob + keyword trends feed the generation prompt.
 
 ---

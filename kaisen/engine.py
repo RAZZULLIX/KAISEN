@@ -1623,8 +1623,8 @@ class ProjectEngine:
             return "ERROR: results store empty"
         n = 10
         for part in (args or "").split():
-            if part.isdigit():
-                n = int(part)
+            if part.strip(".,;:!?\"'()[]{}").isdigit():
+                n = int(part.strip(".,;:!?\"'()[]{}"))
                 break
         _key, score_type = self._active_score_type()
         return skills_mod.format_top_rows(
