@@ -463,6 +463,12 @@ class Server:
         self.first_token_timeout: float = float(
             cfg.get("first_token_timeout", global_cfg.llm.get("first_token_timeout", 0)))
         self.spawn_cmd: List[str] = list(cfg.get("spawn_cmd", []) or [])
+        # Local vs remote.  A LOCAL endpoint is one we may probe freely
+        # (GET /slots, /props, /health — no tokens); remote endpoints are
+        # only ever talked to for real work.  Defaults from the type
+        # (llama.cpp = local, openai/remote = remote); an explicit
+        # "local": true/false in the spec wins.
+        self.local: bool = bool(cfg.get("local", self.type == "llama"))
         self.enabled: bool = bool(cfg.get("enabled", True))
         # Routing profile: the orchestrator prefers the lowest tier that
         # can do the job, then the highest priority, then free capacity.
@@ -507,6 +513,56 @@ class Server:
         # mismatch queues N generations behind one slot and the chat view
         # looks dead while they wait.  Learned from /slots; None = unknown.
         self._detected_slots: Optional[int] = None
+
+    def _probe_capacity(self) -> Optional[tuple]:
+        """(slot_count, n_ctx) from the endpoint itself — GET /slots and
+        GET /props, both free (no tokens).  None = cannot tell (offline,
+        not llama.cpp, or the endpoints are missing)."""
+        if not self.local or self.type != "llama":
+            return None
+        base = self._base_of(self.url)
+        if not base:
+            return None
+        headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+        slots: Optional[int] = None
+        try:
+            r = requests.get(base + "/slots", headers=headers, timeout=5.0)
+            if r.status_code == 200:
+                d = r.json()
+                lst = d if isinstance(d, list) else ([d] if isinstance(d, dict) else [])
+                if lst:
+                    slots = len(lst)
+        except Exception:
+            pass
+        n_ctx: Optional[int] = None
+        try:
+            r = requests.get(base + "/props", headers=headers, timeout=5.0)
+            if r.status_code == 200:
+                g = r.json().get("default_generation_settings") or {}
+                if isinstance(g.get("n_ctx"), int) and g["n_ctx"] > 0:
+                    n_ctx = g["n_ctx"]
+        except Exception:
+            pass
+        return (slots, n_ctx) if (slots or n_ctx) else None
+
+    def _apply_capacity(self, slots: Optional[int], n_ctx: Optional[int]) -> List[str]:
+        """Correct this server's concurrency/context against the REAL
+        values the process reports, in memory.  Returns the changes made.
+        Policy: max_concurrent is only ever CLAMPED DOWN to the real slot
+        count (over-subscription is impossible anyway; a deliberate
+        under-subscription by the operator is respected); context_window
+        is informational and always corrected to the real n_ctx."""
+        changes: List[str] = []
+        with self._lock:
+            if slots and slots < self.max_concurrent:
+                changes.append(
+                    f"max_concurrent {self.max_concurrent}->{slots} (real slot count)")
+                self.max_concurrent = slots
+            if n_ctx and n_ctx != self.context_window:
+                changes.append(
+                    f"context_window {self.context_window}->{n_ctx} (real n_ctx)")
+                self.context_window = n_ctx
+        return changes
 
     # -- capacity / health -------------------------------------------------
     @property
@@ -711,6 +767,15 @@ class Server:
             if fmt:
                 with self._lock:
                     self._reasoning_format = fmt
+            # The real context the box runs with — config context_window
+            # drifts (manual entry).  Correct it wherever /props is fetched
+            # (health probes, late-coming servers); the boot sweep persists.
+            n_ctx = (d.get("default_generation_settings") or {}).get("n_ctx")
+            if isinstance(n_ctx, int) and n_ctx > 0 and n_ctx != self.context_window:
+                print(f"[KAISEN][capability] {self.id}: "
+                      f"context_window {self.context_window}->{n_ctx} (real n_ctx)")
+                with self._lock:
+                    self.context_window = n_ctx
         except Exception:
             pass
 
@@ -1264,6 +1329,35 @@ class ModelOrchestrator:
         self._load_stats()
         self._reload_servers()
         start_reprobe_loop()
+        # Boot-time capability check: the registry's max_concurrent /
+        # context_window are manual entries that drift from what the local
+        # boxes actually run with.  Probe every LOCAL server (GET /slots +
+        # GET /props — free, no tokens, never touches remote endpoints)
+        # and correct + persist the drift.  Background: a dead box must
+        # not delay startup.
+        threading.Thread(target=self._startup_capability_check, daemon=True).start()
+
+    def _startup_capability_check(self) -> None:
+        """One-shot boot sweep over LOCAL servers: compare the configured
+        concurrency/context with the real values and correct them.  Local
+        only — a remote endpoint is never probed."""
+        any_change = False
+        for sid, s in list(self._servers.items()):
+            if not s.local:
+                continue
+            try:
+                real = s._probe_capacity()
+            except Exception:
+                continue
+            if real is None:
+                continue  # offline / not a llama.cpp shape — leave as-is
+            slots, n_ctx = real
+            changes = s._apply_capacity(slots, n_ctx)
+            if changes:
+                print(f"[KAISEN][capability] {sid}: {'; '.join(changes)} — corrected")
+                any_change = True
+        if any_change:
+            self.persist()
 
     # -- skill scoreboard --------------------------------------------------
     def _load_stats(self) -> None:
@@ -1396,6 +1490,7 @@ class ModelOrchestrator:
             "model": s.model, "params": s.params, "chat_template": s.chat_template,
             "payload_template": s.payload_template, "max_concurrent": s.max_concurrent,
             "timeout": s.timeout, "enabled": s.enabled,
+            "local": s.local, "spawn_cmd": s.spawn_cmd,
             "budget": getattr(s, "budget", None) and s.budget.config or None,
             "tier": s.tier, "priority": s.priority, "context_window": s.context_window,
             "smartness": s.smartness, "cost_in": s.cost_in, "cost_out": s.cost_out,
@@ -1442,6 +1537,13 @@ class ModelOrchestrator:
         try:
             s._learn_slots()
             s._learn_caps()
+            # Clamp drift right away: a just-added server must never keep
+            # a wrong max_concurrent/context_window (context was already
+            # corrected by _learn_caps from /props).
+            changes = s._apply_capacity(s._detected_slots, s.context_window)
+            if changes:
+                print(f"[KAISEN][capability] {sid}: {'; '.join(changes)} — corrected")
+                self.persist()
         except Exception:
             pass
 

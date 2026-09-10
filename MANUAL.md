@@ -696,15 +696,28 @@ Servers are managed live in Settings (persisted in `config.json`).
 Each server carries: `type` (`llama` = raw `/completion`, or
 OpenAI-compatible chat), `url`/`base_url`, `model`, `params`,
 `chat_template`, `max_concurrent`, timeouts, `payload_template`,
-`spawn_cmd`, and the **routing profile**:
+`spawn_cmd`, `local`, and the **routing profile**:
 
 | Field | Meaning |
 |---|---|
+| `local` | whether the endpoint may be probed freely (GET `/health`/`/slots`/`/props` — zero tokens). Defaults from `type` (llama = local, openai/remote = remote); an explicit `true`/`false` wins |
 | `tier` | `tiny` / `small` / `large` |
 | `priority` | fill order inside a tier: the highest-priority endpoint is filled to its `max_concurrent` BEFORE the next priority bracket is used (higher first) |
-| `context_window` | the server's real context (informational) |
+| `context_window` | the server's real context (informational) — auto-corrected at startup, see below |
 | `smartness` | 0-10 score (tier defaults: tiny 2, small 5, large 8) |
 | `cost_in` / `cost_out` | $ per 1M tokens (local servers = $0) |
+
+**Startup capability check.** `max_concurrent` and `context_window` are
+manual registry entries and they drift (a box restarted with different
+flags).  At every boot, KAISEN probes each LOCAL server — GET `/slots` +
+GET `/props`, free, no tokens — and corrects the registry: a configured
+concurrency above the real slot count is clamped down and persisted
+(never raised — a deliberate under-subscription is respected), and
+`context_window` is set to the real `n_ctx`.  The correction is logged
+as `[KAISEN][capability] <sid>: …` and written back to `config.json`, so
+the Servers panel shows what the boxes actually run.  Remote endpoints
+are never probed.  Health probes and server-add learn the same facts, so
+boxes that come online later get corrected too.
 
 **Routing is cost-first**: every request picks the LOWEST tier that can
 do the job, then priority.  Among EQUALS (same tier + priority — e.g.
