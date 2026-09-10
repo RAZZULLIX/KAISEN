@@ -810,6 +810,15 @@ select, textarea, input[type="text"], input[type="number"], input[type="password
 }
 
 .settings-grid { display: grid; grid-template-columns: 1fr; gap: 12px; align-items: start; max-width: 1024px; margin: 0 auto; }
+/* EVERY settings tab uses the General tab's centred 1024 column — the
+   other tabs used to flex the whole viewport while General sat in a
+   narrow centred column (two layout styles in one view). */
+.settings-content .tab-content { max-width: 1024px; margin: 0 auto; }
+/* Dense tables inside the settings column: the server registry has 13
+   columns and must fit the unified width without hiding State/Stats. */
+#cfg-servers .iteration-table th, #cfg-servers .iteration-table td { padding: 6px 6px; font-size: 12px; }
+#cfg-servers .llm-actions { white-space: nowrap; }
+#cfg-servers .llm-actions .btn { padding: 3px 6px; margin-left: 3px; }
 #cfg-general .panel, #cfg-project .panel, #cfg-servers .panel { min-height: 0; }
 
 /* ─────────────── first-run onboarding wizard ─────────────── */
