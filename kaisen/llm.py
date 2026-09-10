@@ -1953,6 +1953,11 @@ class ModelOrchestrator:
                 "last_activity": self._status.get("last_activity"),
                 "active_ids": list(self._active_ids),
                 "servers": [self._servers[s].snapshot() for s in sorted(self._servers)],
+                # The scoreboard drives routing only in "adaptive" mode, so
+                # the GUI must be able to say which mode is live instead of
+                # advertising a mode the operator never turned on.
+                "routing": str(self.cfg.llm.get("routing", "cost") or "cost").lower(),
+                "allowlists": dict(self.cfg.llm.get("allowlists") or {}),
                 # Who holds which endpoint slot (cap-fill allocator).  Every
                 # key is "engine_key|pipeline_id"; a held slot is occupied
                 # whether or not it is streaming right now.  Exposed so the

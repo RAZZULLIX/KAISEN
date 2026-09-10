@@ -141,6 +141,36 @@ def test_system_endpoint(api):
 
 
 # ----------------------------------------------------------------------
+# model scoreboard (Settings -> LLM Servers)
+# ----------------------------------------------------------------------
+
+def test_model_scoreboard_contract(api):
+    """Settings → LLM Servers renders exactly these rows: keep the shape
+    stable (a renamed/removed field blanks the panel silently in the GUI)."""
+    srv, base = api
+    orch = srv._orch()          # engine=None: the pre-launch path the
+    orch.record_call("m-a", "generation", 0.0025)   # panel must survive
+    orch.record_call("m-a", "generation", 0.0025)
+    orch.record_outcome("m-a", "generation", "oneshot")
+    orch.record_outcome("m-a", "generation", "win")
+    orch.record_call("m-b", "llm_repair", 0.0)
+
+    rows = requests.get(base + "/api/llm/modelstats", timeout=5).json()["rows"]
+    assert {r["skill"] for r in rows} == {"generation", "llm_repair"}
+    r = next(x for x in rows if x["server_id"] == "m-a")
+    assert set(r) == {"server_id", "label", "tier", "skill", "attempts",
+                      "oneshots", "wins", "oneshot_rate", "win_rate", "cost_usd"}
+    assert (r["attempts"], r["oneshots"], r["wins"]) == (2, 1, 1)
+    assert r["oneshot_rate"] == 0.5 and r["win_rate"] == 0.5
+    assert r["cost_usd"] == pytest.approx(0.005)
+    assert r["label"] == "m-a"   # unregistered id still labels the row
+    # per-skill filter (the panel's skill query)
+    only = requests.get(base + "/api/llm/modelstats?skill=llm_repair",
+                        timeout=5).json()["rows"]
+    assert [x["server_id"] for x in only] == ["m-b"]
+
+
+# ----------------------------------------------------------------------
 # projects CRUD
 # ----------------------------------------------------------------------
 

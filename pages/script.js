@@ -1055,12 +1055,14 @@ async function loadActive() {
   setProjectTabVisible(!!settingsProjectId);
   if (settingsTab === 'project' && !settingsProjectId) switchSettingsTab('general');
   // No engine running (fresh install): still show the server registry
-  // from config.json so Settings → LLM Servers works pre-launch.
+  // and the learned scoreboard (both read config.json / its stats file
+  // directly), so Settings → LLM Servers works pre-launch.
   if (settingsTab === 'servers' && currentView === 'config') {
     try {
       const c = await api('/api/config');
       renderServers(c.llm || {});
     } catch (e2) { console.warn('servers fallback failed', e2); }
+    loadModelStats();
   }
 }
 
@@ -1068,6 +1070,17 @@ function renderServers(llm) {
   const tbody = document.getElementById('servers-tbody');
   tbody.innerHTML = '';
   const servers = llm.servers || [];
+
+  // Say which routing mode is LIVE: the scoreboard only drives picks in
+  // adaptive mode, so a chip advertising adaptive while tier/priority
+  // order runs would be a lie.
+  const chip = document.getElementById('routing-mode-chip');
+  if (chip) {
+    const mode = String(llm.routing || 'cost').toLowerCase();
+    chip.textContent = mode === 'adaptive'
+      ? 'Routing: ADAPTIVE — this scoreboard picks the best quality-per-$ model per skill'
+      : `Routing: ${mode.toUpperCase()} (tier/priority order) — this scoreboard is advisory; set config llm.routing = "adaptive" to let it pick per skill`;
+  }
 
   if (!servers.length) { tbody.innerHTML = '<tr><td colspan="12" style="text-align:center;color:var(--muted);">No servers.</td></tr>'; return; }
   servers.forEach(s => {
@@ -1095,13 +1108,32 @@ async function loadModelStats() {
       tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--muted);">No stats yet — models earn them by working.</td></tr>';
       return;
     }
-    tbody.innerHTML = rows.sort((a, b) => (b.oneshots - a.oneshots) || a.server_id.localeCompare(b.server_id)).map(x =>
-      `<tr><td>${esc(x.skill)}</td><td>${esc(x.label || x.server_id)}</td><td>${esc(x.tier)}</td>` +
-      `<td>${x.attempts}</td><td>${x.oneshots}</td><td>${x.wins}</td>` +
-      `<td>${x.oneshot_rate == null ? '—' : (x.oneshot_rate * 100).toFixed(1) + '%'}</td>` +
-      `<td>${x.win_rate == null ? '—' : (x.win_rate * 100).toFixed(1) + '%'}</td>` +
-      `<td>$${x.cost_usd.toFixed(4)}</td></tr>`).join('');
-  } catch (e) { console.warn('modelstats failed', e); }
+    // Per-skill guidance: group by skill, best one-shot rate first inside
+    // a skill, more attempts (more evidence) breaking ties.
+    rows.sort((a, b) => {
+      const ra = a.skill.localeCompare(b.skill);
+      if (ra) return ra;
+      const va = a.oneshot_rate == null ? -1 : a.oneshot_rate;
+      const vb = b.oneshot_rate == null ? -1 : b.oneshot_rate;
+      return (vb - va) || (b.attempts - a.attempts) || a.server_id.localeCompare(b.server_id);
+    });
+    tbody.innerHTML = rows.map(x => {
+      const rate = x.oneshot_rate == null ? '—' : (x.oneshot_rate * 100).toFixed(1) + '%';
+      const winRate = x.win_rate == null ? '—' : (x.win_rate * 100).toFixed(1) + '%';
+      // "what to stop using": real evidence (>=10 attempts), zero wins.
+      const cold = x.attempts >= 10 && x.wins === 0;
+      const coldAttr = cold ? ` class="iter-warn" title="No win in ${x.attempts} attempts — allowlist it out of this skill or drop it"` : '';
+      return `<tr><td>${escapeHtml(x.skill)}</td><td>${escapeHtml(x.label || x.server_id)}</td><td>${escapeHtml(x.tier)}</td>` +
+        `<td>${x.attempts}</td><td>${x.oneshots}</td><td>${x.wins}</td>` +
+        `<td>${rate}</td><td${coldAttr}>${winRate}</td>` +
+        `<td>$${Number(x.cost_usd || 0).toFixed(4)}</td></tr>`;
+    }).join('');
+  } catch (e) {
+    // Never fail silently: a broken panel must say so (an undefined helper
+    // in here once hid behind console.warn and the table just stayed blank).
+    console.warn('modelstats failed', e);
+    tbody.innerHTML = `<tr><td colspan="9" class="iter-err" style="text-align:center;">Scoreboard failed: ${escapeHtml(String(e && e.message || e))}</td></tr>`;
+  }
 }
 function startRenameServer(id) {
   // Inline edit in the table — no browser prompt() dialog.
