@@ -13,7 +13,7 @@ body {
   color: var(--text); min-height: 100vh; display: flex; flex-direction: column;
   font-size: 15px;
 }
-.app-shell { display: flex; flex-direction: column; width: 100%; }
+.app-shell { display: flex; flex-direction: column; width: 100%; min-height: 100vh; }
 .topbar {
   background: linear-gradient(90deg, #0f0f0f 0, #080808 60%, #050505 100%);
   border-bottom: 1px solid var(--border); 
@@ -488,6 +488,9 @@ textarea { min-height: 80px; resize: vertical; }
   padding: 14px 0 22px; color: var(--muted);
   font-size: 11px; letter-spacing: 0.22em; text-transform: uppercase;
   border-top: 1px solid var(--border); margin: 0 32px;
+  /* Anchored to the viewport bottom when the view is short (the shell is
+     a 100vh flex column and .main grows); long views scroll it normally. */
+  margin-top: auto;
 }
 .footer-link { display: flex; align-items: center; gap: 10px; color: inherit; text-decoration: none; }
 .footer-link:hover { color: var(--text2); }
