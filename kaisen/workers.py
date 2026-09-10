@@ -213,6 +213,11 @@ class WorkerPool:
         # A killed/crashed worker's in-flight job is re-queued from here so
         # a resize can never destroy a queued job.
         self._job_payloads: Dict[str, Dict[str, Any]] = {}
+        # Retire events per worker live OUTSIDE _workers_state: state dicts
+        # are serialized straight to JSON (add_worker returns one), and a
+        # multiprocessing.Event would explode every endpoint that touches
+        # them.
+        self._retire_evts: Dict[int, "multiprocessing.Event"] = {}
         self._target = 0  # intended worker count; crashed workers respawn to it
         # The pool is shared by every engine + the GUI: guard mutations
         # (spawn/remove/register) so concurrent polls can't race a resize.
@@ -281,10 +286,10 @@ class WorkerPool:
         )
         p.start()
         self._procs[wid] = p
+        self._retire_evts[wid] = retire_evt
         self._workers_state[wid] = {
             "worker_id": wid, "pid": p.pid, "status": "starting", "stage": "idle",
             "generation": None, "job_id": None, "started_at": time.time(),
-            "_retire_evt": retire_evt,
         }
         return self._workers_state[wid]
 
@@ -332,10 +337,11 @@ class WorkerPool:
                     self._requeue_held_job(worker_id)
                 self._procs.pop(worker_id, None)
                 self._workers_state.pop(worker_id, None)
+                self._retire_evts.pop(worker_id, None)
                 self._target = max(0, self._target - 1)
                 return False
             st = self._workers_state.get(worker_id) or {}
-            retire_evt = st.get("_retire_evt")
+            retire_evt = self._retire_evts.get(worker_id)
             # Drop from _procs NOW so polls/self-heal see the shrink while
             # we wait for retirement (outside the lock — the dashboard must
             # not freeze for the grace period).
@@ -361,6 +367,7 @@ class WorkerPool:
         p.join(timeout=3)
         with self._lock:
             self._workers_state.pop(worker_id, None)
+            self._retire_evts.pop(worker_id, None)
         return True
 
     def kill_worker(self, worker_id: int) -> bool:
@@ -382,6 +389,7 @@ class WorkerPool:
                     self._requeue_held_job(wid)
                     self._procs.pop(wid, None)
                     self._workers_state.pop(wid, None)
+                    self._retire_evts.pop(wid, None)
             # Self-heal: crashed workers respawn up to the intended target so
             # the pool silently recovers instead of losing capacity forever.
             self._top_up()

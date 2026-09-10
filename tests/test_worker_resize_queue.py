@@ -164,6 +164,20 @@ def test_shrink_to_zero_is_lossless(sleepy_project, registry, tmp_path):
     _drain(pool, results, 4)
 
 
+def test_worker_telemetry_is_json_serializable(sleepy_project, registry, tmp_path):
+    """Every pool surface that reaches JSON (add_worker's return, the
+    dashboard's list_workers snapshot) must serialize: a retire Event
+    leaking into the state dict 500'd POST /api/workers/add."""
+    import json
+    pool = get_worker_pool()
+    pool.start(1)
+    assert json.dumps(pool.list_workers())      # /api/active snapshot path
+    assert json.dumps(pool.add_worker())        # POST /api/workers/add path
+    assert json.dumps(pool.list_workers())
+    pool.kill_worker(0)
+    assert json.dumps(pool.list_workers())
+
+
 def test_crashed_worker_requeues_held_job(sleepy_project, registry, tmp_path):
     """A worker that DIES (SIGKILL, OOM, segfault — not an API kill) must
     not take its in-flight job with it: the self-heal in worker_count()
