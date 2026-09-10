@@ -151,3 +151,27 @@ def test_acquire_cancel_wakes_waiter(tmp_path):
         orch._acquire_server(session=waiter, cancel_event=waiter.cancel,
                              min_tier="tiny")
     orch.release("one")
+
+
+def test_session_unbound_when_stream_ends(tmp_path):
+    """server_id must mean 'streaming RIGHT NOW': a failed attempt un-binds
+    the session before the retry wait, so a session parked in the queue
+    never counts toward the failed server's row with frozen tps."""
+    cfg = FrameworkConfig(tmp_path / "config.json")
+    cfg.llm["servers"] = [{"id": "one", "type": "llama",
+                           "url": "http://127.0.0.1:1/completion",
+                           "max_concurrent": 1, "enabled": True}]
+    cfg.llm["active_ids"] = ["one"]
+    cfg.llm["max_retries"] = 1
+    cfg.llm["retry_backoff"] = 0.0
+    orch = ModelOrchestrator(cfg)
+    from kaisen.llm import ServerError
+
+    def boom(prompt, **kw):
+        raise ServerError("boom", kind="stream")
+
+    orch._servers["one"].request_stream = boom
+    s = Session(0, "code", 1, "p")
+    with pytest.raises(ServerError):
+        orch.request_stream("hi", session=s)
+    assert s.server_id is None          # unbound — not "last tried"

@@ -1715,6 +1715,11 @@ class ModelOrchestrator:
                     time.sleep(backoff * (attempt + 1))
                 finally:
                     s.release()
+                    if session is not None:
+                        # UNBIND the moment the attempt ends: server_id must
+                        # mean "streaming on this server RIGHT NOW", not
+                        # "last tried" — see request_stream.
+                        session.server_id = None
             raise ServerError(f"all LLM servers failed: {last_err}")
         finally:
             self._status.update({"state": "idle"})
@@ -1781,6 +1786,16 @@ class ModelOrchestrator:
                     time.sleep(backoff * (attempt + 1))
                 finally:
                     s.release()
+                    if session is not None:
+                        # UNBIND the moment the stream ends: `server_id` must
+                        # mean "streaming on this server RIGHT NOW".  The
+                        # retry wait can last minutes in a deep queue — a
+                        # session that stayed bound to its failed server
+                        # counted toward that server's row with its frozen
+                        # tps (the pill's "random tps").  The producer's
+                        # finish(server_id=...) re-binds for the finished
+                        # display afterwards.
+                        session.server_id = None
             raise ServerError(f"all LLM servers failed: {last_err}")
         finally:
             self._status.update({"state": "idle"})

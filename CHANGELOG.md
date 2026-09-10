@@ -24,6 +24,14 @@ than LLM slots queue instead of piling onto the boxes.
   counted, so the number depended on how long the pipeline waited for a
   free slot.  It is now the REAL decode rate: tokens / time since the
   first token (queue wait excluded, first-token denominator floored).
+- **Sessions stayed bound through retry waits.** A failed stream kept
+  the session bound to the failed server for the WHOLE retry wait
+  (minutes in a deep queue), counting toward that server's row with its
+  frozen tps — the actual source of the "random" pill numbers and the
+  phantom `live` counts.  `server_id` now means "streaming RIGHT NOW":
+  the orchestrator un-binds the session the moment an attempt ends
+  (`finally`), and the producer's `finish(server_id=...)` re-binds the
+  finished display afterwards.
 - **Yellow-when-green LED.** The pill row required `tps > 0` for the
   streaming (green) state, so a server genuinely working during prefill
   flashed yellow with "0.0 tps".  The backend now reports `streaming`
