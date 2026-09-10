@@ -5,6 +5,50 @@ All notable changes to KAISEN are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [KAISEN 0.1.8-alpha (pill truthfulness + LLM request queue)] — 2026-09-10
+
+The status pill now tells the truth about every model, and more requests
+than LLM slots queue instead of piling onto the boxes.
+
+### Fixed
+
+- **Ghost sessions polluted the pill.** Any producer failure that was not
+  `ServerError`/`GenerationCancelled` escaped to the outer catch-all
+  WITHOUT `session.finish()` — the session stayed `generating` forever,
+  bound to its last server, with a FROZEN tps.  Dozens accumulated
+  (28 on one box) and the pill summed their stale tps into "random"
+  per-server numbers.  The producer now finishes the session in a
+  `finally` guard on EVERY path.
+- **tps was not the generation's speed.** `Session.tps` was tokens /
+  wall-time-since-session-creation — the queue wait and prefill were
+  counted, so the number depended on how long the pipeline waited for a
+  free slot.  It is now the REAL decode rate: tokens / time since the
+  first token (queue wait excluded, first-token denominator floored).
+- **Yellow-when-green LED.** The pill row required `tps > 0` for the
+  streaming (green) state, so a server genuinely working during prefill
+  flashed yellow with "0.0 tps".  The backend now reports `streaming`
+  for ANY bound, generating session (prefill included), and the row LED
+  follows it; the stats line shows `prefill` instead of a misleading
+  `0.0 tps`.
+- **The pool label hid the tps.** With several engines the pill always
+  showed `SYSTEM — N engines`, dropping the live tps entirely.  It now
+  shows `SYSTEM — N engines · X TPS · Y queued`.
+
+### Changed
+
+- **LLM requests queue like the workers.** `_acquire_server` waiters now
+  park on a FIFO condition queue woken the moment a slot frees
+  (`release()` notifies), instead of every pipeline polling on its own
+  1s timer.  The acquire gate itself was verified sound (one bound
+  stream per box); the queue makes the wait orderly and instant.
+- **`/api/llm/status` rows** carry `streaming` (bound-generating),
+  `queued` (waiters), `acquired` (server-side acquire counter) and
+  `detected_slots` — the pill and KAI now report reality, and a leak is
+  visible as an `acquired`/`inflight` mismatch.
+- Regression tests: `tests/test_pill_stats.py` (decode-rate tps, ghost
+  prevention, FIFO wait queue, cancel wake-up) + the row contract in
+  `tests/test_server_api.py`.
+
 ## [KAISEN 0.1.8-alpha (deepwork)] — 2026-09-10
 
 Deepwork fixed, made generic over any project, and hard-guardrailed.

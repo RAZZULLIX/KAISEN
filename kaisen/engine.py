@@ -87,6 +87,12 @@ class Session:
         self.cancel = threading.Event()
         self._tokens = 0
         self.tps = 0.0
+        # First token arrival — the reference point for the REAL decode
+        # rate.  tps measured from session creation used to include the
+        # queue wait and prefill, so the pill showed "random" numbers that
+        # depended on how long the pipeline waited for a free slot instead
+        # of how fast the model actually generates.
+        self._first_token_at: Optional[float] = None
         # True once the first token has streamed in.  Before that the GUI
         # should show "prefilling/queued, Ns" rather than an empty chat
         # box — a slow prefill is the classic "looks dead but is working"
@@ -104,10 +110,14 @@ class Session:
         self._streaming = True
         if len(self.text) > _SESSION_MAX_TEXT:
             self.text = self.text[-_SESSION_MAX_TEXT:]
-        # REAL tps: tokens actually received / wall time since the request
-        # started (prompt evaluation included — the request started then).
         self._tokens += int(count)
-        self.tps = self._tokens / max(0.001, time.time() - self.started_at)
+        now = time.time()
+        if self._first_token_at is None:
+            self._first_token_at = now
+        # REAL decode rate: tokens / time since the FIRST token.  The queue
+        # wait and the prefill are not part of the generation's speed.  The
+        # denominator floor keeps the first-token instant from spiking.
+        self.tps = self._tokens / max(1.0, now - self._first_token_at)
 
     def finish(self, server_id: Optional[str] = None, error: str = "") -> None:
         self.server_id = server_id
@@ -612,6 +622,14 @@ class ProjectEngine:
                         continue
                     self._submit(gen, str(candidate), gen_dir)
                 finally:
+                    # A session must NEVER stay "generating" after its
+                    # producer iteration ends.  Any exception that is not
+                    # GenerationCancelled/ServerError used to escape to the
+                    # outer catch-all WITHOUT finish() — the session then
+                    # stayed bound to its server forever (ghost), with a
+                    # frozen tps polluting the pill's per-server stats.
+                    if session.status == "generating":
+                        session.finish(error="producer died mid-generation")
                     with self._lock:
                         self._active_generations = max(0, self._active_generations - 1)
             except Exception as e:

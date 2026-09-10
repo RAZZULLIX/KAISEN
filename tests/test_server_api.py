@@ -544,6 +544,37 @@ def test_llm_status_shape(api):
     assert "servers" in d and isinstance(d["servers"], list)
 
 
+def test_pill_row_streaming_during_prefill(api, tmp_cfg, registry):
+    """The row's `streaming` must be true for a bound session even before
+    the first token (prefill) — the old `tps > 0` check flashed the LED
+    yellow while the box was genuinely working.  Waiters are `queued`."""
+    from kaisen.engine import ProjectEngine
+    from kaisen.llm import ModelOrchestrator
+    srv, base = api
+    registry.create("pillrow", _spec("pillrow"))
+    tmp_cfg.llm["servers"] = [{"id": "one", "type": "llama",
+                               "url": "http://127.0.0.1:1/completion",
+                               "max_concurrent": 1, "enabled": True}]
+    tmp_cfg.llm["active_ids"] = ["one"]
+    orch = ModelOrchestrator(tmp_cfg)
+    project = registry.get("pillrow")
+    eng = ProjectEngine(project, orchestrator=orch, registry=registry,
+                        worker_count=0)
+    srv.engines["pillrow"] = eng
+    try:
+        bound = eng.sessions.begin("code", 1, "p")   # bound, prefilling
+        bound.server_id = "one"
+        eng.sessions.begin("code", 2, "p")           # waiter, unbound
+        d = requests.get(base + "/api/llm/status", timeout=5).json()
+        row = next(r for r in d["servers"] if r["id"] == "one")
+        assert row["streaming"] == 1          # working even at 0 tps
+        assert row["tps"] == 0.0              # honest: prefill, no tokens
+        assert row["inflight"] == 1           # one bound session
+        assert d["queued"] == 1               # one waiter in the queue
+    finally:
+        srv.engines.pop("pillrow", None)
+
+
 def test_snapshots_list_shape(api):
     _, base = api
     r = requests.get(base + "/api/snapshots", timeout=5)

@@ -2006,9 +2006,13 @@ class DashboardServer:
         agg = 0.0
         active = [s for s in sessions_all if s.get("status") == "generating"]
         by_server: Dict[str, List[Dict[str, Any]]] = {}
+        queued = 0
         for s in active:
-            by_server.setdefault(s.get("server_id") or "", []).append(s)
             sid = s.get("server_id") or ""
+            if not sid:
+                queued += 1   # waiting for a free LLM slot (FIFO wait queue)
+                continue
+            by_server.setdefault(sid, []).append(s)
             active_tps[sid] = (active_tps.get(sid) or 0.0) + float(s.get("tps") or 0)
         # LIVE tps only — no stale last_tps fallback.  The pill must show
         # what is streaming RIGHT NOW; a pool with no active session shows
@@ -2051,7 +2055,17 @@ class DashboardServer:
                 # the speed of the last COMPLETED request, which looked
                 # like a random number unrelated to anything live.
                 "tps": round(live_tps, 1),
-                "streaming": 1 if live_tps > 0 else 0,
+                # streaming = the server has bound, generating sessions —
+                # it is WORKING even during prefill (no tokens yet), so
+                # the pill LED stays green instead of flashing yellow.
+                "streaming": 1 if chats else 0,
+                # pool-wide: pipelines parked in the FIFO wait queue
+                "queued": queued,
+                # internal telemetry: server-side acquire counter and the
+                # real llama.cpp slot count (a mismatch with `inflight`
+                # means sessions leaked — see the producer finally guard).
+                "acquired": sv.get("inflight", 0),
+                "detected_slots": sv.get("detected_slots"),
                 "budget": _server_budget_status(eng, sid),
             })
 
@@ -2083,6 +2097,7 @@ class DashboardServer:
             "generating": any(e.is_generating for e in pool),
             "tps": round(agg, 1),
             "agg_tps": round(agg, 1),
+            "queued": queued,
             "servers": rows,
             "model_id": None,
             "engines": self._engines_summary(),

@@ -1318,6 +1318,10 @@ class ModelOrchestrator:
         # across generations) and is only re-assigned when its endpoint is
         # banned/offline/saturated.
         self._pipeline_slot: Dict[str, str] = {}
+        # Waiters park here while every slot is busy: a FIFO queue like the
+        # worker pool's, woken the moment a slot frees (release() notifies)
+        # instead of every pipeline polling on its own 1s timer.
+        self._free_slot = threading.Condition()
         self._status: Dict[str, Any] = {"state": "idle", "last_activity": None}
         # Per-(server, skill) scoreboard: attempts / one-shot successes /
         # wins / accumulated $ — the data behind "which model does what
@@ -1796,6 +1800,7 @@ class ModelOrchestrator:
         if session is not None:
             session.waiting = True
         try:
+            interval = float(self.cfg.llm.get("pool_wait_interval", 1.0) or 1.0)
             while True:
                 sid = self._pick_server(min_tier=min_tier, skill=skill,
                                         pipeline_key=pipeline_key)
@@ -1812,7 +1817,12 @@ class ModelOrchestrator:
                     return sid
                 if cancel_event is not None and cancel_event.is_set():
                     raise GenerationCancelled("cancelled while waiting for a free LLM server")
-                time.sleep(float(self.cfg.llm.get("pool_wait_interval", 1.0)))
+                # FIFO wait like the worker pool: park on the condition and
+                # wake the moment a slot frees (release() notifies), with
+                # the interval as a safety re-pick in case a slot frees via
+                # a path that does not notify (config changes).
+                with self._free_slot:
+                    self._free_slot.wait(timeout=interval)
         finally:
             if session is not None:
                 session.waiting = False
@@ -2032,6 +2042,9 @@ class ModelOrchestrator:
         s = self._servers.get(sid)
         if s:
             s.release()
+        # Wake the FIFO wait queue: a slot just freed.
+        with self._free_slot:
+            self._free_slot.notify_all()
 
     def release_pipeline_slots(self, engine_key: str) -> None:
         """Drop every endpoint reservation held by an engine (stop / multi

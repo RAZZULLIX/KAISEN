@@ -596,7 +596,10 @@ async function updateStatusPill() {
     // Engine pool: more than one engine → summarize the pool instead of a
     // single engine's generation state (single engine keeps the label above).
     if (hasPool && engines.length > 1) {
-      text.textContent = `SYSTEM — ${engines.length} engines`;
+      const queued = statusData.queued ?? 0;
+      text.textContent = generating
+        ? `SYSTEM — ${engines.length} engines · ${aggTps.toFixed(1)} TPS${queued ? ` · ${queued} queued` : ''}`
+        : `SYSTEM — ${engines.length} engines${queued ? ` · ${queued} queued` : ''}`;
     }
     // The pill LED reflects the selected servers: red when any is not
     // answering, green when all are available, yellow when none selected.
@@ -685,9 +688,13 @@ function renderLlmRows(servers) {
   if (!c) return;
   c.innerHTML = '';
   servers.forEach(s => {
+    // streaming (backend) already means "bound, generating sessions" —
+    // green while the server works, even during prefill with 0 tps.
+    // The old `&& s.tps > 0` recheck made the LED flash yellow between
+    // token bursts.
     const stateCls = !s.active || !s.enabled ? 'disabled'
       : (s.banned || s.online === false) ? 'banned'
-      : (s.streaming && s.tps > 0) ? 'streaming'
+      : s.streaming ? 'streaming'
       : 'busy';
     const el = document.createElement('div');
     el.className = 'llm-row';
@@ -696,11 +703,12 @@ function renderLlmRows(servers) {
     el.setAttribute('aria-label', `Open live chat view for ${s.display || s.id}`);
     el.title = `click to see ${s.display} — ${s.id}`;
     el.onclick = () => openServerChat(s.id, s.chat_slot);
+    const tpsLabel = s.streaming && !(s.tps > 0) ? 'prefill' : `${(s.tps ?? 0).toFixed(1)} tps`;
     el.innerHTML = `
       <span class="llm-dot ${stateCls}"></span>
       <span class="llm-name">${escapeHtml(s.display)}</span>
       <span class="llm-model">${escapeHtml(s.model || s.type || '')}</span>
-      <span class="llm-stats">${s.requests ?? 0} req · ${s.failures ?? 0} fail${s.avg_seconds ? ' · ' + Number(s.avg_seconds).toFixed(0) + 's' : ''} · ${(s.tps ?? 0).toFixed(1)} tps</span>`;
+      <span class="llm-stats">${s.requests ?? 0} req · ${s.failures ?? 0} fail${s.avg_seconds ? ' · ' + Number(s.avg_seconds).toFixed(0) + 's' : ''} · ${s.inflight ?? 0} live · ${tpsLabel}</span>`;
     c.appendChild(el);
   });
 }

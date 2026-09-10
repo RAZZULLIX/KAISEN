@@ -755,12 +755,19 @@ over-subscribed.  Details:
   engine stops or shrinks `multi` (reservations are released then), or
   until the endpoint goes banned/offline (reassigned).  A healthy-but-
   busy held endpoint makes the pipeline WAIT, not churn.
-- **Transient saturation waits.** When every endpoint's quota is full, a
-  new pipeline waits (polls) instead of queueing invisibly behind real
-  slots — it never over-subscribes an endpoint, so the pool's throughput
-  is always exactly the sum of the endpoints' real capacities.
+- **Transient saturation queues.** When every endpoint's quota is full,
+  a new pipeline QUEUES on a FIFO wait queue (like the worker pool) and
+  is woken the moment a slot frees — it never over-subscribes an
+  endpoint, so the pool's throughput is always exactly the sum of the
+  endpoints' real capacities.  The pill shows the queue as
+  `· N queued` next to the live tps.
 - **Plain callers are unaffected.** Requests without a pipeline key
   (repair, suggest, deepwork) keep the old per-request pick.
+- **Pill tps is the current generation's speed.** A session's tps is
+  tokens / time-since-first-token — the queue wait and prefill are not
+  part of the number, so the pill shows the real decode rate of what is
+  streaming right now; a bound session in prefill shows a green LED with
+  `prefill` instead of a misleading `0.0 tps`.
 
 `ESTIMATE <in> [out]` (KAI) or the Servers panel shows per-server
 time/cost for a call of that size before you commit.
