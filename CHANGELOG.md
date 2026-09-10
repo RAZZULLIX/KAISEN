@@ -5,6 +5,54 @@ All notable changes to KAISEN are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [KAISEN 0.1.8-alpha (deepwork)] — 2026-09-10
+
+Deepwork fixed, made generic over any project, and hard-guardrailed.
+
+### Fixed
+
+- **The loop never worked.** The prompt advertised `{YELOOK}`/`{READ}`
+  placeholders that were never substituted with the real tool codes, and
+  the command parser matched single letters inside words — every
+  "Rationale: ..." line phantom-triggered a bogus READ (the `r` in
+  "Rationale"), the read counter filled with junk, `min_reads` was never
+  genuinely met, and the loop burned 50 turns into
+  "DEEPWORK TIMEOUT — no memo produced".
+- **Hardcoded assumptions dropped.** The listing showed a hardcoded
+  "generation fitness" pair and the latest-N rows regardless of what the
+  harness reports; the reader hardcoded `candidate.<ext>` paths. Both
+  are now data-driven: columns come from the real results store, the
+  sort respects the metric direction (lower-is-better projects no longer
+  list their WORST generations as "top"), and the reader finds the
+  candidate source generically by the project's extension.
+- **pandas 3 compatibility.** `to_numeric(errors="ignore")` was removed
+  in pandas 3.0, so the query tool raised on this machine; it now
+  coerces and keeps fully-numeric columns numeric.
+
+### Changed
+
+- **One consistent command language** (`LIST` / `READ` / `DIFF` /
+  `PANDAS` / `LESSON` / `MEMO`), the same names in the prompt, the
+  parser, and the tool map. `DIFF` is new: a cheap unified diff vs the
+  champion to choose WHAT to study before a full `READ`.
+- **Small-model tolerance.** Line-anchored whole-word parsing: prose
+  can never be misread as a command; case, `LIST: 10`, `READ-42`,
+  `gen 43`, trailing punctuation/prose all parse; commands bundled in
+  the same reply as the memo still execute before the memo is judged;
+  only successful READs count toward `min_reads`.
+- **Profoundly guardrailed.** The fixed tool set is the ONLY thing the
+  agent can do. Generation arguments resolve to run folders only —
+  paths (`../`, `..`) never pass. The pandas tool runs expression-only
+  ASTs with no builtins, no modules in scope (the old namespace exposed
+  `os` and `pd`), and an explicit deny-list of file-I/O and string-eval
+  methods (`to_*`, `read_*`, `df.query`/`df.eval`, `plot`, dunders).
+- **Real briefing.** The session brief carries the project language,
+  goal, metric schema with directions (the acceptance criteria), the
+  champion, and the last rows — generically built for any project.
+- Regression tests: `tests/test_deepwork.py` (20) covering parsing,
+  tolerance, memo/read contract, direction-aware listing, source
+  finding, and the pandas guardrails.
+
 ## [KAISEN 0.1.8-alpha (shared worker pool)] — 2026-09-10
 
 One worker pool for the whole process — every project's jobs drain one

@@ -568,10 +568,23 @@ Optional brain features, all per project (`skills`):
 - **analyze** — the pipeline's per-stage output is analyzed.
 - **lessons** — after a new best, the LLM writes a lesson (what worked);
   it joins the generation prompt. Stored in `lessons.txt`.
-- **deepwork** — periodic multi-turn agent sessions with tools over the
-  results store (read, pandas query, file inspection); saves memos into
-  `memos/` that later generations read. (pandas is optional — the query
-  tool errors gracefully without it.)
+- **deepwork** — periodic multi-turn agent sessions that study the
+  project's own data and write a memo steering the next generations.
+  One fixed command set, identical for every project kind:
+  `LIST` (top scored generations with the REAL metric columns, sorted by
+  the metric direction), `DIFF` (what a generation changed vs the
+  champion), `READ` (full candidate source), `PANDAS` (queries over the
+  results store), `LESSON`, `MEMO`; the session ends with
+  `<DEEPWORK_MEMO>`.  Profoundly guardrailed: the command set is
+  hardcoded, generation arguments resolve to run folders only (paths
+  never pass), and the pandas tool is expression-only AST — no
+  statements, no builtins, no modules, and file-I/O methods
+  (`to_csv`/`read_*`/`query`/`eval`/...) are rejected before evaluation.
+  Parsing tolerates small-model mistakes (any case, `LIST: 10`,
+  `READ-42`, trailing prose) and commands bundled with the memo still
+  execute.  Memos land in `memos/`; the latest one feeds the generation
+  prompt. (pandas is optional — the query tool errors gracefully without
+  it.)
 - **memory** — history blob + keyword trends feed the generation prompt.
 
 ---

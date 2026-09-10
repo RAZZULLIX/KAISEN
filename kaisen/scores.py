@@ -198,12 +198,13 @@ def metric_goodness(scores: Dict[str, float], schema: Dict[str, Any], baselines:
 
 
 # ---------------------------------------------------------------------------
-# Score types (selectable composite views — yelook-style)
+# Score types (selectable composite views)
 #
 # A project may declare multiple score types; the active one drives evolution
 # and the GUI can switch which one is displayed.  Compose modes:
-#   "product"       — product of the listed metrics (yelook global_product /
-#                     distribution_product). Missing metric → no score.
+#   "product"       — product of the listed metrics (a global product over
+#                     several keys, or one per distribution slice). Missing
+#                     metric → no score.
 #   "single"        — one metric's value.
 #   "weighted_sum"  — sum of weight * value over the declared weights.
 # Direction ("higher" | "lower") tells selection which way is better.

@@ -18,6 +18,7 @@ any project through its spec:
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import os
 import re
@@ -597,37 +598,34 @@ def substitute(template: str, variables: Dict[str, str]) -> str:
 
 
 # ===========================================================================
-# DEEPWORK — agentic analysis loop (merged from the sorting project)
+# DEEPWORK — agentic analysis loop
 # ===========================================================================
 
-DEFAULT_DEEPWORK_PROMPT = """You are an expert analyst studying the generated programs for the {project_name} project.
-You do NOT have access to the full dataset — the tools below give it to you.
-Your job: read programs, query the results, find patterns, and write a memo that gives real direction.
-YOU HAVE MANY TURNS. EACH TURN: issue commands, then read the outputs next turn. DON'T TRY TO DO EVERYTHING IN ONE TURN.
-=================================================================
-BENCHMARK CONTEXT
-=================================================================
+DEFAULT_DEEPWORK_PROMPT = """You are the analyst for the {project_name} project.
+You study what past generations did, learn which techniques actually work, and write a memo that steers the next generations.
+Work step by step: issue a command, read its output next turn, then decide what to study next. Do NOT try to do everything in one turn.
+
+CONTEXT
 {briefing}
-=================================================================
-YOUR COMMANDS (plain text, one per line; each MUST be preceded by a "Rationale:" line)
-=================================================================
-- {YELOOK} <query>        → top results / program listings (syntax: "list top 10" or a results-store query)
-- {READ} <folder_number>  → full source of the program in that folder
-- {PANDAS} result = <expr>→ custom pandas query on the results store
-- {LESSON} <folder>       → read the lesson written for that folder
-- {MEMO} <folder>         → read the deepwork memo for that folder
-=================================================================
+
+COMMANDS (one per line — a command line contains the command and nothing else)
+- LIST [n]   → top n scored generations by fitness with every metric column, plus recent failures
+- DIFF <gen> → what that generation changed vs the champion (cheap preview — use it before a full READ)
+- READ <gen> → full source of that generation's candidate program (e.g. READ 42)
+- PANDAS <expr> → pandas expression over the results table; assign the answer to `result`
+- LESSON     → the project's lesson file, if any
+- MEMO <gen> → a previous deepwork memo
+
 GOAL
-=================================================================
-Find what techniques give the best results. Read at least 4 programs.
-When done, write:
-  <DEEPWORK_MEMO>
-  [150-250 word memo with real function names and explanation]
+Study the best AND the worst generations. Name the real functions and techniques that separate them — the memo must give the next generations concrete direction, not generic advice. Finish with:
+<DEEPWORK_MEMO>
+[150-250 words with real function names and concrete explanation]
 """
 
 
 class DeepworkAgent:
-    """Multi-turn agentic loop. `tools` maps magic codes to callables."""
+    """Multi-turn agentic loop. `tools` maps the command names the prompt
+    advertises (LIST / READ / PANDAS / LESSON / MEMO) to callables."""
 
     def __init__(
         self,
@@ -646,63 +644,123 @@ class DeepworkAgent:
     def run(self) -> str:
         conversation = self.prompt
         cot_re = re.compile(r"<\|[^|]+\|>")
+        # One command per line, whole word, line-anchored: prose lines
+        # ("Rationale: ...", "{YELOOK} ...", stray mentions) can never be
+        # misread as commands. The old pattern matched single letters
+        # inside words, phantom-read every turn and ate the real command.
+        # Small-model tolerance: any case, optional ':'/'-' after the
+        # command, trailing prose ignored (args are taken loosely by the
+        # tools themselves).
         tool_re = re.compile(
-            r"(" + "|".join(re.escape(c) for c in self.tools) + r")[\s\\\"']*((?:[^\n\"'}\]\\]|\\.)+)",
-            re.IGNORECASE,
+            r"^\s*(LIST|READ|DIFF|PANDAS|LESSON|MEMO)\b\s*[:：\-–]?\s*(.*?)\s*$",
+            re.IGNORECASE | re.MULTILINE,
         )
         reads = 0
-        read_folders: set = set()
         cache: Dict[str, str] = {}
 
-        for turn in range(self.max_turns):
+        for _ in range(self.max_turns):
             raw = self.request(conversation)
             markers = list(cot_re.finditer(raw))
             clean = raw[markers[-1].end():].strip() if markers else raw.strip()
             conversation += f"\n\nAssistant: {clean}"
 
-            # Memo check
-            memo = _extract_memo(clean)
-            if memo is not None:
-                if reads < self.min_reads:
-                    conversation += f"\n\nYou have only read {reads} programs. Read at least {self.min_reads} first."
-                    continue
-                if read_folders and not any(f in memo for f in read_folders):
-                    conversation += f"\n\nThe memo must reference a folder you actually read ({', '.join(sorted(read_folders))}). Rewrite it."
-                    continue
-                return memo
-
             clean_no_cot = cot_re.sub("", clean)
             matches = list(tool_re.finditer(clean_no_cot))
-            if not matches:
-                conversation += "\n\nNo command found. Write 'Rationale: ...' then a command, or <DEEPWORK_MEMO> to finish."
-                continue
 
+            # Execute commands FIRST: a small model often bundles its last
+            # READ with the memo in one reply — those reads must count
+            # before the memo is judged.
             results = []
             for m in matches:
-                code = m.group(1).lower()
-                args = m.group(2).strip().rstrip("\\\"' ").strip()
+                code = m.group(1).upper()
+                args = (m.group(2) or "").strip()
                 key = f"{code} {args}"
                 if key in cache:
                     results.append(cache[key])
                     continue
                 fn = self.tools.get(code)
-                if fn is None:
-                    results.append(f"ERROR: unknown command code {code}")
-                    continue
                 try:
-                    out = fn(args)
+                    out = fn(args) if fn else f"ERROR: unknown command {code}"
                 except Exception as e:
                     out = f"ERROR: {e}"
-                if code.startswith("r"):  # read-like tools count as reads
-                    reads += 1
-                    mf = re.search(r"\b(\d{4,})\b", args)
-                    if mf:
-                        read_folders.add(mf.group(1))
+                if code == "READ" and not out.startswith("ERROR"):
+                    reads += 1  # only a real, successful READ counts
                 cache[key] = out
                 results.append(out)
-            conversation += "\n\n" + "\n\n".join(results)
+            if results:
+                conversation += "\n\n" + "\n\n".join(results)
+
+            memo = _extract_memo(clean)
+            if memo is not None:
+                if reads < self.min_reads:
+                    conversation += (
+                        f"\n\nYou have read {reads} candidate program(s) so far. "
+                        f"READ at least {self.min_reads} before writing the memo."
+                    )
+                    continue
+                return memo
+
+            if not matches:
+                conversation += (
+                    "\n\nNo command found in that reply. Issue one of LIST / READ / "
+                    "DIFF / PANDAS / LESSON / MEMO, or finish with <DEEPWORK_MEMO>."
+                )
 
         return "DEEPWORK TIMEOUT -- no memo produced."
+
+
+def format_top_rows(rows: List[Dict[str, Any]], n: int = 10,
+                    higher_is_better: bool = True) -> str:
+    """The generic candidate-listing table: top scored generations by
+    fitness, with every metric column the results store actually carries.
+    Works for ANY project — the columns come from the data, not from
+    assumptions about what the harness reports. `higher_is_better` flips
+    the sort for lower-is-better metrics (time_ms, error, ...)."""
+    n = max(1, min(int(n or 10), 50))
+    scored = [r for r in rows if str(r.get("fitness", "") or "").strip() != ""]
+    fails = len(rows) - len(scored)
+
+    def _fitness(r: Dict[str, Any]) -> float:
+        try:
+            return float(r.get("fitness"))
+        except (TypeError, ValueError):
+            return -1.0
+
+    scored.sort(key=_fitness, reverse=higher_is_better)
+    cols = ["generation", "outcome"]
+    metric_cols: List[str] = []
+    for r in rows:
+        for k in r.keys():
+            if k not in ("generation", "outcome", "fitness") and k.strip() and k not in metric_cols:
+                metric_cols.append(k)
+    cols += metric_cols + ["fitness"]
+
+    out = [f"{len(scored)} scored / {fails} not scored generations", " ".join(cols)]
+    for r in scored[:n]:
+        out.append(" ".join(str(r.get(c, "") or "") for c in cols))
+    if fails:
+        tail = ["recent failures:"]
+        for r in rows[-3:]:
+            if str(r.get("fitness", "") or "").strip() == "":
+                tail.append(f"  gen {r.get('generation')} {r.get('outcome')}")
+        if len(tail) > 1:
+            out.append("\n".join(tail))
+    return "\n".join(out)
+
+
+def find_candidate_source(gen_dir: str | Path, code_ext: str) -> Optional[Path]:
+    """Find the candidate source inside a run folder, whatever the project
+    language: the candidate file first, then any source file with the
+    project's extension. Returns None when the folder has no source."""
+    gen_dir = Path(gen_dir)
+    for pat in (f"candidate*", f"program{code_ext}"):
+        hits = sorted(gen_dir.glob(pat))
+        if hits:
+            return hits[0]
+    for p in sorted(gen_dir.iterdir()):
+        if p.is_file() and p.suffix == code_ext:
+            return p
+    return None
 
 
 def _extract_memo(text: str) -> Optional[str]:
@@ -777,7 +835,12 @@ class ResultsStore:
                 w.writerow({k: r.get(k, "") for k in merged})
 
     def query(self, expr: str) -> str:
-        """Run a pandas expression over the store (deepwork tool)."""
+        """Run a SAFE pandas expression over the store (deepwork tool).
+        Profound guardrail: expression-only AST (no statements, no
+        assignments), no builtins, no module objects in scope, and any
+        IO-ish call/attribute (to_*, read_*, write/save/open/exec/eval,
+        dunders) is rejected before evaluation — the expression can only
+        compute on `df` and return data."""
         try:
             import pandas as pd
         except ImportError:
@@ -789,12 +852,65 @@ class ResultsStore:
         df = pd.DataFrame(rows)
         for col in df.columns:
             try:
-                df[col] = pd.to_numeric(df[col], errors="ignore")
+                # pandas 3 dropped errors="ignore"; coerce and keep the
+                # column numeric only if EVERY value converted (text
+                # columns like outcome stay strings for value_counts).
+                num = pd.to_numeric(df[col], errors="coerce")
+                if num.notna().all():
+                    df[col] = num
             except Exception:
                 pass
-        ns = {"df": df, "pd": pd, "os": os}
+        expr = str(expr or "").strip().strip("`").strip()
+        # small-model resilience: tolerate a "result =" prefix
+        expr = re.sub(r"^result\s*=\s*", "", expr, flags=re.IGNORECASE)
+        if not expr:
+            return "ERROR: PANDAS needs an expression, e.g. PANDAS df[df.fitness > 5]"
         try:
-            exec(expr, {"__builtins__": {}}, ns)
-            return str(ns.get("result", "(no 'result' variable set)"))
+            tree = ast.parse(expr, mode="eval")
+        except SyntaxError as e:
+            return f"ERROR: not a valid expression: {e}"
+        # File I/O and string-eval sub-languages are OUT: df.query()/df.eval()
+        # resolve names in the caller's frame (where `pd` lives), so they
+        # are denied even though they look like analysis.
+        deny_attrs = {
+            "query", "eval",
+            "to_csv", "to_pickle", "to_excel", "to_json", "to_hdf", "to_sql",
+            "to_parquet", "to_feather", "to_orc", "to_stata", "to_gbq",
+            "to_clipboard", "to_html", "to_xml", "to_latex", "to_markdown",
+            "read_csv", "read_pickle", "read_excel", "read_json", "read_hdf",
+            "read_sql", "read_parquet", "read_feather", "read_orc",
+            "read_stata", "read_gbq", "read_clipboard", "read_html",
+            "read_xml", "read_table", "read_fwf", "read_sas", "read_spss",
+        }
+        deny_prefix = re.compile(
+            r"^(write|save|open|exec|eval|compile|plot|__)", re.IGNORECASE)
+        allowed_funcs = {"len", "str", "int", "float", "abs", "min", "max",
+                         "sum", "sorted", "round", "bool", "repr", "list"}
+
+        def _check(node: ast.AST) -> None:
+            if isinstance(node, ast.Call):
+                f = node.func
+                if isinstance(f, ast.Attribute):
+                    if f.attr in deny_attrs or deny_prefix.match(f.attr):
+                        raise ValueError(f"blocked call: {f.attr}")
+                elif isinstance(f, ast.Name):
+                    if f.id not in allowed_funcs:
+                        raise ValueError(f"blocked function: {f.id}")
+                else:
+                    raise ValueError("blocked call shape")
+            elif isinstance(node, ast.Attribute):
+                if node.attr in deny_attrs or deny_prefix.match(node.attr):
+                    raise ValueError(f"blocked attribute: {node.attr}")
+            for child in ast.iter_child_nodes(node):
+                _check(child)
+
+        try:
+            _check(tree)
+        except ValueError as e:
+            return f"ERROR: {e}"
+        try:
+            out = eval(compile(tree, "<pandas>", "eval"),
+                       {"__builtins__": {}}, {"df": df})
         except Exception as e:
             return f"ERROR: {e}"
+        return str(out)[:4000]

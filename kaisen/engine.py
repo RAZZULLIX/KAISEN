@@ -18,6 +18,7 @@ from __future__ import annotations
 import difflib
 import os
 import random
+import re
 import shutil
 import threading
 import time
@@ -1553,12 +1554,16 @@ class ProjectEngine:
     def _run_deepwork(self, gen: int) -> None:
         try:
             from . import skills as sk
+            # The ONLY capabilities the agent gets, by name — the loop can
+            # never execute anything else. Every one of them only reads
+            # project-local data.
             tools = {
-                "y": lambda args: self._deepwork_yelook(args),
-                "r": lambda args: self._deepwork_read(args),
-                "p": lambda args: self.results.query(args),
-                "l": lambda args: self._deepwork_memo_lesson(args, kind="lesson"),
-                "m": lambda args: self._deepwork_memo_lesson(args, kind="memo"),
+                "LIST": lambda args: self._deepwork_list(args),
+                "READ": lambda args: self._deepwork_read(args),
+                "DIFF": lambda args: self._deepwork_diff(args),
+                "PANDAS": lambda args: self.results.query(args),
+                "LESSON": lambda args: self._deepwork_lesson(args),
+                "MEMO": lambda args: self._deepwork_memo(args),
             }
             prompt = sk.DEFAULT_DEEPWORK_PROMPT.replace("{project_name}", self.project.name)
             briefing = self._deepwork_briefing()
@@ -1582,54 +1587,134 @@ class ProjectEngine:
         except Exception as e:
             self._log(f"deepwork failed: {e}")
 
-    def _deepwork_yelook(self, args: str) -> str:
+    @staticmethod
+    def _gen_token(args: str) -> str:
+        """Extract a generation token from a command's arguments, tolerant
+        of small-model mistakes: '42', 'gen 42', 'gen_000042', 'the winner
+        42', trailing punctuation. NEVER a path — only gen numbers pass."""
+        for part in (args or "").split():
+            tok = part.strip(".,;:!?\"'()[]{}")
+            if re.fullmatch(r"(?:gen_?)?\d+", tok, re.IGNORECASE):
+                return tok
+        return ""
+
+    def _gen_dir(self, token: str) -> Optional[Path]:
+        """Resolve a generation token to its run folder, strictly: a token
+        is a generation number or nothing — path tricks never escape the
+        runs dir."""
+        token = self._gen_token(token)
+        if not token:
+            return None
+        if token.lower().startswith("gen_"):
+            token = token[4:]
+        elif token.lower().startswith("gen"):
+            token = token[3:]
+        if not token.isdigit():
+            return None
+        gen_dir = self.project.runs_dir / f"gen_{int(token):06d}"
+        if gen_dir.exists():
+            return gen_dir
+        bare = self.project.runs_dir / token
+        return bare if bare.exists() else None
+
+    def _deepwork_list(self, args: str) -> str:
         rows = self.results.read()
         if not rows:
             return "ERROR: results store empty"
-        # Simple listing: latest N rows with fitness
-        try:
-            n = 10
-            parts = args.split()
-            if parts and parts[0].isdigit():
-                n = int(parts[0])
-            out = ["generation fitness " + " ".join(sorted(set(rows[0].keys()) - {"generation", "outcome"}))]
-            for r in rows[-n:]:
-                out.append(f"{r.get('generation')} {r.get('fitness', '')}")
-            return "\n".join(out)
-        except Exception as e:
-            return f"ERROR: {e}"
+        n = 10
+        for part in (args or "").split():
+            if part.isdigit():
+                n = int(part)
+                break
+        _key, score_type = self._active_score_type()
+        return skills_mod.format_top_rows(
+            rows, n,
+            higher_is_better=str(score_type.get("direction", "higher")).lower() != "lower")
 
     def _deepwork_read(self, args: str) -> str:
-        folder = args.strip().split()[0]
-        gen_dir = self.project.runs_dir / folder
-        if not gen_dir.exists():
-            gen_dir = self.project.runs_dir / f"gen_{int(folder):06d}"
-        if not gen_dir.exists():
-            return f"ERROR: folder {folder} not found"
-        cand = gen_dir / f"candidate{self._code_ext}"
-        if not cand.exists():
-            cand = gen_dir / f"program{self._code_ext}"
-        if not cand.exists():
-            return f"ERROR: no code in {folder}"
-        return cand.read_text(encoding="utf-8")[:25000]
-
-    def _deepwork_memo_lesson(self, args: str, kind: str) -> str:
-        folder = args.strip().split()[0]
-        if kind == "lesson":
-            p = self.project.path / "lessons.txt"
-            return p.read_text(encoding="utf-8")[:5000] if p.exists() else f"NO LESSON for {folder}"
+        gen_dir = self._gen_dir(args)
+        if gen_dir is None:
+            return f"ERROR: no run folder for generation '{self._gen_token(args) or args.strip()}'"
+        src = skills_mod.find_candidate_source(gen_dir, self._code_ext)
+        if src is None:
+            names = ", ".join(sorted(p.name for p in gen_dir.iterdir() if p.is_file())[:12])
+            return f"ERROR: no source file in {gen_dir.name} (folder has: {names or 'nothing'})"
         try:
-            return self.memory.load_memo(int(folder))
+            return src.read_text(encoding="utf-8", errors="replace")[:25000]
+        except Exception as e:
+            return f"ERROR: cannot read {src.name}: {e}"
+
+    def _deepwork_diff(self, args: str) -> str:
+        gen_dir = self._gen_dir(args)
+        if gen_dir is None:
+            return f"ERROR: no run folder for generation '{self._gen_token(args) or args.strip()}'"
+        src = skills_mod.find_candidate_source(gen_dir, self._code_ext)
+        if src is None:
+            return f"ERROR: no source file in {gen_dir.name}"
+        champ = (self.state.best or {}).get("code_path")
+        if not champ or not Path(champ).exists():
+            return "ERROR: no champion source to diff against"
+        try:
+            a = Path(champ).read_text(encoding="utf-8", errors="replace").splitlines()
+            b = src.read_text(encoding="utf-8", errors="replace").splitlines()
+        except Exception as e:
+            return f"ERROR: cannot read sources: {e}"
+        head = [f"gen {gen_dir.name} vs champion ({Path(champ).name}):"]
+        stats = load_json(gen_dir / "diff.json", None)
+        if isinstance(stats, dict):
+            head.append(f"  +{stats.get('added_lines', '?')}/"
+                        f"-{stats.get('removed_lines', '?')} lines "
+                        f"(changed {stats.get('changed_lines', '?')})")
+        diff = "\n".join(difflib.unified_diff(
+            a, b, fromfile="champion", tofile=gen_dir.name, lineterm=""))[:8000]
+        return "\n".join(head) + "\n" + (diff or "(no differences — identical to the champion)")
+
+    def _deepwork_lesson(self, args: str) -> str:
+        p = self.project.path / "lessons.txt"
+        try:
+            return p.read_text(encoding="utf-8")[:5000] if p.exists() else \
+                "NO LESSON — none written yet for this project"
+        except Exception as e:
+            return f"ERROR: cannot read lessons: {e}"
+
+    def _deepwork_memo(self, args: str) -> str:
+        token = self._gen_token(args)
+        if token.lower().startswith("gen_"):
+            token = token[4:]
+        elif token.lower().startswith("gen"):
+            token = token[3:]
+        try:
+            return self.memory.load_memo(int(token))
         except Exception:
-            return f"NO MEMO for {folder}"
+            return f"NO MEMO for generation '{token or args.strip()}'"
 
     def _deepwork_briefing(self) -> str:
+        """A complete, self-contained brief: what the project is, how it is
+        scored (the acceptance criteria), the champion, and the recent
+        history — generic over ANY project's metrics and rows."""
+        spec = self.project.spec or {}
+        out = [f"Project: {self.project.name} (language: {spec.get('language', 'unknown')})"]
+        if spec.get("description"):
+            out.append(f"Goal: {spec['description']}")
+        schema = spec.get("metrics") or {}
+        if schema:
+            out.append("Metric schema (how generations are scored):")
+            for k, v in schema.items():
+                out.append(f"  {k}: {v.get('direction', '?')} is better, weight {v.get('weight', '?')}")
+        best = self.state.best or {}
+        if best.get("metrics"):
+            out.append(f"Champion: gen {best.get('generation')}, "
+                       f"metrics {best.get('metrics')}, fitness {best.get('fitness')}")
         rows = self.results.read()
         if not rows:
-            return "(no results yet)"
-        out = [f"{len(rows)} scored generations; latest fitness values:"]
-        for r in rows[-15:]:
-            out.append(f"  gen {r.get('generation')}: fitness={r.get('fitness', 'N/A')} outcome={r.get('outcome')}")
+            out.append("(no results yet)")
+            return "\n".join(out)
+        scored = sum(1 for r in rows if str(r.get("fitness", "") or "").strip() != "")
+        out.append(f"{len(rows)} generations recorded, {scored} scored. Last 10:")
+        for r in rows[-10:]:
+            bits = " ".join(f"{k}={r[k]}" for k in r
+                            if k != "generation" and str(r.get(k, "")).strip())
+            out.append(f"  gen {r.get('generation')}: {bits or '(no data)'}")
         return "\n".join(out)
 
     def _generate_lesson(self, gen: int, code: str, metrics: Dict[str, float], result: Dict[str, Any]) -> None:
