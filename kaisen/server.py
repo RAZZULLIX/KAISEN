@@ -2104,6 +2104,12 @@ class DashboardServer:
             # cap-fill allocator: who holds which endpoint slot (see
             # ModelOrchestrator.status) — why a pipeline may wait.
             "pipeline_slots": llm.get("pipeline_slots") or {},
+            # ?debug=1: per-engine session dumps — the full truth behind
+            # the aggregated rows (which sessions are bound, waiting,
+            # prefilling) for field diagnosis without touching the boxes.
+            **({"debug_sessions": {pid: e.sessions.snapshot()
+                                   for pid, e in pool.items()}}
+               if request.query.get("debug") else {}),
         })
 
     async def _probe_server(self, sid: str, orch) -> None:
