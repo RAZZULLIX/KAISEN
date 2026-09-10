@@ -791,7 +791,10 @@ select, textarea, input[type="text"], input[type="number"], input[type="password
 
 /* As a first-class view inside .main, flush with the content edges. */
 #view-config.settings-bar { margin: -24px -32px 0; }
-.settings-bar-head { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+/* The head (title | tabs | actions) aligns with the centered settings
+   column instead of hugging the page's left edge — the controls used to
+   float left-of-centre above centered panels. */
+.settings-bar-head { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; max-width: 1030px; padding-right: 6px; margin: 0 auto; }
 .settings-bar-title { font-size: 13px; font-weight: 600; letter-spacing: 0.16em; color: var(--text2); text-transform: uppercase; }
 .settings-tabs { display: flex; gap: 6px; flex: 1; min-width: 0; overflow-x: auto; }
 .settings-bar-actions { display: flex; gap: 10px; align-items: center; }
