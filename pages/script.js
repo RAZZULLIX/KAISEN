@@ -1390,17 +1390,21 @@ function renderProjects() {
     tr.title = `Open ${p.name}`;
     tr.addEventListener('click', () => switchProject(p.id));
     const vr = eng && eng.valid_rate ? eng.valid_rate.valid_rate : null;
-    const valid = Number.isFinite(Number(vr)) ? `${Math.round(Number(vr) * 100)}%` : '—';
+    const v = Number.isFinite(Number(vr)) ? Number(vr) : null;
+    const validHtml = v == null
+      ? '<span class="muted">—</span>'
+      : `<div class="valid-bar"><div class="valid-fill ${v <= 0.33 ? 'low' : v <= 0.66 ? 'mid' : 'high'}" style="width:${Math.round(v * 100)}%"></div></div><div class="valid-pct">${Math.round(v * 100)}%</div>`;
     tr.innerHTML = `
       <td class="col-state">${stateDot(p)}</td>
       <td class="col-project">
         <div class="proj-name">${escapeHtml(p.name)}${p.id === activeProjectId ? ' <span class="chip chip-accent">ACTIVE</span>' : ''}</div>
-        <div class="proj-sub"><span class="proj-id">${escapeHtml(p.id)}</span>${p.description ? ` · <span class="proj-desc">${escapeHtml(p.description)}</span>` : ''}</div>
+        <div class="proj-sub"><span class="proj-id">${escapeHtml(p.id)}</span></div>
+        ${p.description ? `<div class="proj-desc">${escapeHtml(p.description)}</div>` : ''}
       </td>
-      <td class="col-lang"><span class="lang-chip">${escapeHtml(p.language || '?')}</span></td>
+      <td class="col-lang"><span class="lang-chip" title="${escapeHtml(p.language || '')}">${escapeHtml(p.language || '?')}</span></td>
       <td class="col-engine">${engineCell(eng, p)}</td>
       <td class="col-best">${bestCell(p)}</td>
-      <td class="col-valid"><span class="valid-val">${escapeHtml(valid)}</span></td>
+      <td class="col-valid">${validHtml}</td>
       <td class="col-actions" onclick="event.stopPropagation()">
         <button class="btn btn-sm btn-primary" title="Open project" onclick="switchProject('${p.id}')">Open</button>
         <button class="btn btn-sm" title="Edit spec" onclick="editProjectSpec('${p.id}')">Edit</button>
