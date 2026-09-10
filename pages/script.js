@@ -1329,7 +1329,7 @@ function engineCell(eng, p) {
   if (!eng) return '<span class="eng-off">not started</span>';
   const gen = eng.generation != null ? eng.generation : '?';
   const sub = [];
-  if (eng.multi != null) sub.push(`m${eng.multi}`);
+  if (eng.multi != null) sub.push(`multi ${eng.multi}`);
   if (eng.autofix && (eng.autofix.max_tries != null || eng.autofix.repair_max != null)) {
     sub.push(`fix ${eng.autofix.max_tries ?? 0}/${eng.autofix.repair_max ?? 0}`);
   }
@@ -1389,7 +1389,8 @@ function renderProjects() {
     tr.className = p.id === activeProjectId ? 'row-active' : '';
     tr.title = `Open ${p.name}`;
     tr.addEventListener('click', () => switchProject(p.id));
-    const valid = eng && eng.valid_rate != null ? `${Math.round(eng.valid_rate * 100)}%` : '—';
+    const vr = eng && eng.valid_rate ? eng.valid_rate.valid_rate : null;
+    const valid = Number.isFinite(Number(vr)) ? `${Math.round(Number(vr) * 100)}%` : '—';
     tr.innerHTML = `
       <td class="col-state">${stateDot(p)}</td>
       <td class="col-project">

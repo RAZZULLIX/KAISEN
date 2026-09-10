@@ -5,6 +5,25 @@ All notable changes to KAISEN are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [KAISEN 0.1.8-alpha (projects view)] — 2026-09-10
+
+The Projects view is a real data table now.
+
+### Changed
+
+- **One informative row per project** in a sticky-header table: engine
+  state dot, name + id + truncated description, language chip, engine
+  cell (state, generation, multi, autofix caps), best metrics with
+  units, rolling valid rate, and compact never-overflowing actions
+  (Open / Edit / Stop / Delete).  Row click opens the project; running
+  projects sort first.
+- **Search bar** filters by name or id as you type, with a live
+  `N of M projects` counter.
+- **Language filter** is a combobox with its OWN search box: type to
+  narrow the language list (with per-language counts) and pick one.
+- `/api/projects` entries now carry `language` (and metric schemas) —
+  the table's filter source.
+
 ## [KAISEN 0.1.8-alpha (pill truthfulness + LLM request queue)] — 2026-09-10
 
 The status pill now tells the truth about every model, and more requests
