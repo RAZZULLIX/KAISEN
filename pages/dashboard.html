@@ -90,7 +90,7 @@
             <div class="panel-header">
               <div><div class="panel-title">Worker Telemetry</div><div class="panel-subtitle">Per-worker execution metrics & artifacts</div></div>
 
-              <div class="panel-badges"><span class="chip">auto-refresh: 1s</span><span class="chip">parallel gens: <button class="btn btn-sm" aria-label="Fewer parallel generations" onclick="adjustMulti(-1)" title="Fewer parallel generations">−</button> <span id="multi-count">1</span> <button class="btn btn-sm" aria-label="More parallel generations" onclick="adjustMulti(1)" title="More parallel generations">+</button></span><button class="btn btn-sm" onclick="addWorker()">+ Add Worker</button></div>
+              <div class="panel-badges"><span class="chip">auto-refresh: 1s</span><span class="chip" id="multi-chip">parallel gens: <button class="btn btn-sm" aria-label="Fewer parallel generations" onclick="adjustMulti(-1)" title="Fewer parallel generations">−</button> <span id="multi-count">—</span> <button class="btn btn-sm" aria-label="More parallel generations" onclick="adjustMulti(1)" title="More parallel generations">+</button></span><button class="btn btn-sm" onclick="addWorker()">+ Add Worker</button></div>
             </div>
             <div class="panel-body">
               <div class="tabs" id="worker-tabs"></div>

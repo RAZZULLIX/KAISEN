@@ -266,13 +266,21 @@ async function addWorker() {
   } catch (e) { systemAlert('Add worker failed: ' + e.message); }
 }
 // ---- parallel gens (+/-): optimistic UI, coalesced absolute sends ----
-let multiValue = 1;    // what the UI shows (source of truth for clicks)
-let multiServer = 1;   // last server-confirmed value
+let multiValue = null;    // unknown until the first server sync — never fake 1
+let multiServer = null;   // last server-confirmed value
 let multiSending = false;
+let multiProjects = 0;    // how many engines the last pool-wide set touched
 
 function renderMulti() {
   const el = document.getElementById('multi-count');
-  if (el) el.textContent = multiValue;
+  if (el) el.textContent = multiValue ?? '—';
+  const chip = document.getElementById('multi-chip');
+  if (chip) {
+    chip.querySelectorAll('button').forEach(b => { b.disabled = multiValue === null; });
+    chip.title = multiProjects
+      ? `Parallel generations — pool-wide (${multiProjects} active projects)`
+      : 'Parallel generations — pool-wide';
+  }
 }
 
 function syncMultiFromServer(n) {
@@ -292,6 +300,7 @@ async function pushMulti() {
     if (!r || !r.ok || r.multi == null) throw new Error('multi request rejected');
     const n = Number(r.multi);
     if (n !== target) { multiValue = n; renderMulti(); } // server clamped — reflect truth
+    if (r.applied) { multiProjects = Object.keys(r.applied).length; }
     if (multiValue !== multiServer) {
       // Clicks arrived while this round-trip was in flight: send the latest.
       multiSending = false;
@@ -308,7 +317,7 @@ async function pushMulti() {
 }
 
 function adjustMulti(delta) {
-  multiValue = Math.max(1, multiValue + delta);
+  multiValue = Math.max(1, (multiValue ?? multiServer ?? 1) + delta);
   renderMulti();
   pushMulti();
 }
@@ -657,8 +666,6 @@ function renderFleet(engines) {
       <span class="fleet-name">${escapeHtml(name)}<span class="fleet-id">${escapeHtml(String(id))}</span></span>
       <span class="fleet-stat">gen <b>${escapeHtml(String(gen))}</b></span>
       <span class="fleet-stat">best <b>${escapeHtml(best)}</b>${metricBits ? ' <span class="fleet-metrics">' + metricBits + '</span>' : ''}</span>
-      <span class="fleet-stat">multi <b>${escapeHtml(String(e.multi != null ? e.multi : 1))}</b></span>
-      <span class="fleet-stat">nw <b>${escapeHtml(String(e.workers != null ? e.workers : 0))}</b></span>
       ${e.engine_error ? `<span class="fleet-error" title="${escapeHtml(e.engine_error)}">${escapeHtml(e.engine_error)}</span>` : ''}
       <span class="fleet-actions">
         <button class="btn btn-sm" onclick="switchProject('${id}')">Select</button>
@@ -1329,7 +1336,8 @@ function engineCell(eng, p) {
   if (!eng) return '<span class="eng-off">not started</span>';
   const gen = eng.generation != null ? eng.generation : '?';
   const sub = [];
-  if (eng.multi != null) sub.push(`multi ${eng.multi}`);
+  // multi is POOL-WIDE now (the dashboard chip) — per-engine values are
+  // redundant and would suggest a control that no longer exists here.
   if (eng.autofix && (eng.autofix.max_tries != null || eng.autofix.repair_max != null)) {
     sub.push(`fix ${eng.autofix.max_tries ?? 0}/${eng.autofix.repair_max ?? 0}`);
   }
@@ -3585,6 +3593,7 @@ document.addEventListener('keydown', (e) => {
 loadPrefs();
 
 setInterval(fetchState, 1000);
+fetchState();   // fill the chip with the REAL value right away, not after 1s
 setInterval(updateStatusPill, 1000);
 setInterval(loadActive, 3000);
 

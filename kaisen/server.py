@@ -212,10 +212,20 @@ class DashboardServer:
     def set_engine(self, engine: ProjectEngine) -> None:
         self.engine = engine
 
+    def _fallback_engine(self) -> Optional[ProjectEngine]:
+        """Pool mode has no GUI selection (the campaign driver switches
+        engines as projects start/stop), so single-engine surfaces must
+        still resolve to a REAL engine — most recently added first —
+        instead of going blank or rejecting writes."""
+        for eng in reversed(list(self.engines.values())):
+            if eng is not None:
+                return eng
+        return None
+
     def _engine_for(self, pid: Optional[str]) -> Optional[ProjectEngine]:
         if pid:
             return self.engines.get(pid)
-        return self.engine
+        return self.engine or self._fallback_engine()
 
     def _persist_engine_pool(self) -> None:
         """Snapshot which projects are running (and how many pipelines each)
@@ -1625,7 +1635,10 @@ class DashboardServer:
         stopped_pid = eng.project.id
         self.engines.pop(stopped_pid, None)
         if self._selected_project_id == stopped_pid:
-            self._selected_project_id = None
+            # Never leave the dashboard pointing at nothing while the pool
+            # still has engines: promote another one.
+            nxt = self._fallback_engine()
+            self._selected_project_id = nxt.project.id if nxt else None
         self._persist_engine_pool()
         return _json({"ok": True, "stopped": stopped_pid})
 
@@ -1915,10 +1928,10 @@ class DashboardServer:
     # legacy-shape endpoints (original dashboard UI)
     # ------------------------------------------------------------------ #
     async def _api_workers_legacy(self, request):
-        if self.engine is None:
+        eng = self._engine_for(None)
+        if eng is None:
             # No engine: report cleanly (200) instead of 400 spam.
             return _json({"no_engine": True})
-        eng = self._require_engine()
         spec = eng.project.spec
         # Which LLM served each generation (for the Model Routed card).
         gen_server: Dict[int, str] = {}
@@ -1954,13 +1967,17 @@ class DashboardServer:
             "schema": spec.get("metrics", {}),
             "telemetry": spec.get("telemetry") or {},
             "multi": getattr(eng, "_multi", 1),
+            # WHICH engine these numbers belong to — the parallel-gens
+            # control targets this project, so the GUI never has to guess.
+            "project_id": eng.project.id,
+            "project_name": getattr(eng.project, "name", "") or eng.project.id,
         })
 
     async def _api_state_legacy(self, request):
-        if self.engine is None:
+        eng = self._engine_for(None)
+        if eng is None:
             # No engine: report cleanly (200) instead of 400 spam.
             return _json({"no_engine": True})
-        eng = self._require_engine()
         st = eng.state
         best = st.best
         metrics = best.get("metrics", {}) or {}
@@ -2243,18 +2260,29 @@ class DashboardServer:
         return _json({"ok": ok, "message": f"Worker {wid} process killed." if ok else f"Worker {wid} has no running process."})
 
     async def _api_engine_multi(self, request):
+        """Parallel-generation pipelines.  WITHOUT a project_id the value
+        applies to EVERY active engine in the pool (the dashboard chip is a
+        pool-wide knob); WITH one, it targets that engine only."""
         data = await request.json() if request.can_read_body else {}
-        pid = str(data.get("project_id") or "") if isinstance(data, dict) else ""
-        eng = self._engine_for(pid or None)
-        if eng is None:
-            return _json({"ok": False, "error": "no engine running"}, 400)
         try:
-            n = int(data.get("multi", 1) or 1)
+            n = int(data.get("multi", 1) or 1) if isinstance(data, dict) else 1
         except (TypeError, ValueError):
             n = 1
-        n = eng.set_multi(n)
+        pid = str(data.get("project_id") or "") if isinstance(data, dict) else ""
+        if pid:
+            eng = self._engine_for(pid)
+            if eng is None:
+                return _json({"ok": False, "error": "no engine running"}, 400)
+            n = eng.set_multi(n)
+            self._persist_engine_pool()
+            return _json({"ok": True, "multi": n, "project_id": eng.project.id})
+        if not self.engines:
+            return _json({"ok": False, "error": "no engine running"}, 400)
+        applied: Dict[str, int] = {}
+        for eid, eng in list(self.engines.items()):
+            applied[eid] = int(eng.set_multi(n))
         self._persist_engine_pool()
-        return _json({"ok": True, "multi": n})
+        return _json({"ok": True, "multi": n, "applied": applied})
 
     async def _api_worker_kill_legacy(self, request):
         eng = self._require_engine()

@@ -48,6 +48,17 @@ _SESSION_KEEP_DONE = 10       # completed sessions retained in the live view
 _SESSION_KEEP_SECS = 600.0    # completed sessions older than this are pruned
 
 
+def _skill_enabled(spec: Dict[str, Any], name: str, flag: str = "enabled") -> bool:
+    """Read a `skills.<name>` flag.  The three accepted shapes are a bare
+    bool (``"lessons": false``) and a config dict (``{"enabled": true}``) —
+    code that assumed the dict form crashed the champion path with
+    `'bool' object has no attribute 'get'` for spec-legal bools."""
+    val = (spec.get("skills") or {}).get(name)
+    if isinstance(val, dict):
+        return bool(val.get(flag))
+    return bool(val)
+
+
 def count_changed_lines(base: str, cand: str) -> int:
     """Count how many lines a candidate touches vs the baseline.
 
@@ -1385,7 +1396,7 @@ class ProjectEngine:
             self.results.append({**{"generation": gen, "outcome": "NEW_BEST", "fitness": fitness}, **metrics})
             self._notify_best(gen, fitness, metrics, schema)
             # lessons (spec-driven)
-            if (spec.get("skills") or {}).get("lessons", {}).get("enabled"):
+            if _skill_enabled(spec, "lessons"):
                 self._generate_lesson(gen, code or "", metrics, result)
             self._maybe_deepwork()
             self._log(f"gen {gen}: " + ("baseline re-evaluated — " if reeval else "") + f"NEW BEST fitness={fitness:.5f}")
@@ -1556,7 +1567,8 @@ class ProjectEngine:
     # ======================================================================
 
     def _maybe_deepwork(self) -> None:
-        spec = (self.project.spec.get("skills") or {}).get("deepwork") or {}
+        _dw = (self.project.spec.get("skills") or {}).get("deepwork")
+        spec = _dw if isinstance(_dw, dict) else {}
         if not spec.get("enabled"):
             return
         every = int(spec.get("every", 5))
