@@ -1450,6 +1450,17 @@ function bestCell(p) {
   }).join('<span class="best-sep"> · </span>');
 }
 
+// A project that reached its success goal is DONE — the engine stopped it and
+// it is not resumed on the next start.  Yellow, not green: green marks the
+// selected project, yellow marks a finished one.
+function goalChip(p) {
+  const g = p && p.goal;
+  if (!g || g.met !== true) return '';
+  const cond = g.when ? `${g.when.metric} ${g.when.op} ${g.when.value}` : 'goal';
+  const tip = `GOAL reached${g.met_generation != null ? ` at gen ${g.met_generation}` : ''}: ${g.detail || cond}`;
+  return ` <span class="chip chip-goal" title="${escapeHtml(tip)}">GOAL!</span>`;
+}
+
 function stateDot(p) {
   const eng = projectsEngines[p.id];
   const st = eng && eng.engine_state;
@@ -1489,7 +1500,7 @@ function renderProjects() {
     tr.innerHTML = `
       <td class="col-state">${stateDot(p)}</td>
       <td class="col-project">
-        <div class="proj-name">${escapeHtml(p.name)}${p.id === activeProjectId ? ' <span class="chip chip-accent">ACTIVE</span>' : ''}</div>
+        <div class="proj-name">${escapeHtml(p.name)}${p.id === activeProjectId ? ' <span class="chip chip-accent">ACTIVE</span>' : ''}${goalChip(p)}</div>
         <div class="proj-sub"><span class="proj-id">${escapeHtml(p.id)}</span></div>
         ${p.description ? `<div class="proj-desc">${escapeHtml(p.description)}</div>` : ''}
       </td>

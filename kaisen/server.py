@@ -26,6 +26,7 @@ from .config import TEMP_ROOT, FrameworkConfig, PROJECTS_DIR, get_config, save_s
 from .budget import Budget
 from .engine import STATE_PAUSED, STATE_STOPPED, STATE_STOPPING, ProjectEngine
 from .projects import ProjectRegistry
+from .state import ProjectState
 from .guardrails import check_command, guardrail_state
 from .util import load_json, save_json
 from .suggest import _safe_rel_path
@@ -489,10 +490,26 @@ class DashboardServer:
     async def _api_projects_list(self, request):
         active_id = self.engine.project.id if self.engine else None
         temp = [{**p, "temp": True} for p in self._temp_registry.list()]
+        rows = self.registry.list() + temp
+        # Goal status per project, straight from its own state: a met goal
+        # means the project is DONE (its engine stopped it), and the list
+        # must keep saying so even when that engine is not in the pool.
+        for row in rows:
+            row["goal"] = self._project_goal(row["id"])
         return _json({
-            "projects": self.registry.list() + temp,
+            "projects": rows,
             "active_id": active_id,
         })
+
+    def _project_goal(self, pid: str) -> Dict[str, Any]:
+        """The project's goal as the list needs it ({} when it has none)."""
+        try:
+            project = self.registry.get(pid) or self._temp_registry.get(pid)
+            if project is None:
+                return {}
+            return ProjectState(project).goal_snapshot()
+        except Exception:
+            return {}
 
     async def _api_project_delete(self, request):
         pid = request.match_info["pid"]

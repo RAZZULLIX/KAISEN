@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A yellow `GOAL!` pill in the projects list.** A project whose champion
+  reached its success goal is DONE — the engine stopped it and it is not
+  resumed on the next start — and now says so at a glance, beside the green
+  `ACTIVE` chip, with the criterion and the generation it was reached in the
+  tooltip.  `/api/projects` carries each project's `goal` (`when`, `then`,
+  `met`, `met_generation`, `detail`) read from its own `state.json`, so the
+  pill survives restarts and shows even for projects whose engine is no
+  longer in the pool.  Yellow on purpose: green marks the selected project,
+  yellow marks a finished one.
+
 ## [KAISEN 0.1.10-alpha (goals: a project can be DONE)] — 2026-09-17
 
 ### Added

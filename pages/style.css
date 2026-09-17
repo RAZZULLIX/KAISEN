@@ -139,6 +139,7 @@ body {
 .chip-sub { color: var(--muted); font-size: 11px; margin-left: 2px; }
 .chip { padding: 4px 10px; border-radius: var(--radius-pill); border: 1px solid var(--border2); color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; }
 .chip-accent { border-color: rgba(0,232,124,0.7); color: var(--accent); background: rgba(0,232,124,0.06); }
+.chip-goal { border-color: rgba(255,190,61,0.75); color: var(--warning); background: rgba(255,190,61,0.08); font-weight: 600; }
 .tabs { display: flex; gap: 6px; font-size: 12px; margin-bottom: 8px; overflow-x: auto; padding-bottom: 8px; }
 .tab { padding: 10px 18px; border-radius: var(--radius-pill); border: 1px solid transparent; color: var(--muted); cursor: pointer; white-space: nowrap; transition: all 0.15s; }
 .tab.active { border-color: rgba(0,232,124,0.7); background: rgba(0,232,124,0.08);}
