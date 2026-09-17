@@ -38,6 +38,7 @@ from __future__ import annotations
 import collections
 import multiprocessing
 import os
+import stat
 import threading
 import time
 from pathlib import Path
@@ -50,6 +51,45 @@ WORKER_START_TIMEOUT = 15.0
 # A removed worker gets this long to finish its in-flight job before the
 # pool falls back to terminate+requeue (the job is never lost either way).
 WORKER_RETIRE_TIMEOUT = 30.0
+
+
+# ---------------------------------------------------------------------------
+# a forked child must not inherit the parent's live sockets
+# ---------------------------------------------------------------------------
+
+def _close_inherited_sockets_in_child() -> None:
+    """Drop every inherited *socket* in a freshly forked child.
+
+    A worker only ever talks to the parent over pipes, so every socket it
+    inherits is the parent's — and keeping one alive is not a local cost.
+    An LLM stream the parent abandons (retry, nodata timeout, pause/cancel)
+    only stops the server when the LAST reference to the connection is gone:
+    with a forked worker holding an inherited copy, llama.cpp kept decoding
+    the abandoned request into a socket nobody read.  The box stayed busy on
+    that zombie (its own tps counter went on counting) and the NEXT
+    generation sent to it queued behind it, so the live view showed a
+    session stuck at zero tokens that never left "prefill" while the box
+    looked busy — the exact shape of a stalled engine.
+
+    Pipes are deliberately left alone: multiprocessing queues, events and
+    the child sentinel are how the child talks to the pool.
+    """
+    try:
+        names = os.listdir("/proc/self/fd")
+    except OSError:                      # no procfs to sweep
+        return
+    for name in names:
+        try:
+            fd = int(name)
+            if fd > 2 and stat.S_ISSOCK(os.fstat(fd).st_mode):
+                os.close(fd)
+        except (OSError, ValueError):
+            continue
+
+
+if hasattr(os, "register_at_fork"):
+    # Runs in every forked child, and in the forkserver on its own fork.
+    os.register_at_fork(after_in_child=_close_inherited_sockets_in_child)
 
 
 def _setup_build_cache(project: Project) -> None:

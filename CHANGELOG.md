@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A generation abandoned by a retry/pause kept burning a box's slot.**
+  Worker processes are forked, and a fork inherits *every* open fd — including
+  the HTTP sockets of the streams the parent is reading.  When an engine
+  abandoned a generation (retry, nodata timeout, Stop/Pause) the parent closed
+  its response, but the forked worker still held a copy of the connection, so
+  llama.cpp never saw the client leave and kept decoding the abandoned request
+  into a socket nobody read.  That zombie owned the box's slot (a single-slot
+  server queues the next request behind it), so the NEXT generation sent there
+  sat at zero tokens and never left "prefill" in the live view while the box's
+  own tps counter looked healthy — a stalled engine with no error anywhere.
+  Forked children now drop inherited sockets at fork (pipes are untouched, the
+  pool still talks to its workers), so an abandoned stream aborts on the box
+  immediately.
 - **The live stream window showed nothing while other projects streamed.**
   `/api/llm/live` read only the SELECTED engine's chats, while the pill
   aggregated every engine — so with several projects running the modal sat
