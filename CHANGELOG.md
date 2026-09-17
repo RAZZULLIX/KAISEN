@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [KAISEN 0.1.9-alpha (fork isolation + live view truth)] — 2026-09-17
+
 ### Fixed
 
 - **A generation abandoned by a retry/pause kept burning a box's slot.**

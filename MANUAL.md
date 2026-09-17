@@ -1154,4 +1154,4 @@ measurement of the real workload, not by headline multipliers.
 
 ---
 
-*Manual is the complete reference as of KAISEN 0.1.8-alpha.*
+*Manual is the complete reference as of KAISEN 0.1.9-alpha.*
