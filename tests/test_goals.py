@@ -59,7 +59,7 @@ def _spy_pings(monkeypatch):
 
     def fake_send(message, max_len=None):
         pings.append(message)
-        return {"ok": False}          # no pin attempt, no real channel
+        return {"ok": False}          # a stub channel, never the real one
 
     monkeypatch.setattr("kaisen.engine.send_message", fake_send)
     return pings
@@ -216,6 +216,37 @@ def test_goal_fires_from_the_applied_evaluation(tmp_path, tmp_cfg, monkeypatch):
     assert eng.engine_state == STATE_STOPPED
     assert eng.state.goal_done() is True
     assert len(_goal_pings(pings)) == 1
+
+
+def test_new_best_pings_only_for_generated_candidates(tmp_path, tmp_cfg, monkeypatch):
+    """A baseline (or its re-eval) is the pipeline verifying code the run did
+    not produce: it becomes the champion, but it is not announced as a "new
+    best" — that message belongs to a generation.  Nothing is pinned either:
+    a pin outlives the news it points at."""
+    pings = []
+
+    def fake_send(message, max_len=None):
+        pings.append(message)
+        return {"ok": True, "result": {"message_id": 7}}   # ok, so a re-added pin WOULD fire
+
+    monkeypatch.setattr("kaisen.engine.send_message", fake_send)
+    monkeypatch.setattr("kaisen.engine.pin_message",
+                        lambda mid: pytest.fail("the new-best message must not be pinned"))
+    registry = ProjectRegistry(tmp_path / "projects")
+    (tmp_path / "projects").mkdir()
+    project = _mk_project(registry, "nb-proj")
+    eng = _mk_engine(project, registry, tmp_cfg)
+
+    eng._apply_result(1, {"gen_dir": str(eng._make_gen_dir(1)), "baseline": True},
+                      {"ok": True, "metrics": {"proved_open": 3}, "outcome": "valid"})
+    assert eng.state.best and eng.state.best["fitness"] == pytest.approx(3.0), \
+        "the baseline still becomes the champion"
+    assert [m for m in pings if "NEW BEST" in m] == []
+
+    eng._apply_result(2, {"gen_dir": str(eng._make_gen_dir(2)), "baseline": False},
+                      {"ok": True, "metrics": {"proved_open": 4}, "outcome": "valid"})
+    best = [m for m in pings if "NEW BEST" in m]
+    assert len(best) == 1 and "gen 2" in best[0]
 
 
 def _goal_met_engine(tmp_path, tmp_cfg, goal, pid="tg-proj"):

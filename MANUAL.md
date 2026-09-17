@@ -1113,11 +1113,15 @@ Backed by `notes.json` (gitignored).
 ## 16. Telegram & GitHub
 
 - **Telegram** — new-best notifications (`🏆 NEW BEST`) with metric
-  details, pinned messages, optional file upload — and `🎯 GOAL MET` when a
+  details, optional file upload — and `🎯 GOAL MET` when a
   project reaches its success goal (§5): the criterion, the champion
   fitness and the fact that the project was stopped, sent before the stop
   so the news never waits on teardown. Env-first secrets:
   `KAISEN_TG_TOKEN`, `KAISEN_TG_CHAT_ID`.
+  A new best is announced only for a GENERATED candidate: a baseline (and
+  its re-evaluation after a restart) merely proves the starting code — it
+  becomes the champion silently, the log says `baseline —`, the channel
+  stays quiet.  Nothing is pinned: a pin outlives the news it points at.
 - **Where the bot token and chat id live** — both are SECRETS (who the bot
   is, and where it talks): the Settings fields write them to `secrets.json`
   (0600, gitignored), **never** to `config.json`, and `KAISEN_TG_TOKEN` /

@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **"🏆 NEW BEST" is sent only when a GENERATION wins, and is no longer
+  pinned.**  A baseline (and its re-evaluation after a restart) is the
+  pipeline verifying code the run did not produce: it still becomes the
+  champion, but announcing it as a new best claimed progress that did not
+  happen — and the pin kept that claim at the top of the chat.  The engine
+  log now says `baseline —` / `baseline re-evaluated —` instead of implying
+  a generation won.
+
 - **Runtime sizing now survives a restart.** Parallel generations and the
   worker-pool size were runtime-only: `engine_pool.json` recorded a project's
   `parallel_gens` and nothing else, so a size set by KAI (`RUN WITH k`) or by

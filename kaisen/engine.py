@@ -1479,12 +1479,14 @@ class ProjectEngine:
             })
             self.state.save()
             self.results.append({**{"generation": gen, "outcome": "NEW_BEST", "fitness": fitness}, **metrics})
-            self._notify_best(gen, fitness, metrics, schema)
+            self._notify_best(gen, fitness, metrics, schema,
+                              generated=not (baseline or reeval))
             # lessons (spec-driven)
             if _skill_enabled(spec, "lessons"):
                 self._generate_lesson(gen, code or "", metrics, result)
             self._maybe_deepwork()
-            self._log(f"gen {gen}: " + ("baseline re-evaluated — " if reeval else "") + f"NEW BEST fitness={fitness:.5f}")
+            what = "baseline re-evaluated — " if reeval else "baseline — " if baseline else ""
+            self._log(f"gen {gen}: {what}NEW BEST fitness={fitness:.5f}")
         else:
             self.state.save()
             self.results.append({**{"generation": gen, "outcome": "valid", "fitness": fitness}, **metrics})
@@ -1624,17 +1626,21 @@ class ProjectEngine:
         except Exception as e:
             self._log(f"gen {gen}: LLM repair failed: {e}")
 
-    def _notify_best(self, gen: int, fitness: float, metrics: Dict[str, float], schema: Dict[str, Any]) -> None:
-        lines = [f"🏆 NEW BEST (gen {gen}): fitness={fitness:.5f}"]
-        for key, ms in schema.items():
-            if key in metrics:
-                lines.append(f"  {key} = {metrics[key]:.4f} {ms.get('unit', '')}")
-        resp = send_message("\n".join(lines))
-        if resp and resp.get("ok"):
-            try:
-                pin_message(resp["result"]["message_id"])
-            except Exception:
-                pass
+    def _notify_best(self, gen: int, fitness: float, metrics: Dict[str, float],
+                     schema: Dict[str, Any], generated: bool = True) -> None:
+        """Announce a new champion — but only one the run GENERATED.
+
+        A baseline or a baseline re-eval is the pipeline verifying code the
+        run did not produce: calling that a "new best" tells the user the
+        engine improved when nothing was generated.  Nothing is pinned
+        either — a pin outlives the news it pointed at.
+        """
+        if generated:
+            lines = [f"🏆 NEW BEST (gen {gen}): fitness={fitness:.5f}"]
+            for key, ms in schema.items():
+                if key in metrics:
+                    lines.append(f"  {key} = {metrics[key]:.4f} {ms.get('unit', '')}")
+            send_message("\n".join(lines))
         # GitHub upload (project-level)
         gh = (self.project.spec.get("github") or {})
         if gh.get("enabled"):
