@@ -165,21 +165,32 @@ def load_secrets() -> Dict[str, Any]:
 
 
 def migrate_telegram_secret(cfg) -> bool:
-    """Move a Telegram bot token that predates secrets.json into it, and drop
-    it from config.json.
+    """Move the Telegram bot token AND chat id that predate secrets.json into
+    it, and drop them from config.json.
 
-    The token is a secret; config.json is a file the framework may publish
-    (config.example.json is shipped).  Returns True when a move happened, so
-    the caller can say so once at startup.
+    They are the channel's secrets (who the bot is, and where it talks), so
+    they belong in the 0600 gitignored secrets file — not in config.json,
+    which the framework may publish (config.example.json is shipped).
+    Returns True when anything moved, so the caller can say so once.
     """
-    token = str((cfg.data.get("telegram") or {}).get("token") or "").strip()
-    if not token:
+    tg = cfg.data.get("telegram") or {}
+    token = str(tg.get("token") or "").strip()
+    chat = str(tg.get("chat_id") or "").strip()
+    if not token and not chat:
         return False
-    if not str((load_secrets().get("telegram") or {}).get("token") or "").strip():
+    secrets = load_secrets().setdefault("telegram", {})
+    moved = False
+    if token and not str(secrets.get("token") or "").strip():
         save_secret("telegram", "token", token)
-    cfg.data.setdefault("telegram", {})["token"] = ""
+        moved = True
+    if chat and not str(secrets.get("chat_id") or "").strip():
+        save_secret("telegram", "chat_id", chat)
+        moved = True
+    new_tg = cfg.data.setdefault("telegram", {})
+    new_tg["token"] = ""
+    new_tg["chat_id"] = ""
     cfg.save()
-    return True
+    return moved
 
 
 def save_secret(section: str, key: str, value: str) -> None:
@@ -286,7 +297,17 @@ class FrameworkConfig:
 
     @property
     def telegram_chat_id(self) -> str:
-        return resolve_secret(["KAISEN_TG_CHAT_ID"], self.telegram.get("chat_id", ""))
+        """Env → secrets.json → legacy config.json value.
+
+        The chat id is configuration that identifies WHO gets the messages,
+        so it is kept with the token: the settings screen writes it to
+        secrets.json (0600, gitignored), and migrate_telegram_secret() moves
+        a value an older install left in config.json."""
+        return resolve_secret(
+            ["KAISEN_TG_CHAT_ID"],
+            (load_secrets().get("telegram") or {}).get("chat_id", "")
+            or self.telegram.get("chat_id", ""),
+        )
 
     @property
     def telegram_enabled(self) -> bool:

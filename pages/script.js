@@ -167,7 +167,64 @@ function closeModal(id) { document.getElementById(id).style.display = 'none'; }
 // ------------------------------------------------------------------ //
 let currentView = 'dashboard';
 let prevView = 'dashboard';
+
+// ---- unsaved Settings changes -------------------------------------------
+let settingsSnapshot = null;      // fingerprint of the form as LOADED
+let settingsLeaveTarget = null;   // where a blocked switchView wanted to go
+
+// Every input/select/textarea in the Settings screen as one comparable
+// string.  Comparing values (not a "changed" flag) means a field edited and
+// then typed back to its loaded value is clean again — no nagging after
+// fixing a typo by hand.
+function settingsFingerprint() {
+  const root = document.getElementById('view-config');
+  if (!root) return '';
+  const parts = [];
+  root.querySelectorAll('input, select, textarea').forEach(el => {
+    if (!el.id) return;
+    parts.push(`${el.id}=${el.type === 'checkbox' ? (el.checked ? '1' : '0') : el.value}`);
+  });
+  return parts.join('\u0001');
+}
+
+function markSettingsClean() { settingsSnapshot = settingsFingerprint(); }
+
+function settingsDirty() {
+  return settingsSnapshot !== null && settingsFingerprint() !== settingsSnapshot;
+}
+
+async function unsavedApplyAndLeave() {
+  closeModal('unsaved-settings-modal');
+  const target = settingsLeaveTarget || prevView || 'dashboard';
+  settingsLeaveTarget = null;
+  await applyConfig();                 // may reload the form on success
+  markSettingsClean();
+  switchView(target);
+}
+
+function unsavedDiscardAndLeave() {
+  closeModal('unsaved-settings-modal');
+  const target = settingsLeaveTarget || prevView || 'dashboard';
+  settingsLeaveTarget = null;
+  markSettingsClean();                 // leave the abandoned edits in the DOM …
+  switchView(target);                  // … the next load re-reads the server
+}
+
+// Closing or reloading the tab counts as leaving the page too.
+window.addEventListener('beforeunload', (e) => {
+  if (currentView === 'config' && settingsDirty()) {
+    e.preventDefault();
+    e.returnValue = '';
+  }
+});
+
 function switchView(viewName) {
+  // Leaving Settings with unsaved changes: ask instead of losing them.
+  if (currentView === 'config' && viewName !== 'config' && settingsDirty()) {
+    settingsLeaveTarget = viewName;
+    const modal = document.getElementById('unsaved-settings-modal');
+    if (modal) { modal.style.display = 'flex'; return; }
+  }
   // No dependence on `event`: callable from buttons AND programmatically.
   if (viewName !== 'config') prevView = viewName;
   currentView = viewName;
@@ -1215,6 +1272,7 @@ function renderServers(llm) {
       <td class="llm-actions"><button class="btn btn-sm" title="Rename this endpoint" onclick="startRenameServer('${s.id}')">✎</button><button class="btn btn-sm" title="Probe the endpoint (health check)" onclick="healthCheck('${s.id}')">⟳</button><button class="btn btn-sm" title="Set usage budget (max tokens / generations / reset)" onclick="openBudgetModal('${s.id}')">$</button><button class="btn btn-sm" title="Remove this endpoint" style="border-color:var(--danger);color:var(--danger);" onclick="removeServer('${s.id}')">✕</button></td>`;
     tbody.appendChild(tr);
   });
+  markSettingsClean();   // servers tab loaded — same baseline rule
 }
 async function loadModelStats() {
   const tbody = document.getElementById('modelstats-tbody');
@@ -2332,6 +2390,9 @@ async function loadConfig() {
     showLiveSizing('cfg-wcount-now', poolWorkerTarget, c.workers.default_count,
                    'worker pool right now');
     document.getElementById('cfg-wmax').value = c.workers.max_count;
+    // The form now matches the server: this is the clean baseline
+    // the unsaved-changes guard compares against.
+    markSettingsClean();
     document.getElementById('cfg-llm-timeout').value = c.llm.read_timeout;
     document.getElementById('cfg-llm-nodata').value = (c.llm.nodata_timeout !== undefined ? c.llm.nodata_timeout : 120);
     document.getElementById('cfg-llm-firsttoken').value = (c.llm.first_token_timeout !== undefined ? c.llm.first_token_timeout : 0);
@@ -2354,7 +2415,9 @@ async function loadConfig() {
         <span style="font-size:11px;opacity:0.8;">${s.hard_deny_rules} hard rules · launchers: ${(s.allowed_launchers || []).join(', ')}</span>
       </div>
       <div style="font-size:12px;color:var(--muted);">Global off cannot be toggled from the GUI: edit config.json and set KAISEN_SAFETY_OFF=1.</div>`;
-  } catch (e) { console.error(e); }
+    markSettingsClean();   // baseline for the unsaved-changes guard: taken after
+                           // EVERY field is filled, or a pristine panel reads dirty
+  } catch (e) { console.error(e); markSettingsClean(); }
 }
 async function loadProjectConfig() {
   if (activeSpec) { renderProjectConfig(); return; }
@@ -2466,7 +2529,9 @@ async function checkTelegramToken() {
   try {
     const r = await api('/api/telegram/check', { method: 'POST', body: JSON.stringify({ token }) });
     if (r && r.ok) {
-      out.textContent = `✔ works${r.username ? ' — @' + r.username : ''}${r.name ? ' (' + r.name + ')' : ''}`;
+      // Verification only — saving is Apply Changes.  If you leave Settings
+      // with a changed field, the unsaved-changes modal reminds you.
+      out.textContent = `✔ works${r.username ? ' — @' + r.username : ''}${r.name ? ' (' + r.name + ')' : ''} — press Apply Changes to save`;
       out.classList.add('ok');
     } else {
       out.textContent = `✖ ${(r && r.error) || 'not accepted'}`;
@@ -2557,6 +2622,7 @@ function renderProjectConfig() {
                  'the shared pool right now');
   renderPipeCanvas(s);
   renderMetricsEditor(s);
+  markSettingsClean();   // project form loaded — baseline for the guard
 }
 
 // ------------------------------------------------------------------ //

@@ -186,14 +186,14 @@ BARE command lines, never prefixed with OK. Commands (case-insensitive):
                              {date} {time} {datetime} {fitness} {metrics}
                              {detail} {actions}.  Validation is server-side:
                              a typo returns ERR, never a blank spot.
-  TELEGRAM [STATUS|LOAD|CHECK|CHAT <id>]
+  TELEGRAM [STATUS|LOAD|CHECK]
                              the Telegram channel.  STATUS: token set, from
-                             where, chat id, ready?  LOAD copies
-                             KAISEN_TG_TOKEN from the environment into
-                             secrets.json (0600, gitignored).  CHECK asks
-                             Telegram whether the token works.  CHAT sets the
-                             destination.  The token is NEVER typed through
-                             KAI — it would land in the transcript.
+                             where, chat set, ready?  LOAD copies
+                             KAISEN_TG_TOKEN and KAISEN_TG_CHAT_ID from the
+                             environment into secrets.json (0600, gitignored).
+                             CHECK asks Telegram whether the token works.
+                             The token and the chat id are NEVER typed through
+                             KAI — they would land in the transcript.
   BUDGET SERVER [<sid>] [SET max_tokens <n> reset <r> max_generations <n>]
                              per-server usage budget (optional). Caps tokens /
                              generations inside a reset window so a frontier
@@ -883,12 +883,14 @@ class KaiSession:
     def cmd_telegram(self, arg: str) -> str:
         """The Telegram channel — and no secrets through the chat.
 
-        TELEGRAM              status: token set? from where? chat id? ready?
-        TELEGRAM LOAD         copy KAISEN_TG_TOKEN from the environment into
-                              secrets.json (0600, gitignored) — the token
-                              itself never travels through KAI
+        TELEGRAM              status: token set? from where? chat set? ready?
+        TELEGRAM LOAD         copy KAISEN_TG_TOKEN / KAISEN_TG_CHAT_ID from
+                              the environment into secrets.json (0600,
+                              gitignored) — neither value travels through KAI
         TELEGRAM CHECK        ask Telegram (getMe) whether the token works
-        TELEGRAM CHAT <id>    set the destination chat id
+
+        Typing the token or the chat id through KAI is refused on purpose:
+        a value typed into a session lands in that session's transcript.
         """
         tokens = arg.split()
         verb = tokens[0].upper() if tokens else ""
@@ -907,18 +909,19 @@ class KaiSession:
             who = f"@{res['username']}" if res.get("username") else (res.get("name") or "bot")
             return f"OK telegram token works — {who}"
         if verb == "CHAT":
-            if not value:
-                raise KaiError("TELEGRAM CHAT <id> — the destination chat id")
-            self.client.call("PUT", "/api/config", {"telegram": {"chat_id": value}},
-                             read_timeout=30.0)
-            return f"OK telegram chat set to {value} — {self._telegram_status()}"
+            # Same rule as the token: the chat id is stored as a secret (it
+            # says WHERE the bot talks), and a value typed into a session
+            # lands in that session's transcript.
+            raise KaiError("the chat id is never typed through KAI — set "
+                           "KAISEN_TG_CHAT_ID and run TELEGRAM LOAD, or use "
+                           "Settings → Telegram")
         if verb in ("TOKEN", "KEY"):
-            # Deliberately NOT a command: a token typed into a KAI session
+            # Deliberately NOT a command: a secret typed into a KAI session
             # lands in the transcript.  Say how to do it instead.
             raise KaiError("the token is never typed through KAI — put it in "
                            "KAISEN_TG_TOKEN and run TELEGRAM LOAD, or use "
                            "Settings → Telegram")
-        raise KaiError("TELEGRAM [STATUS|LOAD|CHECK|CHAT <id>]")
+        raise KaiError("TELEGRAM [STATUS|LOAD|CHECK]")
 
     # -- success goal (criterion, actions, message, attachments) ----------
     def _success_line(self, goal: Dict[str, Any]) -> str:

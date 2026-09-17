@@ -1118,18 +1118,22 @@ Backed by `notes.json` (gitignored).
   fitness and the fact that the project was stopped, sent before the stop
   so the news never waits on teardown. Env-first secrets:
   `KAISEN_TG_TOKEN`, `KAISEN_TG_CHAT_ID`.
-- **Where the bot token lives** — the token is a SECRET, so the Settings
-  field writes it to `secrets.json` (0600, gitignored), **never** to
-  `config.json`, and `KAISEN_TG_TOKEN` wins over both.  A token an older
-  install left in `config.json` is moved into the secrets file at startup.
-  The API only ever returns `********` plus its source
-  (`env` / `secrets.json`), so the GUI cannot read the secret back.
+- **Where the bot token and chat id live** — both are SECRETS (who the bot
+  is, and where it talks): the Settings fields write them to `secrets.json`
+  (0600, gitignored), **never** to `config.json`, and `KAISEN_TG_TOKEN` /
+  `KAISEN_TG_CHAT_ID` win over both.  Values an older install left in
+  `config.json` are moved into the secrets file at startup.  The API only
+  ever returns `********` plus their source (`env` / `secrets.json`), so the
+  GUI cannot read them back.
   **Check** next to the field asks Telegram's `getMe` ON DEMAND — once, when
-  you click it, not on every keystroke — and answers `✔ works — @your_bot`
-  or Telegram's own error (`✖ Unauthorized`).  A **Load from env** button
-  appears when `KAISEN_TG_TOKEN` is set: it copies the env token into
-  `secrets.json` so it keeps working once the variable is gone (the value is
-  never shown in the browser).
+  you click it, not on every keystroke — and answers `✔ works — @your_bot` or
+  Telegram's own error (`✖ Unauthorized`).  It only *verifies*: the token is
+  saved when you press **Apply Changes**, and if you try to leave Settings
+  with unsaved edits the dashboard asks first (*Apply & leave* / *Discard &
+  leave* / *Stay*).  A **Load from env** button appears when
+  `KAISEN_TG_TOKEN` is set: it copies the env token into `secrets.json` so it
+  keeps working once the variable is gone (the value is never shown in the
+  browser).
 - **The same from KAI** — `TELEGRAM STATUS` (token set? from where? chat id?
   ready?), `TELEGRAM LOAD` (env → secrets.json), `TELEGRAM CHECK` (getMe),
   `TELEGRAM CHAT <id>` (destination).  `TELEGRAM TOKEN …` is refused on
@@ -1173,7 +1177,7 @@ Complete reference — copy from `config.example.json`:
 | `workers.quiet` | `false` | run workers at lower priority (nice +10) so scorers don't starve the dashboard/LLMs |
 | `engine.start_paused` | `true` | new engines boot paused |
 | `engine.default_parallel_gens` | `1` | parallel generations per project at start (project spec > config > 1) |
-| `telegram.chat_id` | `""` | Telegram chat to notify (§16).  The bot TOKEN is a secret: it lives in `secrets.json` (0600, gitignored) or `KAISEN_TG_TOKEN`, never in `config.json`; Settings → Telegram has a **Check** button that asks Telegram whether it works |
+| `telegram.chat_id` | `""` | NOT used: the chat id is stored with the token — `secrets.json` (0600, gitignored) or `KAISEN_TG_CHAT_ID` — because it identifies who receives the messages.  Settings → Telegram writes it there; a value an older install left in `config.json` is migrated at startup |
 | `safety.global_off` | `false` | requires `KAISEN_SAFETY_OFF=1` too (§18) |
 | `autofix.build_enabled` | `true` | default for NEW projects |
 | `autofix.max_tries` | `5` | deterministic autofix turns before giving up on a build |

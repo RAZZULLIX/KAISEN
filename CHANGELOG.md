@@ -22,19 +22,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   path re-applies it after the engines boot.  Resizing the pool also no
   longer requires a running project: `POST /api/engine/workers` with just
   `count` resizes (and remembers) the process-wide pool.
-- **The Telegram bot token no longer lives in `config.json`.**  It was read
-  from — and written back to — config.json, the file the framework ships an
-  example of.  It now goes to `secrets.json` (0600, gitignored), env-first
-  (`KAISEN_TG_TOKEN`), a token an older install left behind is migrated out
-  of config.json at startup, and the API only ever returns a mask plus its
-  source, so the GUI can never read the secret back.
+- **The Telegram bot token and chat id no longer live in `config.json`.**
+  They were read from — and written back to — config.json, the file the
+  framework ships an example of.  Both now go to `secrets.json` (0600,
+  gitignored), env-first (`KAISEN_TG_TOKEN` / `KAISEN_TG_CHAT_ID`), values
+  an older install left behind are migrated out of config.json at startup,
+  and the API only ever returns masks plus their source, so the GUI can never
+  read the secrets back.
 
 ### Added
 
 - **A Check button for the Telegram token** (Settings → Telegram): it asks
   Telegram's `getMe` ON DEMAND — once, when clicked, not on every keystroke
-  — and answers `✔ works — @your_bot` or Telegram's own error.  It can also
-  validate the *stored* token without the GUI ever knowing it.
+  — and answers `✔ works — @your_bot` or Telegram's own error.  It verifies
+  only: the token is saved by **Apply Changes**, and leaving Settings with
+  unsaved edits now asks first (*Apply & leave* / *Discard & leave* /
+  *Stay* — plus the browser's own prompt if you close or reload the tab).
+  It can also validate the *stored* token without the GUI ever knowing it.
+  The chat id is masked in the UI exactly like the token.
 - **KAI can arm a goal and its Telegram message.**  `SUCCESS` shows the
   project's goal (criterion, actions, message, attachments, and
   `MET gen N on <date>` once it fired); `SUCCESS <metric> <op> <value> [THEN

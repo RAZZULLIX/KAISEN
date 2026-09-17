@@ -491,8 +491,10 @@ def test_telegram_token_goes_to_secrets_not_config(api, tmp_cfg, tmp_path, monke
     assert r.status_code == 200 and r.json()["ok"]
     secrets = json.loads((tmp_path / "secrets.json").read_text())
     assert secrets["telegram"]["token"] == "123456:ABC-DEF"
-    assert not (json.loads(tmp_cfg.path.read_text()).get("telegram") or {}).get("token"), \
-        "config.json must never hold the bot token"
+    assert secrets["telegram"]["chat_id"] == "42", "the chat id is a secret too"
+    cfg_tg = json.loads(tmp_cfg.path.read_text()).get("telegram") or {}
+    assert not cfg_tg.get("token") and not cfg_tg.get("chat_id"), \
+        "config.json must never hold the token or the chat id"
 
     # The masked value the GUI received means "keep it".
     requests.put(base + "/api/config", json={"telegram": {"token": "********"}}, timeout=5)
@@ -501,6 +503,8 @@ def test_telegram_token_goes_to_secrets_not_config(api, tmp_cfg, tmp_path, monke
     got = requests.get(base + "/api/config", timeout=5).json()["telegram"]
     assert got["token"] == "********" and got["token_set"] is True
     assert got["token_source"] == "secrets.json"
+    assert got["chat_id"] == "********", "the chat id is masked like the token"
+    assert got["chat_id_source"] == "secrets.json"
 
 
 def test_load_from_env_stores_the_env_token(api, tmp_path, monkeypatch):
@@ -509,21 +513,27 @@ def test_load_from_env_stores_the_env_token(api, tmp_path, monkeypatch):
     srv, base = api
     monkeypatch.setattr("kaisen.config.SECRETS_FILE", tmp_path / "secrets.json")
     monkeypatch.setenv("KAISEN_TG_TOKEN", "999:ENVTOKEN")
+    monkeypatch.setenv("KAISEN_TG_CHAT_ID", "-100999")
 
     r = requests.post(base + "/api/telegram/load_env", json={}, timeout=5).json()
-    assert r["ok"] is True
+    assert r["ok"] is True and r["chat_set"] is True
     stored = json.loads((tmp_path / "secrets.json").read_text())
     assert stored["telegram"]["token"] == "999:ENVTOKEN"
+    assert stored["telegram"]["chat_id"] == "-100999"
 
     monkeypatch.delenv("KAISEN_TG_TOKEN")
+    monkeypatch.delenv("KAISEN_TG_CHAT_ID")
     r = requests.post(base + "/api/telegram/load_env", json={}, timeout=5)
-    assert r.status_code == 400 and "not set" in r.json()["error"]
+    assert r.status_code == 400 and "KAISEN_TG_TOKEN" in r.json()["error"]
 
 
-def test_telegram_check_reports_ok_and_rejection(api, monkeypatch):
-    """The Check button asks Telegram (getMe) once, on demand — and reports
-    what Telegram said, not a guess."""
+def test_telegram_check_verifies_without_writing(api, tmp_path, monkeypatch):
+    """The Check button asks Telegram (getMe) once, on demand, and reports what
+    Telegram said.  It VERIFIES ONLY: saving is Apply Changes, so checking a
+    candidate token while typing can never silently replace a working one."""
     srv, base = api
+    monkeypatch.setattr("kaisen.config.SECRETS_FILE", tmp_path / "secrets.json")
+    monkeypatch.delenv("KAISEN_TG_TOKEN", raising=False)
     import kaisen.telegram as tg
 
     class Resp:
@@ -538,8 +548,10 @@ def test_telegram_check_reports_ok_and_rejection(api, monkeypatch):
     monkeypatch.setattr(tg.requests, "get",
                         lambda url, timeout=None: Resp({"ok": True, "result": {
                             "username": "kaisen_bot", "first_name": "KAISEN"}}))
-    got = requests.post(base + "/api/telegram/check", json={"token": "123456:ABC"}, timeout=5).json()
+    got = requests.post(base + "/api/telegram/check", json={"token": "123456:GOOD"}, timeout=5).json()
     assert got["ok"] is True and got["username"] == "kaisen_bot" and got["name"] == "KAISEN"
+    assert not (tmp_path / "secrets.json").exists(), \
+        "a check must not write — saving is Apply Changes"
 
     monkeypatch.setattr(tg.requests, "get",
                         lambda url, timeout=None: Resp({"ok": False, "description": "Unauthorized"}))
@@ -554,13 +566,15 @@ def test_legacy_telegram_token_migrates_into_secrets(tmp_path, monkeypatch):
     from kaisen.config import FrameworkConfig, load_secrets, migrate_telegram_secret
     monkeypatch.setattr("kaisen.config.SECRETS_FILE", tmp_path / "secrets.json")
     cfg = FrameworkConfig(tmp_path / "config.json")
-    cfg.data.setdefault("telegram", {})["token"] = "legacy:TOKEN"
+    cfg.data.setdefault("telegram", {}).update({"token": "legacy:TOKEN", "chat_id": "-100"})
     cfg.save()
 
     assert migrate_telegram_secret(cfg) is True
-    assert load_secrets()["telegram"]["token"] == "legacy:TOKEN"
-    assert not cfg.telegram.get("token")
+    moved = load_secrets()["telegram"]
+    assert moved["token"] == "legacy:TOKEN" and moved["chat_id"] == "-100"
+    assert not cfg.telegram.get("token") and not cfg.telegram.get("chat_id")
     assert cfg.telegram_token == "legacy:TOKEN"       # still the same bot after the move
+    assert cfg.telegram_chat_id == "-100"             # …and the same chat
     assert migrate_telegram_secret(cfg) is False      # idempotent
 
 

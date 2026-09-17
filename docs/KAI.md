@@ -54,7 +54,7 @@ deliberately tolerant, because LLMs decorate everything:
 | `BUDGET` | the in-flight run's budget: scored so far vs target + time remaining |
 | `WORKERS <n> [ON <pid>]` | resize the SHARED worker pool (the same knob as the dashboard's worker chip); the size is REMEMBERED across restarts. With no `<n>`: report the size + this project's job limits |
 | `SUCCESS [<metric> <op> <value> [THEN a,b]]`, `MESSAGE [<text>]`, `ATTACH <names>`, `CLEAR`, `OFF` | the project's SUCCESS goal: show it (criterion, actions, message, attachments, `MET gen N on <date>`), set the criterion/actions, write the custom Telegram message (multi-line via `MESSAGE` + lines + `END`), choose attachments (`champion`, `llm_output`, `prompt`), clear the message/attachments, or remove the goal |
-| `TELEGRAM [STATUS\|LOAD\|CHECK\|CHAT <id>]` | the Telegram channel: where the token comes from, import `KAISEN_TG_TOKEN` into `secrets.json`, verify it with `getMe`, set the destination chat.  `TELEGRAM TOKEN …` is refused on purpose — a secret must not land in a session log |
+| `TELEGRAM [STATUS\|LOAD\|CHECK]` | the Telegram channel: whether the token/chat are set and where from; `LOAD` imports `KAISEN_TG_TOKEN` and `KAISEN_TG_CHAT_ID` into `secrets.json`; `CHECK` verifies the token with `getMe`.  Typing the token or the chat id through KAI is refused on purpose — a secret must not land in a session log |
 | `BUDGET SERVER [<sid>] [SET max_tokens <n> reset <r> [max_generations <n>]]` | per-server usage budget (optional): caps tokens/generations inside a reset window; an exhausted server drops out of routing until it rolls over. `n` = `1000000` / `1M` / `2.5M`; `r` = `30s` / `5m` / `12h` / `3d` / `1w` / `12:00:00` (= 12h). Blank clears a limit |
 | `SCORE <path> [ON <pid>]` | score any file through the project's pipeline — no engine, no run (audit copy under `runs/score_*`) |
 | `FUZZY <n> [ON <pid>]` | opt-in prompt diversity: random top-N scored basis per generation; also feeds the prompt the last 10 scored outcomes. 0 = off (default). Runtime only |
@@ -142,7 +142,6 @@ without a secret ever appearing in the transcript:
 TELEGRAM                       # token set? from where? chat id? ready?
 TELEGRAM LOAD                  # KAISEN_TG_TOKEN (env) → secrets.json (0600)
 TELEGRAM CHECK                 # OK telegram token works — @your_bot
-TELEGRAM CHAT -1001234567890   # where the messages go
 
 PROJECT erdos-10
 SUCCESS                        # show the goal, message, attachments, MET …
@@ -166,9 +165,10 @@ SUCCESS ATTACH champion,llm_output,prompt
   and the variable/attachment registries, so a typo comes back as
   `ERR … unknown variable {nope}` — never as a message with a blank spot.
 
-**The token is never typed through KAI.**  `TELEGRAM TOKEN …` is refused on
-purpose (it would land in the session log); use `KAISEN_TG_TOKEN` +
-`TELEGRAM LOAD`, or paste it in Settings → Telegram, whose **Check** button
+**The token and the chat id are never typed through KAI.**  `TELEGRAM
+TOKEN …` and `TELEGRAM CHAT …` are refused on purpose (they would land in the
+session log); put them in `KAISEN_TG_TOKEN` / `KAISEN_TG_CHAT_ID` and run
+`TELEGRAM LOAD`, or paste them in Settings → Telegram, whose **Check** button
 does the same `getMe`.
 
 ## Routing

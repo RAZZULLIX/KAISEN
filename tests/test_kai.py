@@ -706,11 +706,12 @@ def test_telegram_status_says_incomplete_without_chat():
 def test_telegram_load_imports_the_env_token():
     s = _session({
         ("POST", "/api/telegram/load_env"): {"ok": True},
-        ("GET", "/api/config"): {"telegram": {"token_set": True,
-                                              "token_source": "env", "chat_id": "1"}},
+        ("GET", "/api/config"): {"telegram": {"token_set": True, "token_source": "env",
+                                              "chat_id": "-100"}},
     })
     out = s.cmd_telegram("LOAD")
     assert "loaded from the environment" in out and "from env" in out
+    assert "chat -100" in out, "LOAD imports the chat id too"
     assert ("POST", "/api/telegram/load_env", {}) in s.client.calls
 
 
@@ -728,14 +729,15 @@ def test_telegram_check_reports_the_bot_or_the_rejection():
     assert bad.dispatch("TELEGRAM CHECK") == "ERR telegram token rejected: Unauthorized"
 
 
-def test_telegram_chat_sets_the_destination():
-    s = _session({
-        ("PUT", "/api/config"): {"ok": True},
-        ("GET", "/api/config"): {"telegram": {"token_set": True,
-                                              "token_source": "secrets.json", "chat_id": "-100"}},
-    })
-    assert "chat set to -100" in s.cmd_telegram("CHAT -100")
-    assert ("PUT", "/api/config", {"telegram": {"chat_id": "-100"}}) in s.client.calls
+def test_telegram_refuses_the_chat_id_too():
+    """The chat id is stored as a secret like the token — typing it into a
+    session would put it in the transcript, so the command refuses and names
+    the env path instead."""
+    s = _session({})
+    err = s.dispatch("TELEGRAM CHAT -100123")
+    assert err.startswith("ERR")
+    assert "KAISEN_TG_CHAT_ID" in err and "TELEGRAM LOAD" in err
+    assert not s.client.calls
 
 
 def test_telegram_refuses_a_token_typed_through_kai():

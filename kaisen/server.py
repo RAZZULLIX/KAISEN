@@ -1803,14 +1803,21 @@ class DashboardServer:
         # Never expose secrets plainly to the GUI.
         public = json.loads(json.dumps(cfg))
         public["safety"] = guardrail_state(self.cfg)
-        # Telegram bot token: masked value + WHERE it lives.  "********" or
-        # empty means "keep the stored one" on save.
+        # Telegram bot token AND chat id: masked values + WHERE they live.
+        # "********" or empty means "keep the stored one" on save.
+        sec = load_secrets().get("telegram") or {}
         tok_env = bool(os.environ.get("KAISEN_TG_TOKEN", "").strip())
-        tok_sec = bool((load_secrets().get("telegram") or {}).get("token"))
+        tok_sec = bool(sec.get("token"))
         tok_cfg = bool(self.cfg.telegram.get("token"))
         public["telegram"]["token"] = "********" if (tok_env or tok_sec or tok_cfg) else ""
         public["telegram"]["token_source"] = ("env" if tok_env else "secrets.json" if tok_sec
                                              else "config.json" if tok_cfg else "unset")
+        chat_env = bool(os.environ.get("KAISEN_TG_CHAT_ID", "").strip())
+        chat_sec = bool(sec.get("chat_id"))
+        chat_cfg = bool(self.cfg.telegram.get("chat_id"))
+        public["telegram"]["chat_id"] = "********" if (chat_env or chat_sec or chat_cfg) else ""
+        public["telegram"]["chat_id_source"] = ("env" if chat_env else "secrets.json" if chat_sec
+                                               else "config.json" if chat_cfg else "unset")
         for s in public.get("llm", {}).get("servers", []):
             source = self.cfg.api_key_source(s.get("id", ""))
             s["api_key"] = "********" if (s.get("api_key") or source != "unset") else ""
@@ -1824,15 +1831,18 @@ class DashboardServer:
         # The global safety switch cannot be changed via the GUI.
         if "safety" in data:
             data["safety"] = self.cfg.safety  # keep as-is
-        # Telegram bot token is a SECRET: it is written to secrets.json
-        # (0600, gitignored) and never merged into config.json.  "********"
+        # Telegram bot token AND chat id are SECRETS: both go to secrets.json
+        # (0600, gitignored) and are never merged into config.json.  "********"
         # (the masked value the GUI read) or "" means "keep the stored one",
-        # so saving unrelated settings can never wipe it.
+        # so saving unrelated settings can never wipe them.
         tg = data.get("telegram")
         if isinstance(tg, dict):
             typed = tg.pop("token", None)
             if isinstance(typed, str) and typed.strip() and typed != "********":
                 save_secret("telegram", "token", typed.strip())
+            chat = tg.pop("chat_id", None)
+            if isinstance(chat, str) and chat.strip() and chat != "********":
+                save_secret("telegram", "chat_id", chat.strip())
         # Deep-merge: the GUI sends only the fields it shows (e.g. llm has
         # just read/connect/retry timeouts).  A shallow update would WIPE
         # every sibling key it doesn't know about — nodata_timeout,
@@ -1851,26 +1861,34 @@ class DashboardServer:
 
         Body: {"token": "…"} — blank/absent checks the STORED token, so the
         GUI can offer a Check button without ever knowing the secret.
+
+        Verification only: saving happens when the user presses Apply Changes,
+        so checking a candidate token while typing cannot silently replace a
+        working one.  (The GUI reminds about unsaved changes instead.)
         """
         data = await request.json() if request.can_read_body else {}
-        token = str((data or {}).get("token") or "").strip()
-        if not token or token == "********":
-            token = self.cfg.telegram_token
-        res = await asyncio.to_thread(telegram.check_token, token)
-        return _json(res)
+        typed = str((data or {}).get("token") or "").strip()
+        token = self.cfg.telegram_token if (not typed or typed == "********") else typed
+        return _json(await asyncio.to_thread(telegram.check_token, token))
 
     async def _api_telegram_load_env(self, request):
-        """Copy KAISEN_TG_TOKEN from the environment into secrets.json.
+        """Copy KAISEN_TG_TOKEN / KAISEN_TG_CHAT_ID into secrets.json.
 
-        Makes an env-provided token durable (it keeps working once the env
-        var is gone) without the browser ever receiving the value — the GUI
-        keeps showing the mask.
+        Makes env-provided channel settings durable (they keep working once
+        the variables are gone) without the browser ever receiving the values
+        — the GUI keeps showing the masks.
         """
         token = os.environ.get("KAISEN_TG_TOKEN", "").strip()
-        if not token:
-            return _json({"ok": False, "error": "KAISEN_TG_TOKEN is not set"}, 400)
-        save_secret("telegram", "token", token)
-        return _json({"ok": True, "token_set": True, "token_source": "env"})
+        chat = os.environ.get("KAISEN_TG_CHAT_ID", "").strip()
+        if not token and not chat:
+            return _json({"ok": False,
+                          "error": "neither KAISEN_TG_TOKEN nor KAISEN_TG_CHAT_ID is set"}, 400)
+        if token:
+            save_secret("telegram", "token", token)
+        if chat:
+            save_secret("telegram", "chat_id", chat)
+        return _json({"ok": True, "token_set": bool(self.cfg.telegram_token),
+                      "chat_set": bool(self.cfg.telegram_chat_id)})
 
     async def _api_guardrails(self, request):
         return _json(guardrail_state(self.cfg))
