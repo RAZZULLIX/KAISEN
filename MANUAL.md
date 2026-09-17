@@ -779,8 +779,11 @@ both = whichever comes first. `RUN ALL [FOR <secs>] [WITH <k>]` starts every
 pool member at once — same budget and pipeline count each, and everything
 about multi-engine mode is optional. `BUDGET` shows the in-flight budget
 (single or per-project table). `STATUS` shows the pool utilization line
-(`LLM PIPELINES x/y (z in flight)`) so you can see how much of your
-capacity is actually in use. `SCORE <path> [ON <pid>]` scores an arbitrary
+(`LLM PIPELINES x/y active (z/y slots in flight)`) so you can see how much
+of your capacity is actually in use: x/y counts the pipelines of RUNNING
+engines (a paused one holds none), z/y counts requests in flight across the
+servers — server-wide, so a paused pool can still show busy slots when
+another tool is using the same endpoints. `SCORE <path> [ON <pid>]` scores an arbitrary
 file through the full pipeline with no engine. `FUZZY <n> [ON <pid>]` is
 opt-in prompt diversity: each generation's prompt is seeded with a random
 one of the top n scored iterations (plus the last 10 scored outcomes as

@@ -47,7 +47,7 @@ deliberately tolerant, because LLMs decorate everything:
 | Command | Effect |
 |---|---|
 | `PROJECT <id>` | select the session project (must exist) |
-| `STATUS` | engine + pool overview, per-project; includes `LLM PIPELINES x/y (z in flight)` utilization line |
+| `STATUS` | engine + pool overview, per-project; includes `LLM PIPELINES x/y active (z/y slots in flight)` — x/y = pipelines of RUNNING engines (a paused engine holds none), z/y = requests in flight across the servers (server-wide, so it counts non-KAISEN traffic too) |
 | `SPEC [id]` | the project's spec: steps, metrics, the prompt goal, and the SUCCESS goal (`SUCCESS <metric> <op> <value> THEN <actions> [MET gen N]` — the criterion that ends the project) |
 | `RUN [<n>] [FOR <secs>] [WITH <k>] [ON <pid>]` | start evolution (forever by default), background. `<n>` = stop after n SCORED generations; `FOR <secs>` = time budget (paused time excluded — only burns while the engine runs); both = whichever comes first |
 | `RUN ALL [FOR <secs>] [WITH <k>]` | start every pool member at once — same budget and `k` parallel generations each; everything about multi-engine mode is optional |

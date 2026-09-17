@@ -304,7 +304,45 @@ def test_status_shows_utilization_line():
     s = _session(routes)
     s.project = "md5-speed"
     out = s.cmd_status("")
-    assert "LLM PIPELINES 2/12 (3 in flight)" in out
+    assert "LLM PIPELINES 2/12 active (3/12 slots in flight)" in out
+
+
+def test_utilization_line_separates_pipelines_from_server_traffic():
+    """Two units, two labels.  "active" counts pipelines of RUNNING engines —
+    a PAUSED engine holds none — while "slots in flight" is server-wide and
+    therefore includes traffic that is not ours.  Unlabelled these read as a
+    contradiction ("0/12 (3 in flight)"), which is exactly how a paused pool
+    fooled a reader into thinking work was happening."""
+    routes = {
+        ("GET", "/api/projects"): PROJECTS,
+        ("GET", "/api/llm/status"): {"servers": [
+            {"id": "s1", "enabled": True, "online": True, "max_concurrent": 4, "inflight": 3},
+        ]},
+    }
+
+    def active(engines):
+        return {"project_id": "md5-speed", "engine_state": "running",
+                "state": {"generation": 1, "paused": False, "best": {"fitness": 1.0, "metrics": {}}},
+                "engines": engines}
+
+    def eng(pid, state, paused, pipelines):
+        return {"project_id": pid, "name": pid, "engine_state": state, "paused": paused,
+                "generation": 1, "best_fitness": 1.0, "best_metrics": {},
+                "parallel_gens": pipelines, "workers": 1}
+
+    s = _session({**routes, ("GET", "/api/active"): active([
+        eng("run", "running", False, 3), eng("nap", "paused", True, 2)])})
+    s.project = "md5-speed"
+    line = [l for l in s.cmd_status("").splitlines() if "LLM PIPELINES" in l][0]
+    assert "3/4 active" in line, "only the running engine's pipelines count"
+    assert "3/4 slots in flight" in line
+
+    s = _session({**routes, ("GET", "/api/active"): active([
+        eng("nap", "paused", True, 2), eng("gone", "stopped", False, 4)])})
+    s.project = "md5-speed"
+    line = [l for l in s.cmd_status("").splitlines() if "LLM PIPELINES" in l][0]
+    assert "0/4 active" in line, "paused and stopped engines hold no pipeline"
+    assert "3/4 slots in flight" in line, "…but the servers are still busy"
 
 
 # ----------------------------------------------------------------------

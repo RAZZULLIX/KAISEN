@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`LLM PIPELINES` mixed two units in one unlabelled ratio.**  The first
+  number counted this pool's pipelines (running engines only) and the
+  parenthetical counted requests in flight across the servers, so a paused
+  pool printed `0/12 (3 in flight)` — which reads as a contradiction and
+  hides both facts.  Each number is labelled now:
+  `LLM PIPELINES x/y active (z/y slots in flight)`.
+
 - **"🏆 NEW BEST" is sent only when a GENERATION wins, and is no longer
   pinned.**  A baseline (and its re-evaluation after a restart) is the
   pipeline verifying code the run did not produce: it still becomes the

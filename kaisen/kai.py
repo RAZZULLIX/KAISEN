@@ -453,6 +453,11 @@ class KaiSession:
         # Utilization: how much of the active LLM capacity the pool is using.
         # SERVERS shows per-server slots; this line sums it so a glance tells
         # you "you're running 3 of 12 possible pipelines" without doing math.
+        # The two numbers are DIFFERENT units, so each is labelled: "active"
+        # counts this pool's pipelines (RUNNING engines only — a paused engine
+        # holds none), "slots in flight" counts requests across the servers,
+        # which includes traffic that is not ours.  Unlabelled, a paused pool
+        # reads as "0/12 (3 in flight)" — a contradiction.
         try:
             llm_status = self.client.call("GET", "/api/llm/status", read_timeout=10.0)
             servers = llm_status.get("servers") or []
@@ -462,7 +467,8 @@ class KaiSession:
             active_pipelines = sum(int(e.get("parallel_gens", 0) or 0)
                                    for e in (act.get("engines") or [])
                                    if e.get("engine_state") == "running")
-            lines.append(f"LLM PIPELINES {active_pipelines}/{total} ({inflight} in flight)")
+            lines.append(f"LLM PIPELINES {active_pipelines}/{total} active "
+                         f"({inflight}/{total} slots in flight)")
         except KaiError:
             pass
         best = st.get("best") or {}
