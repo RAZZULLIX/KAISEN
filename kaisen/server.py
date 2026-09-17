@@ -2126,11 +2126,15 @@ class DashboardServer:
         agg = 0.0
         active = [s for s in sessions_all if s.get("status") == "generating"]
         by_server: Dict[str, List[Dict[str, Any]]] = {}
-        queued = 0
+        # Producers with no LLM slot yet.  This is the NORMAL state of a busy
+        # pool, NOT a queue: a queue is work waiting for a free WORKER (the
+        # shared pool's FIFO).  Naming it "queued" made a healthy pool read as
+        # though 366 generations were backed up.
+        waiting_for_slot = 0
         for s in active:
             sid = s.get("server_id") or ""
             if not sid:
-                queued += 1   # waiting for a free LLM slot (FIFO wait queue)
+                waiting_for_slot += 1   # parked until a slot frees
                 continue
             by_server.setdefault(sid, []).append(s)
             active_tps[sid] = (active_tps.get(sid) or 0.0) + float(s.get("tps") or 0)
@@ -2179,8 +2183,9 @@ class DashboardServer:
                 # it is WORKING even during prefill (no tokens yet), so
                 # the pill LED stays green instead of flashing yellow.
                 "streaming": 1 if chats else 0,
-                # pool-wide: pipelines parked in the FIFO wait queue
-                "queued": queued,
+                # pool-wide: producers parked until an LLM slot frees —
+                # steady state for a busy pool, never a queue
+                "waiting_for_slot": waiting_for_slot,
                 # internal telemetry: server-side acquire counter and the
                 # real llama.cpp slot count (a mismatch with `inflight`
                 # means sessions leaked — see the producer finally guard).
@@ -2217,7 +2222,7 @@ class DashboardServer:
             "generating": any(e.is_generating for e in pool),
             "tps": round(agg, 1),
             "agg_tps": round(agg, 1),
-            "queued": queued,
+            "waiting_for_slot": waiting_for_slot,
             "servers": rows,
             "model_id": None,
             "engines": self._engines_summary(),

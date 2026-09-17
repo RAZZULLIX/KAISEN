@@ -323,7 +323,6 @@ async function fetchState() {
 }
 // worker pool chip: process count +/- (pool-wide) with the live queue depth
 let poolWorkerTarget = null;   // last server-confirmed pool size
-let poolQueueDepth = null;     // queued jobs (shared scheduler)
 
 function renderWorkerPool(pool) {
   const n = document.getElementById('worker-pool-count');
@@ -333,11 +332,17 @@ function renderWorkerPool(pool) {
     if (n) n.textContent = poolWorkerTarget;
   }
   if (pool && pool.queue) {
-    const queued = Number(pool.queue.total || 0);
+    // A QUEUE is work waiting for a FREE WORKER: generations whose LLM work
+    // is already done (their artifacts await a build/verify/score slot).
+    // `total` also counted jobs already handed to a worker and running —
+    // that is throughput, not a queue.  Producers parked waiting for an LLM
+    // slot are likewise not a queue: that is the normal state of a busy pool.
+    const sum = (m) => Object.values(m || {}).reduce((n, v) => n + Number(v || 0), 0);
+    const waiting = sum(pool.queue.queued);
+    const running = sum(pool.queue.running);
     const cap = Number(pool.queue.cap || 0);
-    poolQueueDepth = queued;
-    if (q) q.textContent = `q ${queued}/${cap}`;
-    if (q) q.title = `${queued} job(s) queued or running — the pool never queues more than the ${cap} total workers; generations are never queued`;
+    if (q) q.textContent = `q ${waiting}/${cap}`;
+    if (q) q.title = `${waiting} finished generation(s) waiting for a free worker · ${running} running · cap ${cap}`;
   }
 }
 
@@ -716,10 +721,15 @@ async function updateStatusPill() {
     // Engine pool: more than one engine → summarize the pool instead of a
     // single engine's generation state (single engine keeps the label above).
     if (hasPool && engines.length > 1) {
-      const queued = statusData.queued ?? 0;
+      // Queued = generations whose LLM work is DONE and whose artifacts are
+      // waiting for a free worker.  (`waiting_for_slot` — producers parked
+      // for LLM capacity — is the normal state of a busy pool and is not
+      // shown here: it is not a queue.)
+      const queued = (statusData.engines || [])
+        .reduce((n, e) => n + Number(e.jobs_queued || 0), 0);
       text.textContent = generating
-        ? `SYSTEM — ${engines.length} engines · ${aggTps.toFixed(1)} TPS${queued ? ` · ${queued} queued` : ''}`
-        : `SYSTEM — ${engines.length} engines${queued ? ` · ${queued} queued` : ''}`;
+        ? `SYSTEM — ${engines.length} engines · ${aggTps.toFixed(1)} TPS${queued ? ` · ${queued} queued for a worker` : ''}`
+        : `SYSTEM — ${engines.length} engines${queued ? ` · ${queued} queued for a worker` : ''}`;
     }
     // The pill LED reflects the selected servers: red when any is not
     // answering, green when all are available, yellow when none selected.

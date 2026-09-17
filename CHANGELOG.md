@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The GUI called "waiting for an LLM slot" a queue.**  `/api/llm/status`
+  reported the parked producers as `queued` and the SYSTEM line printed
+  `· 366 queued` — a healthy, fully busy pool reading as 366 backed-up
+  generations.  Waiting for a slot is the NORMAL state; a queue is work
+  waiting for a free WORKER.  The field is `waiting_for_slot` now, the
+  SYSTEM line's queue is the pool's real FIFO (finished generations waiting
+  for a worker), and the pool chip counts only what is waiting, not what is
+  already running.
+
 - **`LLM PIPELINES` mixed two units in one unlabelled ratio.**  The first
   number counted this pool's pipelines (running engines only) and the
   parenthetical counted requests in flight across the servers, so a paused

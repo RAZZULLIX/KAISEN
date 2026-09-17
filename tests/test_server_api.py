@@ -754,7 +754,8 @@ def test_pill_row_streaming_during_prefill(api, tmp_cfg, registry):
         assert row["streaming"] == 1          # working even at 0 tps
         assert row["tps"] == 0.0              # honest: prefill, no tokens
         assert row["inflight"] == 1           # one bound session
-        assert d["queued"] == 1               # one waiter in the queue
+        assert d["waiting_for_slot"] == 1     # parked for LLM capacity — normal
+        assert "queued" not in d, "an LLM-slot wait is not a queue (a queue waits for a free WORKER)"
     finally:
         srv.engines.pop("pillrow", None)
 
