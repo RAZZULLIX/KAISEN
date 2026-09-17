@@ -1115,7 +1115,9 @@ Backed by `notes.json` (gitignored).
 
 ## 16. Telegram & GitHub
 
-- **Telegram** — new-best notifications (`🏆 NEW BEST`) with metric
+- **Telegram** — new-best notifications (`🏆 NEW BEST — <project>`: the
+  project name leads the message, because the channel is pool-wide and a
+  bare `gen N` says nothing about which run improved) with metric
   details, optional file upload — and `🎯 GOAL MET` when a
   project reaches its success goal (§5): the criterion, the champion
   fitness and the fact that the project was stopped, sent before the stop

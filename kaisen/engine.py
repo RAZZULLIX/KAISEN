@@ -1636,7 +1636,11 @@ class ProjectEngine:
         either — a pin outlives the news it pointed at.
         """
         if generated:
-            lines = [f"🏆 NEW BEST (gen {gen}): fitness={fitness:.5f}"]
+            # The project name goes on top: a pool-wide channel carries news
+            # from every project, so "NEW BEST (gen 262)" alone said nothing
+            # about WHICH run improved.
+            lines = [f"🏆 NEW BEST — {self.project.name or self.project.id} (gen {gen}): "
+                     f"fitness={fitness:.5f}"]
             for key, ms in schema.items():
                 if key in metrics:
                     lines.append(f"  {key} = {metrics[key]:.4f} {ms.get('unit', '')}")

@@ -246,7 +246,9 @@ def test_new_best_pings_only_for_generated_candidates(tmp_path, tmp_cfg, monkeyp
     eng._apply_result(2, {"gen_dir": str(eng._make_gen_dir(2)), "baseline": False},
                       {"ok": True, "metrics": {"proved_open": 4}, "outcome": "valid"})
     best = [m for m in pings if "NEW BEST" in m]
-    assert len(best) == 1 and "gen 2" in best[0]
+    assert len(best) == 1
+    assert best[0].startswith("🏆 NEW BEST — Proj nb-proj"), "the project name leads the message"
+    assert "gen 2" in best[0] and "fitness=" in best[0]
 
 
 def _goal_met_engine(tmp_path, tmp_cfg, goal, pid="tg-proj"):

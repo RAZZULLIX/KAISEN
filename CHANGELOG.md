@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The new-best message names its project.**  The channel is pool-wide
+  (one bot, every project), so `🏆 NEW BEST (gen 262)` did not say which run
+  had improved — it now leads with the project:
+  `🏆 NEW BEST — <project> (gen N): fitness=…`, like the goal ping.
+
 - **The GUI called "waiting for an LLM slot" a queue.**  `/api/llm/status`
   reported the parked producers as `queued` and the SYSTEM line printed
   `· 366 queued` — a healthy, fully busy pool reading as 366 backed-up
