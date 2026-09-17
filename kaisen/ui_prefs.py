@@ -1,6 +1,6 @@
 # Copyright (c) 2026 LABORATORI RAZZULLIX - MIT License. See LICENSE.
-"""UI preferences — the user's GUI shape, editable by hand or by the
-config agent, with a single committed defaults standard to revert to."""
+"""UI preferences — the user's GUI shape, editable by hand or through the
+Settings panel, with a single committed defaults standard to revert to."""
 
 from __future__ import annotations
 

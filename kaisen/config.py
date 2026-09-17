@@ -79,7 +79,6 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "workers": {
         "default_count": 1,
         "max_count": 32,
-        "queue_size": 15,
         # Optional CPU pinning for worker processes, e.g. "0,2" or "1-3".
         # Empty = no pinning.  On a busy shared box, pin each worker to its
         # own core (or use `nice`) so score timings stop swinging with load.
@@ -93,7 +92,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # the user presses play.  Set false to start generating immediately.
     "engine": {
         "start_paused": True,
-        "default_multi": 1,
+        "default_parallel_gens": 1,
     },
     "telegram": {
         "token": "",

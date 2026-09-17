@@ -258,7 +258,7 @@ def build_spec(family: str, problems: list[dict], gpu_name: str) -> dict:
             "unit": "x", "direction": "higher", "weight": 1.0}},
         "telemetry": {"enabled": True, "progress_token": "KAISEN_PROGRESS",
                       "live_fields": ["speedup"]},
-        "engine": {"workers": 4, "multi": 1,
+        "engine": {"workers": 4, "parallel_gens": 1,
                    "autofix": {"tries": 2, "repair": 2}},
         "select": {"hysteresis": 1.05},
         "guardrails": {"enabled": True, "allow_extra": [], "deny_extra": []},

@@ -18,9 +18,6 @@ Grammar (case-insensitive, trailing punctuation ignored):
                              start evolving in the background — forever by
                              default; <n> / FOR <secs> are optional goals;
                              WITH <k> drives k LLM pipelines in parallel
-    FORGE [<n>] [ON <pid>] [GOAL <words...>]
-                             generate n parallel drafts (default 3, max 12),
-                             each pipeline-scored and ranked
     WAIT [<secs>]            block until the in-flight run finishes
     PAUSE | RESUME | STOP    engine control
     BEST                     champion source code + metrics
@@ -175,8 +172,6 @@ BARE command lines, never prefixed with OK. Commands (case-insensitive):
                              server drops out of routing until it rolls over.
                              n = 1000000 | 1M | 1,000,000 | 2.5M; r = 30s | 5m
                              | 12h | 3d | 1w | 12:00:00 (= 12h). Blank clears.
-  FORGE [<n>] [TIER <tiny|small|large>] [ON <pid>] [GOAL <words...>]
-                             n parallel drafts, each pipeline-scored
   SCORE <path> [ON <pid>]     score any file through build+verify+score —
                              no engine, no run, no ceremony (audit in runs/)
   FUZZY <n> [ON <pid>]        opt-in diversity: seed each prompt with a random
@@ -255,7 +250,6 @@ ALIASES: Dict[str, List[str]] = {
     "STATUS": ["STATUS", "STATE", "ST"],
     "SPEC": ["SPEC", "DESCRIBE", "SHOW", "INSPECT", "INFO"],
     "RUN": ["RUN", "ITERATE", "EVOLVE", "OPTIMIZE", "GO"],
-    "FORGE": ["FORGE", "SMITH", "DRAFTS"],
     "SCORE": ["SCORE", "EVAL", "TESTFILE"],
     "FUZZY": ["FUZZY", "VARY", "DIVERSE"],
     "PAUSE": ["PAUSE", "HALT", "FREEZE"],
@@ -433,7 +427,7 @@ class KaiSession:
             total = sum(max(1, int(s.get("max_concurrent", 1) or 1))
                         for s in servers if s.get("enabled", True) and s.get("online") is not False)
             inflight = sum(int(s.get("inflight", 0) or 0) for s in servers if s.get("enabled", True))
-            active_pipelines = sum(int(e.get("multi", 0) or 0)
+            active_pipelines = sum(int(e.get("parallel_gens", 0) or 0)
                                    for e in (act.get("engines") or [])
                                    if e.get("engine_state") == "running")
             lines.append(f"LLM PIPELINES {active_pipelines}/{total} ({inflight} in flight)")
@@ -507,7 +501,7 @@ class KaiSession:
             return self.cmd_run_all(" ".join(tokens[1:]))
         gen_target: Optional[int] = None
         budget: Optional[float] = None
-        multi_k: Optional[int] = None
+        parallel_gens: Optional[int] = None
         pid: Optional[str] = None
         # One pass: flags may appear in any order; the budget value must
         # NOT also parse as a generation count ("RUN FOR 21600" = 21600s
@@ -525,7 +519,7 @@ class KaiSession:
                 continue
             if u in ("WITH", "USING"):
                 if i + 1 < len(tokens) and tokens[i + 1].isdigit():
-                    multi_k = max(1, int(tokens[i + 1]))
+                    parallel_gens = max(1, int(tokens[i + 1]))
                     i += 2
                     continue
                 i += 1
@@ -545,9 +539,11 @@ class KaiSession:
         sw = self.client.call("POST", "/api/engine/switch", {"project_id": pid}, read_timeout=60.0)
         if not sw.get("ok"):
             raise KaiError(f"engine switch failed: {sw.get('error')}")
-        if multi_k:
-            res = self.client.call("POST", "/api/engine/multi", {"multi": multi_k, "project_id": pid}, read_timeout=60.0)
-            multi_k = int(res.get("multi", multi_k))
+        if parallel_gens:
+            res = self.client.call("POST", "/api/engine/parallel_gens",
+                                   {"parallel_gens": parallel_gens, "project_id": pid},
+                                   read_timeout=60.0)
+            parallel_gens = int(res.get("parallel_gens", parallel_gens))
         entry = self._engine_entry(pid)
         start_gen = int(entry.get("generation", 0))
         start_best = (entry.get("best") or {}).get("fitness")
@@ -572,8 +568,8 @@ class KaiSession:
         desc_parts.append(f"{gen_target} generations" if gen_target else "forever")
         if budget:
             desc_parts.append(f"budget {budget:.0f}s")
-        if multi_k:
-            desc_parts.append(f"with {multi_k} LLMs")
+        if parallel_gens:
+            desc_parts.append(f"with {parallel_gens} parallel generations")
         return (f"OK running {', '.join(desc_parts)} on {pid} in the background — WAIT to synchronize, "
                 f"STATUS/BUDGET to watch, STOP to end")
 
@@ -584,7 +580,7 @@ class KaiSession:
         Optional: only the pool is touched, nothing else is required."""
         tokens = arg.split()
         budget: Optional[float] = None
-        multi_k: Optional[int] = None
+        parallel_gens: Optional[int] = None
         i = 0
         while i < len(tokens):
             t = tokens[i]
@@ -598,7 +594,7 @@ class KaiSession:
                 continue
             if u in ("WITH", "USING"):
                 if i + 1 < len(tokens) and tokens[i + 1].isdigit():
-                    multi_k = max(1, int(tokens[i + 1]))
+                    parallel_gens = max(1, int(tokens[i + 1]))
                     i += 2
                     continue
                 i += 1
@@ -613,8 +609,10 @@ class KaiSession:
         for e in pool:
             pid = e.get("project_id")
             self.client.call("POST", "/api/engine/switch", {"project_id": pid}, read_timeout=60.0)
-            if multi_k:
-                self.client.call("POST", "/api/engine/multi", {"multi": multi_k, "project_id": pid}, read_timeout=60.0)
+            if parallel_gens:
+                self.client.call("POST", "/api/engine/parallel_gens",
+                                 {"parallel_gens": parallel_gens,
+                                  "project_id": pid}, read_timeout=60.0)
             self.client.call("POST", "/api/engine/pause", {"paused": False, "project_id": pid}, read_timeout=60.0)
             entry = self._engine_entry(pid)
             goals.append({
@@ -631,8 +629,8 @@ class KaiSession:
         desc = f"{len(goals)} pool projects"
         if budget:
             desc += f", budget {budget:.0f}s each"
-        if multi_k:
-            desc += f", {multi_k} LLMs each"
+        if parallel_gens:
+            desc += f", {parallel_gens} parallel generations each"
         return (f"OK running all {desc} in the background — WAIT to synchronize, "
                 f"STATUS/BUDGET to watch, STOP to end")
 
@@ -700,7 +698,7 @@ class KaiSession:
         """Block until the in-flight run reaches its goal (or the timeout);
         on a forever run, snapshots progress after <secs> (default 60)."""
         if self._run_goals:
-            return self._wait_multi(arg)
+            return self._wait_all(arg)
         goal = self._run_goal
         if not goal:
             raise KaiError("no run in progress — RUN first (STOP ended the last one?)")
@@ -733,7 +731,7 @@ class KaiSession:
         return (f"OK {state} — " + self._run_progress(goal, st)
                 + f", best fitness {(st.get('best') or {}).get('fitness')} — WAIT again or STOP")
 
-    def _wait_multi(self, arg: str) -> str:
+    def _wait_all(self, arg: str) -> str:
         """Block until EVERY pool member in the RUN ALL batch finishes (or
         the client-side timeout).  Paused engines don't burn their budget."""
         goals = list(self._run_goals)
@@ -1572,78 +1570,6 @@ class KaiSession:
             lines.append(f"FAIL {f}")
         return "\n".join(lines)
 
-    def cmd_forge(self, arg: str) -> str:
-        """Generate n parallel drafts (default 3, max 12), each scored by the
-        pipeline and ranked: FORGE [<n>] [ON <pid>] [GOAL <words...>]."""
-        tokens = arg.split()
-        goal_idx = None
-        for i, t in enumerate(tokens):
-            if t.upper().rstrip(":,") == "GOAL":
-                goal_idx = i
-                break
-        if goal_idx is not None:
-            request_words = tokens[goal_idx + 1:]
-            tokens = tokens[:goal_idx]
-        else:
-            request_words = []
-        n = 3
-        pid: Optional[str] = None
-        min_tier = "tiny"
-        for i, t in enumerate(tokens):
-            u = t.upper().rstrip(":,s")
-            if u == "ON" and i + 1 < len(tokens):
-                pid = tokens[i + 1].strip().lower()
-            elif u == "TIER" and i + 1 < len(tokens) and tokens[i + 1].lower() in ("tiny", "small", "large"):
-                min_tier = tokens[i + 1].lower()
-            elif t.isdigit():
-                n = int(t)
-        n = max(1, min(n, 12))
-        pid = pid or self._need_project()
-        request = " ".join(request_words).strip()
-        if not request:
-            spec = self.client.call("GET", f"/api/projects/{pid}/spec", read_timeout=10.0).get("spec") or {}
-            request = (spec.get("prompts") or {}).get("goal") or spec.get("description") or "Improve the program."
-        res = self.client.call(
-            "POST", "/api/swarm/start",
-            {"kind": "code_forge", "project_id": pid, "request": request,
-             "n": n, "max_concurrent": n, "min_tier": min_tier},
-            read_timeout=60.0,
-        )
-        job_id = res.get("job_id")
-        if not job_id:
-            raise KaiError(res.get("error", "swarm start failed"))
-        deadline = time.time() + 1200.0
-        state = None
-        job: Dict[str, Any] = {}
-        while True:
-            resp = self.client.call("GET", f"/api/swarm/{job_id}", read_timeout=10.0)
-            job = resp.get("job", {})
-            state = job.get("state")
-            if state in ("done", "failed", "cancelled") or time.time() >= deadline:
-                break
-            time.sleep(2.0)
-        if state != "done":
-            return f"ERR forge {state}: {job.get('error') or 'no results'}"
-        results = job.get("results", [])
-        lines = [f"OK {len(results)} draft(s) ranked (pipeline-scored):"]
-        for d in results:
-            rank = d.get("rank")
-            status = "ok" if d.get("ok") else f"failed({d.get('stage', '?')})"
-            metrics = d.get("metrics") or {}
-            reason = str(d.get("reason") or "")[:120]
-            m = " ".join(f"{k}={v}" for k, v in metrics.items())
-            line = f"  #{rank} {status} metrics: {m}"
-            if reason:
-                line += f" reason: {reason}"
-            lines.append(line)
-        for d in results:
-            rank = d.get("rank")
-            lines.append(f"===== DRAFT {rank} =====")
-            lines.append(d.get("code") or "")
-        return "\n".join(lines)
-
-    # -- dispatch ----------------------------------------------------------
-
     def dispatch(self, line: str, code_lines: Optional[List[str]] = None) -> str:
         word, rest = _split(line)
         cmd = _ALIAS_INDEX.get(word)
@@ -1668,8 +1594,6 @@ class KaiSession:
                 return self.cmd_spec(rest)
             if cmd == "RUN":
                 return self.cmd_run(rest)
-            if cmd == "FORGE":
-                return self.cmd_forge(rest)
             if cmd == "SCORE":
                 return self.cmd_score(rest)
             if cmd == "FUZZY":

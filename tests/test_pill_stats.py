@@ -98,7 +98,7 @@ def test_producer_error_finishes_session(tmp_path, monkeypatch):
     monkeypatch.setattr("kaisen.engine.time.sleep", lambda s: None)
     eng = ProjectEngine(project, orchestrator=orch, registry=registry,
                         worker_count=0)
-    eng.start(multi=1, paused=False)
+    eng.start(parallel_gens=1, paused=False)
     try:
         deadline = time.time() + 5
         while time.time() < deadline:

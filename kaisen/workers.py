@@ -2,11 +2,17 @@
 """Shared subprocess worker pool.
 
 ONE pool for the whole process, like the LLM orchestrator: every project
-engine submits jobs to the same FIFO queue, and a fixed set of workers
-(global cap, `workers.default_count` / `workers.max_count`) drains it in
-order.  A hundred projects at once means a hundred job SUBMISSIONS, not a
-hundred worker processes — the old per-engine pools scaled workers with
-the project count and could exhaust the machine.
+engine submits jobs to the same scheduler, and a fixed set of worker
+processes (`workers.default_count` / `workers.max_count`) drains it.  Jobs
+are handed out ONE PER FREE WORKER in ROTATION between the projects that
+have jobs waiting — the same fairness the LLM pool gives generations — so
+no project can hog the machine and none is starved.  The number of jobs
+outstanding at once (queued + running) is bounded by the TOTAL worker
+allowance (`workers.max_count`), never per project; a project may opt into
+its own `max_workers` ceiling (spend guard) or `reserve_workers`
+guaranteed slots.  A hundred projects at once means a hundred job
+SUBMISSIONS, not a hundred worker processes — the old per-engine pools
+scaled workers with the project count and could exhaust the machine.
 
 Each worker is an isolated OS process: it pulls jobs, runs the project
 pipeline (build/verify/score), and reports results + progress back to the
@@ -29,6 +35,7 @@ Messages (pickle-safe dicts on multiprocessing queues):
 
 from __future__ import annotations
 
+import collections
 import multiprocessing
 import os
 import threading
@@ -219,6 +226,24 @@ class WorkerPool:
         # them.
         self._retire_evts: Dict[int, "multiprocessing.Event"] = {}
         self._target = 0  # intended worker count; crashed workers respawn to it
+        # ── fair job scheduler (mirrors the LLM pool's generation model) ──
+        # `_q` holds each project's waiting jobs (FIFO inside a project),
+        # `_order` lists the projects with jobs waiting in SERVICE ORDER:
+        # the head is served next and every hand-out sends it to the back, so
+        # jobs rotate between projects.  `_running` counts the jobs a project
+        # has in flight, `_handed` maps a worker to the project it was given,
+        # and `_limits` carries the OPT-IN per-project knobs.
+        self._q: Dict[str, collections.deque] = {}
+        self._order: List[str] = []
+        self._running: Dict[str, int] = {}
+        # Cumulative jobs served per project — the fairness made visible:
+        # with projects competing, these counts stay within one of each
+        # other (rotation), instead of one project racing ahead.
+        self._served: Dict[str, int] = {}
+        self._handed: Dict[int, str] = {}
+        self._limits: Dict[str, Dict[str, Any]] = {}
+        self._sched = threading.Condition()
+        self._dispatcher: Optional[threading.Thread] = None
         # The pool is shared by every engine + the GUI: guard mutations
         # (spawn/remove/register) so concurrent polls can't race a resize.
         # RLock: start() -> _top_up() -> add_worker() nests the guard.
@@ -228,15 +253,66 @@ class WorkerPool:
 
     def register(self, project_id: str,
                  result_handler: Optional[Callable[[Dict[str, Any]], None]] = None,
-                 progress_handler: Optional[Callable[[Dict[str, Any]], None]] = None) -> None:
-        """Route this project's results/progress to its engine's handlers.
-        The pool is shared: dispatch is keyed by project_id."""
+                 progress_handler: Optional[Callable[[Dict[str, Any]], None]] = None,
+                 max_workers: Optional[int] = None,
+                 reserve_workers: Optional[int] = None) -> None:
+        """Route this project's results/progress to its engine's handlers
+        and record its OPTIONAL worker knobs.  The pool is shared: dispatch
+        is keyed by project_id."""
         with self._lock:
             h = self._handlers.setdefault(str(project_id), {})
             if result_handler is not None:
                 h["result"] = result_handler
             if progress_handler is not None:
                 h["progress"] = progress_handler
+        self.set_limits(project_id, max_workers=max_workers,
+                        reserve_workers=reserve_workers)
+
+    # -- per-project worker limits (optional) ------------------------------
+    def set_limits(self, project_id: str, max_workers: Any = None,
+                   reserve_workers: Any = None) -> Dict[str, Any]:
+        """OPTIONAL per-project worker knobs, the worker-side twins of
+        `max_parallel` / `reserve`:
+
+          max_workers     = the most jobs this project may have RUNNING at
+                            once (its jobs still queue freely) — a spend
+                            guard on the machine, never a generation
+                            throttle;
+          reserve_workers = jobs GUARANTEED to this project: it is served up
+                            to this many concurrent jobs without waiting for
+                            its turn in the rotation.
+
+        `None` leaves a knob untouched; 0 clears it.  Returns the effective
+        values."""
+        def _norm(v: Any) -> Optional[int]:
+            if v in (None, "", "null"):
+                return None
+            try:
+                n = int(v)
+            except (TypeError, ValueError):
+                return None
+            return n if n > 0 else None
+        pid = str(project_id)
+        with self._sched:
+            lim = self._limits.setdefault(pid, {"max_workers": None,
+                                                "reserve_workers": None})
+            if max_workers is not None:
+                lim["max_workers"] = _norm(max_workers)
+            if reserve_workers is not None:
+                lim["reserve_workers"] = _norm(reserve_workers)
+            self._sched.notify_all()
+            return dict(lim)
+
+    def limits(self, project_id: str) -> Dict[str, Any]:
+        with self._sched:
+            return dict(self._limits.get(str(project_id))
+                        or {"max_workers": None, "reserve_workers": None})
+
+    def _max_workers(self, project_id: str) -> Optional[int]:
+        return (self._limits.get(str(project_id)) or {}).get("max_workers")
+
+    def _reserve_workers(self, project_id: str) -> Optional[int]:
+        return (self._limits.get(str(project_id)) or {}).get("reserve_workers")
 
     def unregister(self, project_id: str) -> None:
         """A stopped engine: drop its handlers.  Queued jobs may still run;
@@ -313,7 +389,17 @@ class WorkerPool:
         if payload is None:
             return
         st["job_id"] = None
-        self.jobs_q.put(payload)
+        project = str(payload.get("project_id") or "")
+        with self._sched:
+            # The hand-out ENDS here: the job is queued again, so it must
+            # not keep counting as running for this worker/project.
+            self._finish_handout(worker_id, project)
+            self._q.setdefault(project, collections.deque()).appendleft(payload)
+            if project not in self._order:
+                self._order.insert(0, project)
+            self._ensure_dispatcher()
+            self._dispatch()
+            self._sched.notify_all()
 
     def remove_worker(self, worker_id: int, kill: bool = False, requeue: bool = True) -> bool:
         """Remove one worker.  Non-kill removal is GRACEFUL: the worker is
@@ -373,9 +459,19 @@ class WorkerPool:
     def kill_worker(self, worker_id: int) -> bool:
         return self.remove_worker(worker_id, kill=True)
 
+    def _clear_scheduler(self) -> None:
+        with self._sched:
+            self._q.clear()
+            self._order.clear()
+            self._running.clear()
+            self._served.clear()
+            self._handed.clear()
+            self._sched.notify_all()
+
     def stop_all(self) -> None:
         # Shutdown intent: no re-queueing (the process is going away and
         # the jobs die with it — re-queueing would just delay the exit).
+        self._clear_scheduler()
         with self._lock:
             self._target = 0
             for wid in list(self._procs.keys()):
@@ -388,6 +484,8 @@ class WorkerPool:
                     # Crashed worker: its in-flight job must survive.
                     self._requeue_held_job(wid)
                     self._procs.pop(wid, None)
+                    with self._sched:
+                        self._handed.pop(wid, None)
                     self._workers_state.pop(wid, None)
                     self._retire_evts.pop(wid, None)
             # Self-heal: crashed workers respawn up to the intended target so
@@ -422,17 +520,160 @@ class WorkerPool:
     # -- job submission ---------------------------------------------------
 
     def submit(self, job: Dict[str, Any]) -> None:
+        """Queue one job for this project.  The ONLY queue in the system:
+        worker jobs.  Jobs are handed to free workers in rotation between
+        projects (see _dispatch); the caller waits only when the project's
+        own `max_workers` ceiling or the GLOBAL outstanding bound (the total
+        worker allowance) is reached."""
         job = dict(job)
         job.setdefault("job_id", f"{int(time.time()*1000)}-{os.getpid()}")
-        self._job_payloads[str(job["job_id"])] = job
-        self.jobs_q.put(job)
+        project = str(job.get("project_id") or "")
+        with self._sched:
+            self._job_payloads[str(job["job_id"])] = job
+            # The ONLY wait: the GLOBAL bound.  Outstanding jobs (queued +
+            # running) never exceed the TOTAL worker allowance, so the
+            # backlog is bounded without ever being per-project.  The
+            # per-project `max_workers` ceiling is applied at DISPATCH time
+            # (how many of this project's jobs may RUN at once) — so a
+            # generation is never held back by its project's own cap.
+            while self._outstanding() >= self._cap():
+                self._sched.wait(0.2)
+            self._q.setdefault(project, collections.deque()).append(job)
+            if project not in self._order:
+                self._order.append(project)
+            self._ensure_dispatcher()
+            self._dispatch()
+            self._sched.notify_all()
 
     def pending(self) -> int:
-        """Approximate queued-job depth (backpressure signal for producers)."""
-        try:
-            return self.jobs_q.qsize()
-        except Exception:
-            return 0
+        """Jobs outstanding right now (queued + handed to a worker, result
+        not delivered yet) — the depth shown in the UI."""
+        with self._sched:
+            return self._outstanding()
+
+    def queue_depth(self) -> Dict[str, Any]:
+        """Per-project scheduler snapshot (queued / running / limits)."""
+        with self._sched:
+            return {
+                "queued": {p: len(q) for p, q in self._q.items() if q},
+                "running": {p: n for p, n in self._running.items() if n},
+                "served": dict(self._served),
+                "order": list(self._order),
+                "limits": {p: dict(l) for p, l in self._limits.items()},
+                "total": self._outstanding(),
+                "cap": self._cap(),
+            }
+
+    # -- fair dispatch -----------------------------------------------------
+    def _cap(self) -> int:
+        """Total allowance: the global worker cap (never per project)."""
+        return max(1, self.max_count())
+
+    def _outstanding(self) -> int:
+        """Queued + handed-but-unfinished jobs across EVERY project."""
+        return sum(len(q) for q in self._q.values()) + len(self._handed)
+
+    def _for_project(self, project_id: str) -> int:
+        """This project's outstanding jobs (queued + running)."""
+        return (len(self._q.get(project_id) or ())
+                + self._running.get(project_id, 0))
+
+    def _free_workers(self) -> List[int]:
+        """Workers that can take a job right now: idle and not already
+        handed one.  A worker's status comes from its progress beats.
+        Deliberately lock-free here: the dispatcher never waits on `_lock`
+        (the housekeeping that respawns crashed workers runs in
+        `_dispatch_loop` BEFORE this, outside `_sched`)."""
+        return [wid for wid, st in self._workers_state.items()
+                if st.get("status") == "idle" and wid not in self._handed
+                and self._procs.get(wid) is not None
+                and self._procs[wid].is_alive()]
+
+    def _next_project(self) -> Optional[str]:
+        """The project to serve next, called with `_sched` held.  Reserved
+        slots come first (a project with `reserve_workers` is guaranteed up
+        to that many concurrent jobs), then strict rotation: the head of the
+        service order, sent to the back after each hand-out so jobs
+        round-robin between projects."""
+        def _capped(proj: str) -> bool:
+            """True when the project already runs its `max_workers` jobs."""
+            cap = self._max_workers(proj)
+            return cap is not None and self._running.get(proj, 0) >= cap
+
+        for proj in list(self._order):
+            reserve = self._reserve_workers(proj)
+            if reserve and self._q.get(proj) and not _capped(proj) \
+                    and self._running.get(proj, 0) < reserve:
+                return proj
+        for proj in list(self._order):
+            if self._q.get(proj) and not _capped(proj):
+                return proj
+        return None
+
+    def _dispatch(self) -> None:
+        """Hand waiting jobs to free workers, one per project per turn.
+        Called with `_sched` held."""
+        while True:
+            free = self._free_workers()
+            if not free:
+                break
+            proj = self._next_project()
+            if proj is None:
+                break
+            job = self._q[proj].popleft()
+            if not self._q[proj]:
+                self._q.pop(proj, None)
+            if proj in self._order:
+                self._order.remove(proj)
+            if self._q.get(proj):
+                self._order.append(proj)          # back of the rotation
+            wid = free[0]
+            self._handed[wid] = proj
+            self._running[proj] = self._running.get(proj, 0) + 1
+            self._served[proj] = self._served.get(proj, 0) + 1
+            self.jobs_q.put(job)
+
+    def _ensure_dispatcher(self) -> None:
+        """Lazy dispatcher thread: wakes on submit/result/idle beats and
+        tops the free workers up, with a slow safety tick."""
+        if self._dispatcher is not None and self._dispatcher.is_alive():
+            return
+        self._dispatcher = threading.Thread(
+            target=self._dispatch_loop, name="kaisen-worker-dispatch",
+            daemon=True)
+        self._dispatcher.start()
+
+    def _dispatch_loop(self) -> None:
+        """Top the free workers up from the waiting jobs.  The dispatcher
+        only READS worker state and pushes to `jobs_q`: it NEVER spawns
+        workers (that stays on the main-thread paths — start / add_worker /
+        the periodic worker_count() from the API), because forking a
+        process from a background thread can leave the child holding a
+        lock the parent's other threads own, and the worker then never
+        reports for duty."""
+        while not self._stop.is_set():
+            try:
+                with self._sched:
+                    self._dispatch()
+                    self._sched.wait(0.5)
+            except Exception:
+                time.sleep(0.5)
+
+    def _finish_handout(self, worker_id: int, project: str | None = None) -> None:
+        """One hand-out ends: the job's result arrived, or its worker died
+        and the job went back to the queue.  EXACT accounting matters — the
+        per-project cap and the global bound are computed from it, so a
+        stale idle beat must never end a hand-out early (that would let the
+        dispatcher pile jobs onto a busy project).  Called with `_sched`
+        held."""
+        proj = self._handed.pop(worker_id, None) or project
+        if proj is None:
+            return
+        left = self._running.get(proj, 1) - 1
+        if left > 0:
+            self._running[proj] = left
+        else:
+            self._running.pop(proj, None)
 
     # -- queue draining ----------------------------------------------------
 
@@ -465,6 +706,15 @@ class WorkerPool:
                     st = self._workers_state.get(msg.get("worker_id"))
                     if st is not None and st.get("job_id") == job_id:
                         st["job_id"] = None
+                # Scheduler bookkeeping: the handed job is finished — the
+                # worker is free again and the project's count drops, which
+                # may unblock a submission at its `max_workers` ceiling.
+                wid = msg.get("worker_id")
+                if wid is not None:
+                    with self._sched:
+                        self._finish_handout(wid)
+                        self._dispatch()
+                        self._sched.notify_all()
                 with self._lock:
                     h = self._handlers.get(str(msg.get("project_id") or ""))
                 if h and h.get("result"):
@@ -484,6 +734,10 @@ class WorkerPool:
         stage = msg.get("stage") or "idle"
         st["stage"] = stage
         st["status"] = "idle" if stage == "idle" else "running"
+        if stage == "idle":
+            # The worker can take the next job: let the scheduler push one.
+            with self._sched:
+                self._sched.notify_all()
         if msg.get("project_id"):
             st["project_id"] = msg["project_id"]
         if msg.get("project_name"):

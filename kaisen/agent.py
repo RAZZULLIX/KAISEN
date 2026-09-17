@@ -35,8 +35,7 @@ def deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> None:
 def extract_json_actions(text: str, key: str = "tool") -> List[Dict[str, Any]]:
     """Pull JSON objects out of a model reply: per-line first, then any
     balanced-brace spans (nested braces survive). `key` selects the
-    discriminator field ("tool" for the agent loop, "action" for the
-    config agent)."""
+    discriminator field ("tool" for the agent loop)."""
 
     actions: List[Dict[str, Any]] = []
     for line in text.splitlines():

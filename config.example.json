@@ -48,13 +48,12 @@
   "workers": {
     "default_count": 4,
     "max_count": 32,
-    "queue_size": 8,
     "affinity": "",
     "quiet": false
   },
   "engine": {
     "start_paused": true,
-    "default_multi": 1
+    "default_parallel_gens": 1
   },
   "telegram": {
     "token": "",

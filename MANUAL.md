@@ -61,7 +61,7 @@ goal in words"), or manual (write the spec yourself).
 Run without the GUI (headless evolution):
 
 ```bash
-python main.py --project my-project --multi 2 --workers 4
+python main.py --project my-project --parallel-gens 2 --workers 4
 ```
 
 Drive KAISEN from another AI agent via the KAI protocol:
@@ -74,13 +74,13 @@ python main.py --kai
 
 ## 4. The dashboard (GUI)
 
-Four views + a command palette:
+Four views:
 
 ### Dashboard
 - **Status pill** — engine state, generation counter, best fitness, and
   "SYSTEM — N engines" when the pool is running.
 - **ACTIVE ENGINES panel** — every engine in the pool: state dot, name,
-  generation, best fitness, multi (parallel LLM pipelines), workers.
+  generation, best fitness, parallel generations, workers.
   Each row has **Select**, **Pause/Resume**, **Stop** — per project,
   without touching the others.
 - **Worker cards** — per-worker live telemetry (the `live_fields` from
@@ -97,7 +97,7 @@ Four views + a command palette:
   temp copy.
 - **Inject Custom Code** — queue a hand-written candidate as a
   generation (from the GUI or `CANDIDATE` in KAI).
-- **Agent** — start a multi-turn AI agent over the project (see §14).
+- **Agent** — start a multi-turn AI agent over the project (see §13).
 
 ### Notes
 - Free-form notes with colors, archive, reorder, comments, and
@@ -109,15 +109,16 @@ Four views + a command palette:
   context window, smartness, $/Mtoken cost, concurrency, params,
   payload template; health-probe buttons; active-server checkboxes.
 - **Autofix (per project)** — on/off/custom fixer script (§7).
-- **Snapshots** — list/restore project and config snapshots (§15).
+- **Snapshots** — list/restore project and config snapshots (§14).
 - **Prefs / appearance** — UI preferences.
-- **Config agent** — describe what you want in words ("route tiny jobs
-  to the 7B"); the LLM proposes config changes you approve.
 
-### Tell KAISEN… (Ctrl+K / command palette)
-Natural-language commands for the whole system: start/stop projects,
-add servers, configure routing, run swarms — executed through the LLM
-with validated tools.
+**The live window is POOL-WIDE.** Its chats come from every engine in the
+pool (each chat names its project when more than one is streaming), exactly
+like the pill — not just the selected project's.  A chat that waits states
+why: `WAITING FOR A FREE LLM SLOT` (the pool is busy) or `NO USABLE LLM
+SERVER — offline/banned; probing again automatically` (every endpoint is
+down — the pool re-probes on demand instead of waiting out the periodic
+cycle), so "nothing is streaming" never looks like a broken view.
 
 ---
 
@@ -196,14 +197,14 @@ projects/<id>/
 | `id` | `[a-z0-9_-]+`, unique |
 | `name` | display name |
 | `description` | free text |
-| `language` | any of the 23 languages (§20) |
+| `language` | any of the 23 languages (§19) |
 | `artifact_name` | output file name of the build step |
 | `steps.build` | one build command: `program`, `args`, `timeout`, `memory_limit_mb` |
 | `steps.verify` | list of verify commands (same shape); all must pass |
 | `steps.score` | list of score commands; must emit parseable metrics. A score step may declare `stage: "screen"|"confirm"` — the CONFIRM step's metric is what selects the champion (robust measurement); screen steps are cheap filters (§6) |
 | `metrics` | `{key: {direction: lower\|higher, weight: float, unit?: str, constraint?: float}}` — at least one required. A `constraint` is a HARD gate: violating it rejects the candidate outright (outcome `constraint_violated`) — no fitness weighting can compensate. Enforce "without changing the output" here, not in a prompt |
 | `telemetry` | `{enabled, progress_token, live_fields}` — harness progress protocol (§6) |
-| `engine` | `{workers, multi, autofix, retention, build_cache}` — startup sizing (project > config > 1/1). `workers` is a MINIMUM for the SHARED pool (§8): the pool is process-wide, so N projects each asking 4 workers still yield 4 workers, not 4N; `autofix: {tries, repair}` sets per-project compile-loop caps (KAI override > spec > config); `retention: {enabled, keep_last, keep_best}` opt-in pruning of old `runs/gen_*` dirs (§8); `build_cache: true` routes the build through a per-project ccache masquerade (`CCACHE_DIR` = `projects/<id>/.kaisen_cache`) so unchanged translation units reuse across generations — off by default, needs ccache on PATH (§6) |
+| `engine` | `{workers, parallel_gens, max_parallel, reserve, autofix, retention, build_cache}` — startup sizing (project > config > 1/1). `parallel_gens` = how many generations of this project may stream at once; `max_parallel` = OPTIONAL ceiling on that (spend guard); `reserve` = OPTIONAL, hold this project's endpoints instead of sharing the pool (§9). `workers` is a MINIMUM for the SHARED pool (§8): the pool is process-wide, so N projects each asking 4 workers still yield 4 workers, not 4N; `autofix: {tries, repair}` sets per-project compile-loop caps (KAI override > spec > config); `retention: {enabled, keep_last, keep_best}` opt-in pruning of old `runs/gen_*` dirs (§8); `build_cache: true` routes the build through a per-project ccache masquerade (`CCACHE_DIR` = `projects/<id>/.kaisen_cache`) so unchanged translation units reuse across generations — off by default, needs ccache on PATH (§6) |
 | `select.hysteresis` | champion replacement threshold; 1 = any improvement, 1.1 = must beat the champion by 10% (values < 1 are clamped to 1) |
 | `guardrails` | `{enabled, allow_extra, deny_extra}` — extra command rules |
 | `prompts` | `{generation_dir, goal, study, lesson}` — prompt templates |
@@ -242,7 +243,7 @@ KAISEN ships a differential fuzz gate for exactly this:
 
 `FACTORY` (KAI) / `kaisen/factory.py` generates a full campaign: 25
 algorithm families × every language in the framework registry
-(§20 — 23 languages: C, C++, CUDA, Python, Java, JavaScript, TypeScript,
+(§19 — 23 languages: C, C++, CUDA, Python, Java, JavaScript, TypeScript,
 C#, Go, Rust, Kotlin, Swift, PHP, Ruby, R, Zig, Scala, Dart, Haskell,
 Lua, Perl, Shell, D). Languages whose toolchain is missing on THIS
 machine are skipped at registration and reported (`NO TOOLCHAIN (skipped): …`)
@@ -349,7 +350,7 @@ process with:
 
 - a **timeout** (per step),
 - an **RSS memory limit** (`memory_limit_mb`),
-- a **guardrail check before execution** (single choke point, §19),
+- a **guardrail check before execution** (single choke point, §18),
 - **protected-data verification after every stage**: declared data files
   are hashed up front; any modification by any step fails the run.
 
@@ -494,17 +495,23 @@ One engine per running project; several engines form the pool.
 
 - **Producer threads** ask the LLM for the next candidate (prompt =
   project prompts + champion code + memory/lessons + tier-aware boost).
-- **Workers — ONE shared pool.** Worker processes are process-wide
-  (like the LLM orchestrator): every project's jobs go into a single
-  FIFO queue drained by a fixed worker set in submission order.  Twenty
-  projects at once means twenty job SUBMITTERS, never twenty worker
-  sets — the old per-engine pools scaled worker processes with the
+- **Workers — ONE shared pool, one fair queue.** Worker processes are
+  process-wide (like the LLM orchestrator): every project's jobs go into
+  ONE queue, and jobs are handed to free workers **in rotation between
+  the projects that have work waiting** — the same fairness the LLM pool
+  gives generations.  No project can hog the machine and none is starved.
+  Twenty projects at once means twenty job SUBMITTERS, never twenty
+  worker sets — the old per-engine pools scaled worker processes with the
   project count and could exhaust the machine.  A project's
   `engine.workers` is a MINIMUM the shared pool grows to; the global
-  ceiling is `workers.max_count`.  Producers apply backpressure on the
-  shared queue depth (`workers.queue_size`), so the backlog stays
-  bounded no matter how many engines are asking.  Each worker's
-  telemetry card names the project it is serving right now.
+  ceiling is `workers.max_count`, which is ALSO the bound on jobs
+  outstanding (queued + running) in TOTAL — never per project.  Each
+  worker's telemetry card names the project it is serving right now.
+
+- **Generations are never queued.** A generation is a zero-second
+  decision: the producers keep generating and only the WORKER JOS they
+  produce are queued, bounded globally as above.  A slow harness (or a
+  full backlog) can never turn into a stalled producer
 - **Worker resizes never lose jobs.** Adding workers is pure growth
   (the queue is untouched).  Removing a worker is graceful: it finishes
   its in-flight job and delivers the result, THEN exits.  A forced kill
@@ -518,13 +525,15 @@ One engine per running project; several engines form the pool.
 - **Champion selection** — weighted composite fitness with hysteresis;
   strict improvements (or factor improvements) replace the champion.
 - **Dedup** — semantic-hash duplicate candidates are skipped.
-- **Multi** (`multi: k`) — k independent LLM pipelines evolve in
-  parallel per project, sharing the champion.
+- **Parallel generations** (`parallel_gens: k`) — k generations of this
+  project may stream at once, sharing the champion.  The endpoint pool is
+  SHARED: generations rotate between projects, and no slot is reserved to
+  a project unless it sets `engine.reserve` (§9).
 - **Pause/Resume/Stop** — per project; pause drains in-flight work
   cleanly.
 - **Crash recovery** — the running pool (project + pipeline count) is
-  persisted to `engine_pool.json` (gitignored) on every start/stop/multi
-  change; the next daemon boot restores it automatically, so a restart no
+  persisted to `engine_pool.json` (gitignored) on every start/stop/
+  parallel-generations change; the next daemon boot restores it automatically, so a restart no
   longer silently kills every in-flight run. Only real projects restore
   (temp/ is wiped at startup).
 - **Workers** — add/remove/kill individually (GUI or API).
@@ -615,7 +624,7 @@ Key commands: `PROJECT`, `STATUS`, `SPEC`, `RUN [n] [FOR secs] [WITH k]
 per-generation log: prompt + raw reply + program + diff), `SMOKE`,
 `BASELINE`/`END`, `CANDIDATE`/`END`, `SNAPSHOT`, `SERVERS`, `MODELS
 [skill]` (scoreboard), `TOOLCHAINS`, `MODELCHECK`, `LOGS [pid]`,
-`AUTOFIX`, `GOAL`, `ACCEPT`, `CREATE`, `ESTIMATE`, `FORGE`, `HELP`,
+`AUTOFIX`, `GOAL`, `ACCEPT`, `CREATE`, `ESTIMATE`, `HELP`,
 `QUIT`.
 
 Reliability contract: every reply starts `OK` or `ERR`; parsing is
@@ -681,26 +690,7 @@ untouched).
 
 ---
 
-## 12. Swarm
-
-Parallel multi-agent jobs, visible in the GUI, cancellable, every output
-validated by the real pipeline:
-
-- **code_forge** — N independent improvement drafts (default 3, max 12),
-  each scored by the project's own pipeline, ranked. KAI: `FORGE [n]
-  [TIER t] [ON pid] [GOAL words]`.
-- **pipeline** — N parallel project specs, each through the full
-  suggest validation (structure + guardrails + smoke).
-- **answer** — planner → parallel executors → synthesizer for research
-  questions.
-
-Reasoning is never passed between steps (token saving); prompts come
-from the tier-aware prompt library; concurrency respects each server's
-`max_concurrent`.
-
----
-
-## 13. LLM servers & routing
+## 12. LLM servers & routing
 
 Servers are managed live in Settings (persisted in `config.json`).
 
@@ -740,41 +730,57 @@ it falls back to any usable server rather than deadlocking. Servers
 have live state: inflight counters, bans with cooldown, one-shot
 reachability probes, per-server stats (requests, failures, tps).
 
-### `multi` fills the pool across endpoints (cap-fill allocation)
+### Parallel generations SHARE the pool (one generation per project turn)
 
-An engine's `multi` pipelines are **assigned endpoint slots globally**:
-each `(engine, pipeline)` holds a sticky reservation, and reservations
-fill endpoints **in priority order up to each endpoint's real
-concurrency** — so `multi=5` with caps `(3, 1, 1)` puts 3 pipelines on
-the highest-priority endpoint, 1 on the next, 1 on the next.  A
-lower-priority endpoint (e.g. a slow qwen box) is used **once the higher
-brackets are genuinely full** — never starved to zero by accident, never
-over-subscribed.  Details:
+`engine.parallel_gens: k` says how many generations of a project may stream
+at once.  The endpoints the generations run on are **shared, always** — a
+slot is granted for ONE generation and released the moment the stream ends,
+so no project can park on an endpoint:
 
-- **The cap is REAL, not configured.** An endpoint's capacity is
-  `min(max_concurrent, detected llama.cpp /slots count)` — a box
-  configured `max_concurrent: 6` that actually has 2 slots takes 2
-  reservations, and the rest spill down the priority bracket.  If the
-  real slot count is learned AFTER reservations were made, the excess is
-  evicted on the next pick (newest first) and reassigned — the "waste 6
-  generations on a box that can only do 2" trap is impossible.
-- **Sticky across generations.** A pipeline keeps its endpoint until the
-  engine stops or shrinks `multi` (reservations are released then), or
-  until the endpoint goes banned/offline (reassigned).  A healthy-but-
-  busy held endpoint makes the pipeline WAIT, not churn.
-- **Transient saturation queues.** When every endpoint's quota is full,
-  a new pipeline QUEUES on a FIFO wait queue (like the worker pool) and
-  is woken the moment a slot frees — it never over-subscribes an
-  endpoint, so the pool's throughput is always exactly the sum of the
-  endpoints' real capacities.  The pill shows the queue as
-  `· N queued` next to the live tps.
+- **Nothing is reserved, nothing is capped (by default).** One project with
+  `parallel_gens: 6` and six endpoints runs six generations at once; ten
+  projects on the same six endpoints ROTATE their generations (a project's
+  generation, then the next project's, …), so no project is starved and no
+  project takes the pool.
+- **A freed slot is used at once.** Availability is the live
+  `acquire()` (inflight < real capacity): the moment a generation ends, the
+  waiting project streams on that endpoint — there is no "server that does
+  not work" state (queued work next to idle slots).
+- **A turn that cannot be used is spent, not held.** If the project at the
+  front of the queue cannot use the free capacity (its skill/tier filters
+  those endpoints out, or it hit its own `max_parallel`), its attempt ends
+  its turn and the project behind it is served.
+- **Endpoints are never over-subscribed.** An endpoint's real capacity is
+  `min(max_concurrent, detected llama.cpp /slots count)`; when every slot in
+  the pool is streaming, a new generation waits on the shared wait queue
+  (the pill shows `· N queued`) and is woken the moment a slot frees.
+- **Affinity, not ownership.** A generation returns to the endpoint its
+  pipeline last used while that endpoint is free (the box already holds its
+  prefill/KV); when it is busy or offline, the generation streams elsewhere.
 - **Plain callers are unaffected.** Requests without a pipeline key
-  (repair, suggest, deepwork) keep the old per-request pick.
-- **Pill tps is the current generation's speed.** A session's tps is
-  tokens / time-since-first-token — the queue wait and prefill are not
-  part of the number, so the pill shows the real decode rate of what is
-  streaming right now; a bound session in prefill shows a green LED with
+  (repair, suggest, deepwork) keep the per-request pick and are not counted
+  as a project in the service queue.
+
+- **Pill tps is the current generation's speed, measured over a 3 s
+  window.** A session's tps is (tokens in the last window) / (window): the
+  queue wait, the prefill and the EARLIER part of a long generation are not
+  part of the number, so the pill shows what is streaming RIGHT NOW and a
+  stall shows up immediately.  It reports `0.0` until a real window exists
+  (the first ~0.2 s) — never a made-up ramp, and never the wrong rate for a
+  short generation; a bound session in prefill shows a green LED with
   `prefill` instead of a misleading `0.0 tps`.
+
+#### The two OPT-IN knobs (per project, both off by default)
+
+| Spec key | Meaning |
+|---|---|
+| `engine.max_parallel: N` | **Spend cap.** This project never has more than N generations in flight at once — set it when you do not want one project to use the whole pool. A capped project still gets its turn and never blocks the others. `null`/absent = no cap. |
+| `engine.reserve: true` | **Reservation.** This project HOLDS its endpoints across generations (`parallel_gens` slots), so its pipelines always have a server and another project cannot take those slots. Released when the engine stops, pauses or shrinks `parallel_gens`, and re-assigned if the endpoint goes offline. Default `false` — the pool stays shared. |
+| `engine.max_workers: N` | **Worker spend cap.** At most N of this project's jobs run at once (its jobs still queue freely, it is never a generation throttle). `null`/absent = no cap — its jobs share the pool one per turn. |
+| `engine.reserve_workers: K` | **Guaranteed worker slots.** This project is served up to K concurrent jobs WITHOUT waiting for its turn in the rotation — for a project that must keep making progress while others flood the pool. `null`/absent = none, the pool stays shared. |
+
+Both are settable at runtime: `POST /api/engine/parallel_gens`
+`{"project_id", "parallel_gens", "max_parallel"?, "reserve"?}`.
 
 `ESTIMATE <in> [out]` (KAI) or the Servers panel shows per-server
 time/cost for a call of that size before you commit.
@@ -901,7 +907,7 @@ Every LLM call is attributed to a **(model, skill)** pair and scored:
   champion, a repair that unblocked a build, a suggest that produced a
   usable spec.
 
-Skills: `generation`, `llm_repair`, `suggest`, `swarm`, `agent`,
+Skills: `generation`, `llm_repair`, `suggest`, `agent`,
 `deepwork`, `lesson` — the scoreboard grows with real work. See it in
 Settings → LLM Servers → **Model scoreboard**, or via KAI `MODELS
 [skill]` / `GET /api/llm/modelstats`. Persisted in
@@ -925,9 +931,9 @@ models: what does what best — and what is better to just not use.
 
 ---
 
-## 14. The project agent
+## 13. The project agent
 
-"Tell KAISEN…" and the per-project Agent run a multi-turn tool loop
+The per-project Agent runs a multi-turn tool loop
 hints on malformed tool calls). Tools:
 
 - `read_spec`, `read_history`, `read_champion`, `read_lesson`,
@@ -936,12 +942,11 @@ hints on malformed tool calls). Tools:
 - `update_spec` — edit the spec; guardrail-scanned and rejected with
   reasons when invalid.
 
-Every mutation takes a snapshot first. A config-level variant
-(config agent) proposes config changes the same way.
+Every mutation takes a snapshot first.
 
 ---
 
-## 15. Snapshots
+## 14. Snapshots
 
 Every agent/config mutation snapshots the project (or the global
 config) first. Settings → Snapshots: list by reason/date, restore with
@@ -954,7 +959,7 @@ set is deliberately excluded so code already scored is never re-evaluated
 
 ---
 
-## 16. Notes
+## 15. Notes
 
 A project-wide scratchpad: color-coded notes, archive, drag-reorder,
 comments, and an LLM similarity check that flags near-duplicates.
@@ -962,7 +967,7 @@ Backed by `notes.json` (gitignored).
 
 ---
 
-## 17. Telegram & GitHub
+## 16. Telegram & GitHub
 
 - **Telegram** — new-best notifications (`🏆 NEW BEST`) with metric
   details, pinned messages, optional file upload. Env-first secrets:
@@ -973,38 +978,37 @@ Backed by `notes.json` (gitignored).
 
 ---
 
-## 18. Configuration reference
+## 17. Configuration reference
 
 `config.json` (gitignored; auto-created from defaults on first run).
 Complete reference — copy from `config.example.json`:
 
 | Key | Default | Meaning |
 |---|---|---|
-| `server.host` | `127.0.0.1` | dashboard bind (loopback; §19) |
+| `server.host` | `127.0.0.1` | dashboard bind (loopback; §18) |
 | `server.port` | `8080` | dashboard port |
-| `server.api_key` | `""` | optional server password (Bearer/Basic); empty = no auth; env `KAISEN_API_KEY` wins (§19) |
-| `llm.read_timeout` | `1200` | read timeout (s) for NON-streaming LLM calls; streaming silence is governed by `first_token_timeout` / `nodata_timeout` (§13 resilience) |
+| `server.api_key` | `""` | optional server password (Bearer/Basic); empty = no auth; env `KAISEN_API_KEY` wins (§18) |
+| `llm.read_timeout` | `1200` | read timeout (s) for NON-streaming LLM calls; streaming silence is governed by `first_token_timeout` / `nodata_timeout` (§12 resilience) |
 | `llm.connect_timeout` | `15` | connection timeout (s) |
-| `llm.nodata_timeout` | `120` | max silence BETWEEN tokens (s): a stalled decode fails after this long (§13 resilience) |
-| `llm.first_token_timeout` | `0` | max silence BEFORE the first token (s); **0 = no limit** — wait as long as prefill needs (default). Set >0 to hard-fail on a hung server (§13 resilience) |
+| `llm.nodata_timeout` | `120` | max silence BETWEEN tokens (s): a stalled decode fails after this long (§12 resilience) |
+| `llm.first_token_timeout` | `0` | max silence BEFORE the first token (s); **0 = no limit** — wait as long as prefill needs (default). Set >0 to hard-fail on a hung server (§12 resilience) |
 | `llm.max_retries` | `3` | per-server retries |
 | `llm.retry_backoff` | `2.0` | backoff multiplier |
 | `llm.reprobe_interval` | `30` | how often offline servers are re-probed in the background (s); 0 disables — a crashed llama.cpp that comes back rejoins the pool automatically |
 | `llm.max_tokens` | `0` | framework cap on UNBOUNDED generation output. **0 = no cap (default)** — call the model as-is; a thinking model legitimately emits thousands of reasoning tokens before the answer, and a low default truncates the thinking block (the reply never reaches `</think>`/the final channel, looking like no-code). The server's own context budget applies server-side. Set >0 only to enforce a hard ceiling |
 | `llm.active_ids` | `[]` | which servers are active (checkbox set) |
-| `llm.servers` | `[…]` | the server registry (§13) |
+| `llm.servers` | `[…]` | the server registry (§12) |
 | `llm.routing` | `"cost"` | `"cost"` (tier-first, default) or `"adaptive"` (best measured score-per-$ per skill, within allowlists) |
 | `llm.allowlists` | `{}` | per-skill model allowlists: `{"suggest": ["frontier-70b"], "llm_repair": ["tier:tiny"]}` — entries are server ids or `tier:<t>` |
-| `llm.servers[].budget` | `null` | per-server usage budget (optional): `{max_tokens, max_generations, reset}` — caps tokens/generations inside a reset window; an exhausted server drops out of routing until it rolls over (§13 usage budgets) |
+| `llm.servers[].budget` | `null` | per-server usage budget (optional): `{max_tokens, max_generations, reset}` — caps tokens/generations inside a reset window; an exhausted server drops out of routing until it rolls over (§12 usage budgets) |
 | `workers.default_count` | `4` | worker processes in the SHARED pool (process-wide — every project's jobs drain through the same queue) |
-| `workers.max_count` | `32` | hard global ceiling on worker processes |
-| `workers.queue_size` | `8` | bounded shared job-queue backlog (producers pause when the queue fills) |
-| `workers.affinity` | `""` | pin worker processes to cores (e.g. `"0,2"` or `"1-3"`) — empty = no pinning (§18 quiet benchmarking) |
+| `workers.max_count` | `32` | hard global ceiling on worker processes AND the bound on jobs outstanding (queued + running) across every project |
+| `workers.affinity` | `""` | pin worker processes to cores (e.g. `"0,2"` or `"1-3"`) — empty = no pinning (§17 quiet benchmarking) |
 | `workers.quiet` | `false` | run workers at lower priority (nice +10) so scorers don't starve the dashboard/LLMs |
 | `engine.start_paused` | `true` | new engines boot paused |
-| `engine.default_multi` | `1` | parallel LLM pipelines per engine at start (project > config > 1) |
-| `telegram.*` | off | notifications (§17) |
-| `safety.global_off` | `false` | requires `KAISEN_SAFETY_OFF=1` too (§19) |
+| `engine.default_parallel_gens` | `1` | parallel generations per project at start (project spec > config > 1) |
+| `telegram.*` | off | notifications (§16) |
+| `safety.global_off` | `false` | requires `KAISEN_SAFETY_OFF=1` too (§18) |
 | `autofix.build_enabled` | `true` | default for NEW projects |
 | `autofix.max_tries` | `5` | deterministic autofix turns before giving up on a build |
 | `autofix.llm_repair_max` | `3` | LLM repair passes per generation when the deterministic fixer is exhausted |
@@ -1016,11 +1020,11 @@ Complete reference — copy from `config.example.json`:
 | `debug_logs` | `true` | verbose engine logs |
 
 CLI: `--project ID`, `--no-server`, `--host`, `--port`, `--kai`,
-`--workers N`, `--multi K`.
+`--workers N`, `--parallel-gens K`.
 
 ---
 
-## 19. Safety model
+## 18. Safety model
 
 Hardcoded, absolute, and — for the one escape hatch — double-gated:
 
@@ -1051,7 +1055,7 @@ Hardcoded, absolute, and — for the one escape hatch — double-gated:
 
 ---
 
-## 20. Languages
+## 19. Languages
 
 23 languages, one registry (extensions, code fences, guard patterns):
 c, cpp, cuda, python, java, javascript, typescript, csharp, go, rust,
@@ -1070,7 +1074,7 @@ machine provisions only what it can build (preflight skip + report).
 
 ---
 
-## 21. HTTP API (for AI agents)
+## 20. HTTP API (for AI agents)
 
 The GUI itself is an HTTP client; everything is available over
 `/api/*`. Highlights:
@@ -1086,10 +1090,12 @@ The GUI itself is an HTTP client; everything is available over
 - `GET /api/active` — selected engine snapshot + `engines[]` pool
 - `POST /api/engine/switch|start|stop|pause` — pool controls
   (all take `project_id`)
-- `POST /api/engine/multi` — parallel pipelines per project
-- `POST /api/engine/workers` — runtime worker-count control:
-  `{"project_id", "count"}` resizes one engine's pool (adds idle workers,
-  or removes workers — a busy worker's in-flight job is finished or
+- `POST /api/engine/parallel_gens` — parallel generations per project
+  (`{"project_id", "parallel_gens", "max_parallel"?, "reserve"?}`)
+- `POST /api/engine/workers` — runtime worker control:
+  `{"project_id", "count", "max_workers"?, "reserve_workers"?}` — `count`
+  resizes the SHARED pool (adds idle workers, or removes workers — a busy
+  worker's in-flight job is finished or
   re-queued, never lost); `STATUS` shows the current count
 - `POST /api/active/custom_code`, `POST /api/queue/custom_code` —
   inject code as a generation
@@ -1099,7 +1105,6 @@ The GUI itself is an HTTP client; everything is available over
   `POST /api/servers/modelcheck/{sid}` (streaming-path self-check),
   `GET/POST /api/servers/budget/{sid}` (usage-budget status / config),
   `GET/PUT /api/config` — server registry + config
-- `POST /api/swarm/start`, `GET /api/swarm/{id}`, `POST …/cancel` — swarms
 - `POST /api/projects/{pid}/agent/start`, `GET /api/agent/status`,
   `POST /api/agent/cancel` — the project agent
 - `POST /api/snapshots`, `GET /api/snapshots`,
@@ -1118,7 +1123,7 @@ KAI does not expose.
 
 ---
 
-## 22. Tests & development
+## 21. Tests & development
 
 ```bash
 pip install pytest
@@ -1132,7 +1137,7 @@ it passes with no dashboard running.
 
 ---
 
-## 23. Performance notes (honest framing)
+## 22. Performance notes (honest framing)
 
 KAISEN has evolved real kernels autonomously (llama.cpp experiments): an
 AVX2 SiLU 1.6× faster than llama.cpp's own AVX2 implementation

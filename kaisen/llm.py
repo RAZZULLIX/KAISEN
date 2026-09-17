@@ -259,7 +259,7 @@ def strip_reasoning(text: str) -> str:
 class ServerHealth:
     """Reachability + ban state shared by EVERY orchestrator instance.
 
-    Engines, suggest jobs and swarm coordinators each build their own
+    Engines and suggest jobs each build their own
     ModelOrchestrator, but a dead (or slow) LLM endpoint is a fact about the
     endpoint, not about one orchestrator.  Sharing one record per server id
     means one discovery — crash, wrong key, recovery — propagates everywhere
@@ -485,7 +485,7 @@ class Server:
         self._lock = threading.Lock()
         self._inflight = 0
         # Reachability + ban live in the PROCESS-WIDE health record so every
-        # orchestrator (engines, suggest, swarm) sees one truth per endpoint.
+        # orchestrator (engines, suggest) sees one truth per endpoint.
         self._health = health_for(self.id)
         register_probe(self.id, self._probe)
         # Learned prompt-processing speed (tokens/s), from measured
@@ -507,6 +507,12 @@ class Server:
         # This is how we decide whether to strip reasoning from the content
         # return (guessing was the old way) — never pay to discover it.
         self._reasoning_format: Optional[str] = None
+        # Consecutive streams that ended WITHOUT a stop token.  A single one
+        # is usually our own abort (Stop/Pause mid-generation) or a hiccup,
+        # and marking the endpoint offline for it exiled a perfectly healthy
+        # box until the 30 s reprobe cycle finished — every pipeline then
+        # waited, the live view showed nothing and the pill read 0 tps.
+        self._stream_fails = 0
         # Number of llama.cpp slots the server actually has, once known.
         # Config max_concurrent may be HIGHER than the real slot count
         # (a single-slot box configured with max_concurrent: 2/8) — that
@@ -607,7 +613,20 @@ class Server:
         return self._health.banned
 
     def mark_online(self, ok: Optional[bool]) -> None:
+        if ok:
+            # Confirmed working: forget the transient stream failures.
+            with self._lock:
+                self._stream_fails = 0
         self._health.set_online(ok)
+
+    def note_stream_failure(self, threshold: int = 2) -> bool:
+        """Count a stream that ended without a stop token.  Returns True
+        once the endpoint has failed `threshold` times in a row — only then
+        is it treated as unreachable (one aborted stream is usually our own
+        Stop/Pause, not a dead box)."""
+        with self._lock:
+            self._stream_fails += 1
+            return self._stream_fails >= threshold
 
     @property
     def online(self) -> Optional[bool]:
@@ -1309,15 +1328,45 @@ class ModelOrchestrator:
         self._servers: Dict[str, Server] = {}
         self._active_ids: List[str] = []
         self._rr = 0
-        # Global cap-fill allocator: each (engine, pipeline) is ASSIGNED an
-        # endpoint-slot so an engine's `multi` pipelines fill the pool in
-        # priority order up to each endpoint's `max_concurrent`, instead of
-        # every request independently picking the highest-priority free box.
-        # `_pipeline_slot` maps "engine_key|pipeline_id" -> server id; the
-        # reservation is sticky per pipeline (a pipeline keeps its endpoint
-        # across generations) and is only re-assigned when its endpoint is
-        # banned/offline/saturated.
-        self._pipeline_slot: Dict[str, str] = {}
+        # PARALLEL GENERATIONS share the pool.  A slot is granted for ONE
+        # generation and released when the stream ends, so no project can
+        # park on an endpoint: `_last` maps "engine|pipeline" -> the endpoint
+        # that pipeline last streamed on (cache affinity + telemetry), and it
+        # is NOT a quota.
+        self._last: dict[str, str] = {}
+        # OPT-IN reservation (project spec `engine.reserve: true`): a
+        # reserving project HOLDS its endpoint across generations so its
+        # pipelines always have a server — `_hold` maps "engine|pipeline" ->
+        # the endpoint held for it, and those endpoint slots are off-limits
+        # to everyone else until the engine stops/pauses/shrinks.
+        self._hold: dict[str, str] = {}
+        # Generations currently in flight per engine — the number the
+        # OPTIONAL per-project cap (`engine.max_parallel`) is checked
+        # against.  No cap = the project may use every free slot.
+        self._live: dict[str, int] = {}
+        # Fair round-robin between PROJECTS (one generation per turn):
+        # `_need_order` lists the engines that have a pipeline waiting for a
+        # slot, in service order, and `_need` counts those pipelines.  Only
+        # the head may take a free slot, and every attempt sends it to the
+        # back, so ten projects on six endpoints rotate their generations
+        # instead of the first project taking the pool.
+        self._need: dict[str, int] = {}
+        self._need_order: list[str] = []
+        # Rate limit for on-demand reprobing (see _kick_reprobe).  Its OWN
+        # lock: the caller already holds `_lock`, which is not reentrant.
+        self._kick_lock = threading.Lock()
+        self._last_kick = 0.0
+        # POOL LAYOUT (cached): the active endpoints grouped into priority
+        # brackets — (tier rank, -priority) in service order, best first —
+        # each carrying its own rotation cursor, plus how many slots per
+        # endpoint are RESERVED (opt-in `engine.reserve`).  Rebuilt when the
+        # server set or the active list changes, so a pick walks a bracket
+        # from its cursor (O(1) when a slot is free) instead of sorting the
+        # whole pool on every call: hundreds of endpoints stay flat-cost.
+        self._layout: list[dict[str, Any]] = []
+        self._layout_of: dict[str, int] = {}
+        self._layout_src: tuple = ()
+        self._held_count: dict[str, int] = {}
         # Waiters park here while every slot is busy: a FIFO queue like the
         # worker pool's, woken the moment a slot frees (release() notifies)
         # instead of every pipeline polling on its own 1s timer.
@@ -1467,6 +1516,34 @@ class ModelOrchestrator:
 
 
     # -- registry management ----------------------------------------------
+    def _rebuild_layout(self) -> None:
+        """Group the ACTIVE endpoints into priority brackets, best bracket
+        first, each with its own rotation cursor.  Called with `self._lock`
+        held (config/active-list changes)."""
+        buckets: Dict[tuple, List[str]] = {}
+        for sid in self._active_ids:
+            srv = self._servers.get(sid)
+            if srv is None:
+                continue
+            buckets.setdefault((TIER_RANK.get(srv.tier, 1),
+                                -int(srv.priority or 1)), []).append(sid)
+        self._layout = [
+            {"tier": k[0], "prio": -k[1], "sids": buckets[k], "cursor": 0,
+             "pos": {sid: i for i, sid in enumerate(buckets[k])}}
+            for k in sorted(buckets)
+        ]
+        self._layout_of = {sid: i for i, br in enumerate(self._layout)
+                           for sid in br["sids"]}
+        self._layout_src = (id(self._servers), id(self._active_ids))
+
+    def _ensure_layout(self) -> None:
+        """Rebuild the cached pool layout when the server registry or the
+        active list was REPLACED (every mutating path also rebuilds
+        eagerly — this is the safety net for direct assignment).  Called
+        with `self._lock` held."""
+        if self._layout_src != (id(self._servers), id(self._active_ids)):
+            self._rebuild_layout()
+
     def _reload_servers(self) -> None:
         with self._lock:
             self._servers = {}
@@ -1478,6 +1555,7 @@ class ModelOrchestrator:
                 self._active_ids = [s for s in self._servers if self._servers[s].enabled]
                 self.cfg.llm["active_ids"] = list(self._active_ids)
                 self.cfg.save()
+            self._rebuild_layout()
 
     def persist(self) -> None:
         with self._lock:
@@ -1513,6 +1591,7 @@ class ModelOrchestrator:
             if spec.get("enabled", True):
                 if sid not in self._active_ids:
                     self._active_ids.append(sid)
+            self._rebuild_layout()
             # Learn real capabilities (slot count, reasoning_format) so the
             # concurrency cap is correct from the first call.  Background —
             # a slow endpoint must not block server add.
@@ -1525,6 +1604,7 @@ class ModelOrchestrator:
         with self._lock:
             self._servers.pop(sid, None)
             self._active_ids = [i for i in self._active_ids if i != sid]
+            self._rebuild_layout()
         self.persist()
 
     def _learn_server_caps(self, sid: str) -> None:
@@ -1560,6 +1640,7 @@ class ModelOrchestrator:
                     # probes exactly once.
                     self._servers[i].mark_online(None)
             self._active_ids = new_ids
+            self._rebuild_layout()
             # Eagerly learn capabilities for the newly-activated servers so
             # the concurrency cap engages immediately (see _learn_server_caps).
             for i in new_ids:
@@ -1657,9 +1738,13 @@ class ModelOrchestrator:
                     return out
                 except ServerError as e:
                     last_err = str(e)
-                    if e.kind in ("connection", "stream"):
-                        # Endpoint unreachable, or its process died mid-response.
+                    if e.kind == "connection":
+                        # Endpoint unreachable: it really is offline.
                         s.mark_online(False)
+                    elif e.kind == "stream":
+                        # Died mid-response: exile only if it keeps happening.
+                        if s.note_stream_failure():
+                            s.mark_online(False)
                     elif e.kind == "auth":
                         # The server ANSWERED (it is online); our key is wrong.
                         # Longer ban so the pool stops re-hammering it every
@@ -1706,8 +1791,11 @@ class ModelOrchestrator:
                     raise
                 except ServerError as e:
                     last_err = str(e)
-                    if e.kind in ("connection", "stream"):
+                    if e.kind == "connection":
                         s.mark_online(False)
+                    elif e.kind == "stream":
+                        if s.note_stream_failure():
+                            s.mark_online(False)
                     elif e.kind == "auth":
                         s.ban(seconds=300, reason=last_err)
                     else:
@@ -1736,6 +1824,8 @@ class ModelOrchestrator:
         skill: str = "unknown",
         templated: bool = False,
         engine_key: Optional[str] = None,
+        reserve: bool = False,
+        max_parallel: Optional[int] = None,
     ) -> tuple:
         """Stream a completion token-by-token (see Server.request_stream).
 
@@ -1748,24 +1838,29 @@ class ModelOrchestrator:
         LLM is streaming before it finishes.
 
         `engine_key` + `pipeline_id`: the engine's identity + producer
-        index form the global cap-fill reservation key — an engine's
-        `multi` pipelines hold sticky endpoint slots so the pool fills in
-        priority order up to each endpoint's `max_concurrent`."""
+        index identify one PARALLEL GENERATION of a project.  The pool is
+        SHARED by default — a slot is granted for this generation only, and
+        generations rotate between projects.  `reserve=True` (project spec
+        `engine.reserve`) holds the endpoint for this pipeline across
+        generations so the project always has a server; `max_parallel`
+        (project spec `engine.max_parallel`) caps how many generations this
+        project may have in flight at once."""
         retries = max_retries if max_retries is not None else int(self.cfg.llm.get("max_retries", 3))
         backoff = float(self.cfg.llm.get("retry_backoff", 2.0))
         last_err: Optional[str] = None
-        # A sticky cap-fill reservation key exists ONLY when the caller is an
-        # engine pipeline (engine_key + pipeline_id).  A bare pipeline_id
-        # (e.g. LLM repair passes pipeline_id=gen) must NOT mint a reservation
-        # — otherwise every repair permanently consumes an endpoint slot that
-        # release_pipeline_slots (keyed "engine_key|") never frees.
+        # A pool key exists ONLY when the caller is an engine pipeline
+        # (engine_key + pipeline_id).  A bare pipeline_id (e.g. LLM repair
+        # passes pipeline_id=gen) is a plain caller: it must not count
+        # against a project's generations or hold an endpoint.
         pipeline_key = f"{engine_key}|{pipeline_id}" if engine_key else None
         self._status.update({"state": "writing", "last_activity": time.time()})
         try:
             for attempt in range(retries):
                 sid = self._acquire_server(cancel_event=cancel_event, session=session,
                                            min_tier=min_tier, skill=skill,
-                                           pipeline_key=pipeline_key)
+                                           pipeline_key=pipeline_key,
+                                           reserve=reserve,
+                                           max_parallel=max_parallel)
                 s = self._servers[sid]
                 try:
                     out = s.request_stream(prompt, on_token=on_token, cancel_event=cancel_event,
@@ -1777,8 +1872,11 @@ class ModelOrchestrator:
                     raise
                 except ServerError as e:
                     last_err = str(e)
-                    if e.kind in ("connection", "stream"):
+                    if e.kind == "connection":
                         s.mark_online(False)
+                    elif e.kind == "stream":
+                        if s.note_stream_failure():
+                            s.mark_online(False)
                     elif e.kind == "auth":
                         s.ban(seconds=300, reason=last_err)
                     else:
@@ -1786,6 +1884,7 @@ class ModelOrchestrator:
                     time.sleep(backoff * (attempt + 1))
                 finally:
                     s.release()
+                    self._generation_done(pipeline_key)
                     if session is not None:
                         # UNBIND the moment the stream ends: `server_id` must
                         # mean "streaming on this server RIGHT NOW".  The
@@ -1800,6 +1899,93 @@ class ModelOrchestrator:
         finally:
             self._status.update({"state": "idle"})
 
+    # -- self-healing: probe NOW when a pipeline is about to stall ---------
+    def _kick_reprobe(self, sids: List[str]) -> None:
+        """Nothing is usable (all offline / banned / disabled) and a pipeline
+        is about to wait: re-probe those endpoints immediately instead of
+        leaving the pool dead until the periodic cycle (llm.reprobe_interval,
+        default 30 s).  Rate-limited so a stalled pool cannot become a probe
+        storm."""
+        now = time.time()
+        with self._kick_lock:
+            if now - self._last_kick < 1.0:
+                return
+            self._last_kick = now
+        threading.Thread(target=self._probe_now, args=(list(sids),),
+                         name="kaisen-probe-now", daemon=True).start()
+
+    def _probe_now(self, sids: List[str]) -> None:
+        """One-shot probe of the given endpoints (background, best effort)."""
+        for sid in sids:
+            srv = self._servers.get(sid)
+            if srv is None:
+                continue
+            try:
+                ok = bool(srv._probe())
+            except Exception:
+                ok = False
+            srv.mark_online(ok)
+            if ok:
+                with self._free_slot:
+                    self._free_slot.notify_all()
+
+    # -- fair round-robin between projects (generation granularity) --------
+    def _need_enter(self, engine_key: str) -> None:
+        """A pipeline of `engine_key` wants a slot: join the service queue."""
+        with self._lock:
+            if self._need.get(engine_key, 0) == 0 \
+                    and engine_key not in self._need_order:
+                self._need_order.append(engine_key)
+            self._need[engine_key] = self._need.get(engine_key, 0) + 1
+            with self._free_slot:
+                self._free_slot.notify_all()
+
+    def _need_exit(self, engine_key: str) -> None:
+        """A pipeline stopped waiting: leave the queue once the engine has no
+        other waiting pipeline (an engine with nothing to run must not hold
+        the pool's turn)."""
+        with self._lock:
+            n = self._need.get(engine_key, 1) - 1
+            if n > 0:
+                self._need[engine_key] = n
+                return
+            self._need.pop(engine_key, None)
+            if engine_key in self._need_order:
+                self._need_order.remove(engine_key)
+
+    def _need_turn(self, engine_key: str) -> bool:
+        """True when this engine may take a slot (head of the service queue,
+        or nobody is queueing).  Called with `self._lock` held."""
+        if not self._need_order:
+            return True
+        return self._need_order[0] == engine_key
+
+    def _need_served(self, engine_key: str) -> None:
+        """Send the engine to the back of the queue — the turn is spent by
+        the attempt, so an engine that cannot use the free capacity (spend
+        cap reached, skill/tier filters the free endpoints out) never blocks
+        the engines behind it.  Called with `self._lock` held."""
+        if engine_key in self._need_order:
+            self._need_order.remove(engine_key)
+            self._need_order.append(engine_key)
+
+    def _generation_done(self, pipeline_key: str | None) -> None:
+        """One generation finished: drop it from the per-project count and
+        wake the waiters so the freed slot is streamed on at once.  An
+        OPT-IN reservation is NOT dropped here — that is the point of a
+        reserving project."""
+        if not pipeline_key:
+            return
+        engine_key = pipeline_key.split("|", 1)[0]
+        with self._lock:
+            n = self._live.get(engine_key, 0) - 1
+            if n > 0:
+                self._live[engine_key] = n
+            else:
+                self._live.pop(engine_key, None)
+        with self._free_slot:
+            self._free_slot.notify_all()
+
     def _acquire_server(
         self,
         cancel_event: Optional[threading.Event] = None,
@@ -1807,6 +1993,8 @@ class ModelOrchestrator:
         min_tier: str = "tiny",
         skill: str = "unknown",
         pipeline_key: Optional[str] = None,
+        reserve: bool = False,
+        max_parallel: int | None = None,
     ) -> str:
         """Wait for a usable server. Busy/banned/disabled servers are
         TRANSIENT states — the caller just waits, the iteration never
@@ -1814,11 +2002,16 @@ class ModelOrchestrator:
         self._status.update({"state": "waiting", "last_activity": time.time()})
         if session is not None:
             session.waiting = True
+        engine_key = pipeline_key.split("|", 1)[0] if pipeline_key else None
+        if engine_key:
+            self._need_enter(engine_key)
         try:
             interval = float(self.cfg.llm.get("pool_wait_interval", 1.0) or 1.0)
             while True:
                 sid = self._pick_server(min_tier=min_tier, skill=skill,
-                                        pipeline_key=pipeline_key)
+                                        pipeline_key=pipeline_key,
+                                        reserve=reserve,
+                                        max_parallel=max_parallel)
                 if sid is not None:
                     # Bind the server the moment it is picked: the live
                     # modal, per-server pill stats, and active_counts all
@@ -1839,6 +2032,8 @@ class ModelOrchestrator:
                 with self._free_slot:
                     self._free_slot.wait(timeout=interval)
         finally:
+            if engine_key:
+                self._need_exit(engine_key)
             if session is not None:
                 session.waiting = False
             self._status.update({"state": "writing", "last_activity": time.time()})
@@ -1851,8 +2046,25 @@ class ModelOrchestrator:
         except Exception:
             return 0.0
 
+    @staticmethod
+    def _bracket_walk(sids: List[str], start: int, idx_last: int):
+        """Yield the endpoints of ONE priority bracket in service order:
+        the pipeline's affinity endpoint first (when it belongs to this
+        bracket), then the rest in rotation from the bracket cursor.  It is
+        a generator on purpose — the caller stops at the first endpoint that
+        accepts the slot, so the walk is O(1) while the bracket has room."""
+        if idx_last >= 0:
+            yield idx_last
+        n = len(sids)
+        for k in range(n):
+            j = (start + k) % n
+            if j != idx_last:
+                yield j
+
     def _pick_server(self, min_tier: str = "tiny", skill: Optional[str] = None,
-                     pipeline_key: Optional[str] = None) -> Optional[str]:
+                     pipeline_key: Optional[str] = None,
+                     reserve: bool = False,
+                     max_parallel: int | None = None) -> Optional[str]:
         """Routing: the LOWEST smartness tier that satisfies the
         requirement, then highest priority.  Among EQUALS (same tier +
         priority — e.g. three identical local boxes), a shared round-robin
@@ -1861,16 +2073,23 @@ class ModelOrchestrator:
         remaining ties, and busy servers fall through so the pipeline never
         stalls.
 
-        GLOBAL CAP-FILL ALLOCATION: when `pipeline_key` is given (an
-        engine's `multi` producer), the pipeline holds a STICKY endpoint
-        slot.  A new pipeline is assigned the highest-priority endpoint
-        that still has free capacity (reserved pipelines < `_capacity`),
-        so `multi=N` pipelines fill N endpoint slots in priority order and
-        lower-priority endpoints (e.g. qwen) get used once the higher ones
-        are full.  The reservation survives across generations and is
-        re-assigned only when the endpoint becomes banned/offline/
-        saturated.  A pipeline WITHOUT a key (plain callers) keeps the old
-        per-request pick.
+        PARALLEL GENERATIONS SHARE THE POOL: when `pipeline_key` is given
+        (an engine's parallel-generations producer), a slot is granted for
+        ONE generation and nothing is held between generations, so no
+        project can park on the pool.  Endpoints are chosen in priority
+        order (the higher bracket is exhausted first), then by this
+        pipeline's last endpoint (KV/prefill cache affinity), then in
+        rotation across equal boxes, so `parallel_gens=N` spreads over N
+        identical endpoints.  When several PROJECTS contend for a smaller
+        pool, the engine at the head of the service queue goes first and
+        every attempt sends it to the back: generations ROTATE between
+        projects instead of the first one taking everything.  A project
+        alone in the queue is never held back — nothing is capped per
+        project unless it opts in (`max_parallel` = spend cap,
+        `reserve` = hold its endpoints across generations).  Availability
+        is the live `acquire()` (inflight < real capacity), so a freed slot
+        is taken immediately and no endpoint idles while work waits.  A
+        pipeline WITHOUT a key (plain callers) keeps the per-request pick.
 
         Per-skill model allowlists (config llm.allowlists) HARD-filter the
         candidates — a skill can be pinned to (or banned from) specific
@@ -1878,104 +2097,128 @@ class ModelOrchestrator:
         measured score-per-dollar for THIS skill reorders the eligible
         set (min_tier still applies; cost-first stays the default)."""
         with self._lock:
+            rank_min = TIER_RANK.get(min_tier, 0)
+            if not self._active_ids:
+                return None
+
+# ── parallel generations: SHARED by default, opt-in reserve ──
+            if pipeline_key:
+                engine_key = pipeline_key.split("|", 1)[0]
+                # FAIR ROUND-ROBIN BETWEEN PROJECTS (one generation per
+                # turn): while other projects are queueing, only the head of
+                # the service queue may take a free slot.  A project ALONE
+                # in the queue is never held back — nothing is capped per
+                # project, so its generations take every slot they ask for.
+                if not self._need_turn(engine_key):
+                    return None
+                # OPTIONAL SPEND CAP (`engine.max_parallel`): at most N
+                # generations of this project in flight at once.  The
+                # attempt spends the turn, so a capped project never blocks
+                # the projects behind it.
+                if max_parallel is not None \
+                        and self._live.get(engine_key, 0) >= int(max_parallel):
+                    self._need_served(engine_key)
+                    return None
+                # OPT-IN RESERVATION (`engine.reserve: true`): this project
+                # HOLDS its endpoint across generations, so its pipelines
+                # always have a server.  Held slots are off-limits to every
+                # other project until the engine stops/pauses/shrinks.
+                if reserve:
+                    held = self._hold.get(pipeline_key)
+                    if held and held in self._servers:
+                        hs = self._servers[held]
+                        if hs.banned or not hs.enabled or hs.online is False \
+                                or TIER_RANK.get(hs.tier, 1) < rank_min:
+                            self._hold_drop(pipeline_key)   # stale hold
+                        elif hs.acquire():
+                            self._live[engine_key] = \
+                                self._live.get(engine_key, 0) + 1
+                            self._need_served(engine_key)
+                            return held
+                        else:
+                            # Held endpoint is streaming: WAIT with the hold
+                            # kept (popping would churn on every busy slot).
+                            self._need_served(engine_key)
+                            return None
+                # Endpoint choice: PRIORITY BRACKETS in order (a higher
+                # bracket is exhausted before the next), and inside the
+                # bracket this pipeline's last endpoint first (a llama.cpp
+                # box that already holds its KV keeps the prefill), then the
+                # bracket's ROTATION cursor — never stacking N generations
+                # on the first endpoint.  The bracket list is precomputed
+                # (see _rebuild_layout), so a pick costs O(1)-ish instead of
+                # sorting the whole pool: that is what lets the pool drive
+                # hundreds of endpoints.
+                self._ensure_layout()
+                last = self._last.get(pipeline_key)
+                granted: str | None = None
+                any_usable = False
+                stalled: List[str] = []
+                for br in self._layout:
+                    if br["tier"] < rank_min:
+                        continue
+                    sids = br["sids"]
+                    n_sids = len(sids)
+                    start = br["cursor"] % n_sids
+                    idx_last = br["pos"].get(last, -1)
+                    # LAZY walk: affinity first (O(1)), then the bracket's
+                    # rotation from its cursor — it touches ONE endpoint per
+                    # step and stops at the first that takes the slot, so a
+                    # free slot costs O(1) instead of an O(N) sweep.  Only a
+                    # genuinely saturated bracket walks its whole length, and
+                    # that is exactly when "no free slot" must be established.
+                    for j in self._bracket_walk(sids, start, idx_last):
+                        sid = sids[j]
+                        srv = self._servers[sid]
+                        if srv.banned or not srv.enabled or srv.online is False:
+                            stalled.append(sid)
+                            continue
+                        any_usable = True
+                        if skill and not self._allowed(sid, skill):
+                            continue
+                        if self._held_count.get(sid, 0) >= srv._capacity:
+                            continue            # reserved by another project
+                        if srv.acquire():
+                            granted = sid
+                            br["cursor"] = (j + 1) % n_sids
+                            break
+                    if granted is not None:
+                        break
+                self._need_served(engine_key)      # spend the turn
+                if granted is None:
+                    if not any_usable and stalled:
+                        # Every endpoint is offline/banned/disabled — probe
+                        # them now rather than waiting for the cycle.
+                        self._kick_reprobe(stalled)
+                    return None                    # no free slot: wait
+                self._last[pipeline_key] = granted
+                if reserve:
+                    self._hold_add(pipeline_key, granted)
+                self._live[engine_key] = self._live.get(engine_key, 0) + 1
+                self._rr += 1
+                return granted
+            # ── plain callers (repair / suggest / deepwork): per-request
+            # pick over the live candidates.  This candidate list and the
+            # shared round-robin cursor are built ONLY here — the parallel
+            # generations above work off the precomputed brackets.
             candidates = [s for s in self._active_ids
                           if s in self._servers and self._servers[s].online is not False]
             if skill:
                 candidates = [s for s in candidates if self._allowed(s, skill)]
             if not candidates:
+                # Nothing usable: probe the active set before giving up (a
+                # repair/suggest call must not sit out a 30 s reprobe cycle).
+                self._kick_reprobe(list(self._active_ids))
                 return None
-            rank_min = TIER_RANK.get(min_tier, 0)
-
-            # ── global cap-fill allocation (sticky per pipeline) ─────────
-            if pipeline_key:
-                # REBALANCE: an endpoint's REAL capacity can shrink after
-                # reservations were made (llama.cpp /slots learns 2 slots
-                # after config max_concurrent=6 reserved 6 pipelines).
-                # Pipelines beyond the real capacity would queue invisibly
-                # behind the actual slots — the "waste 6 generations on a
-                # box that can only do 2" trap.  Evict the newest excess
-                # reservations so they reassign down the priority bracket.
-                reserved = Counter(self._pipeline_slot.values())
-                for sid, cnt in list(reserved.items()):
-                    s = self._servers.get(sid)
-                    if s is None:
-                        continue
-                    excess = cnt - s._capacity
-                    if excess > 0:
-                        keys = [k for k in self._pipeline_slot
-                                if self._pipeline_slot[k] == sid]
-                        for k in keys[-excess:]:
-                            self._pipeline_slot.pop(k, None)
-                        reserved = Counter(self._pipeline_slot.values())
-                held = self._pipeline_slot.get(pipeline_key)
-                if held and held in self._servers:
-                    hs = self._servers[held]
-                    if hs.banned or not hs.enabled or hs.online is False \
-                            or TIER_RANK.get(hs.tier, 1) < rank_min:
-                        # Endpoint permanently unusable (or no longer
-                        # qualifies) -> release the stale reservation and
-                        # reassign below.
-                        self._pipeline_slot.pop(pipeline_key, None)
-                    elif hs.acquire():
-                        # Held endpoint is healthy and has a free slot:
-                        # keep the reservation, use it.
-                        self._rr += 1
-                        return held
-                    else:
-                        # Held endpoint is transiently saturated (another
-                        # pipeline is streaming on it).  WAIT with the
-                        # reservation kept — the caller polls again after
-                        # pool_wait_interval; popping here would churn the
-                        # assignment on every busy slot.
-                        return None
-                # Assign this pipeline the highest-priority endpoint that has
-                # free capacity: FILL the highest-priority bracket up to each
-                # endpoint's cap BEFORE descending to the next priority (the
-                # user spec: multi=5, caps (3,1,1) -> 3 on port1, 1 on port2,
-                # 1 on port3; multi=3 -> all 3 on port1).  Within a bracket,
-                # partially-filled endpoints take precedence (fill to
-                # completion) and a full one falls through to the next.
-                reserved = Counter(self._pipeline_slot.values())
-                ordered = sorted(
-                    candidates,
-                    key=lambda sid: (
-                        TIER_RANK.get(self._servers[sid].tier, 1),
-                        -int(self._servers[sid].priority),
-                        0 if reserved.get(sid, 0) > 0 else 1,  # fill-first
-                        -reserved.get(sid, 0),
-                    ),
-                )
-                for sid in ordered:
-                    s = self._servers[sid]
-                    if s.banned or not s.enabled or s.online is False:
-                        continue
-                    if TIER_RANK.get(s.tier, 1) < rank_min:
-                        continue
-                    # Slot quota: `multi=N` reserves N DISTINCT endpoint
-                    # slots; a reserved pipeline occupies one slot whether or
-                    # not it is streaming right now.  Live `_inflight` is
-                    # enforced at acquire() time below.
-                    if reserved.get(sid, 0) >= s._capacity:
-                        continue
-                    if s.acquire():
-                        self._pipeline_slot[pipeline_key] = sid
-                        self._rr += 1
-                        return sid
-                # Every endpoint's slot quota is full: WAIT (None) — the
-                # caller polls again.  NO acquire-only fallback here: a
-                # quota-full endpoint is exactly where an unreserved
-                # pipeline would queue invisibly behind the real slots (the
-                # "waste generations on a box that can only do 2" trap).
-                return None
-            adaptive = str(self.cfg.llm.get("routing", "cost")).lower() == "adaptive"
             # Round-robin among equals: distance of each candidate from the
             # shared cursor position in pool order.  The smallest offset is
-            # picked, and the cursor advances on every successful acquire —
-            # so identical servers (same tier/priority/cost/load) get their
-            # turns in sequence instead of the first one eating everything.
+            # picked and the cursor advances on every successful acquire, so
+            # identical servers get their turns in sequence.
             n = len(candidates)
             pos = {sid: i for i, sid in enumerate(candidates)}
             rot = lambda sid: (self._rr - pos[sid]) % n
+
+            adaptive = str(self.cfg.llm.get("routing", "cost")).lower() == "adaptive"
 
             # Measured responsiveness: among servers of the SAME tier and
             # priority, ROUND-ROBIN spreads the load so every server's slots
@@ -2061,20 +2304,44 @@ class ModelOrchestrator:
         with self._free_slot:
             self._free_slot.notify_all()
 
+    def _hold_add(self, pipeline_key: str, sid: str) -> None:
+        """Record a RESERVED endpoint for a pipeline (opt-in
+        `engine.reserve`) and keep the per-endpoint count the allocator
+        reads.  Called with `self._lock` held."""
+        if pipeline_key not in self._hold:
+            self._held_count[sid] = self._held_count.get(sid, 0) + 1
+        self._hold[pipeline_key] = sid
+
+    def _hold_drop(self, pipeline_key: str) -> None:
+        """Drop one reservation (called with `self._lock` held)."""
+        sid = self._hold.pop(pipeline_key, None)
+        if sid is not None:
+            left = self._held_count.get(sid, 1) - 1
+            if left > 0:
+                self._held_count[sid] = left
+            else:
+                self._held_count.pop(sid, None)
+
     def release_pipeline_slots(self, engine_key: str) -> None:
-        """Drop every endpoint reservation held by an engine (stop / multi
-        shrink).  Without this, a dead engine's pipelines would keep their
-        slots reserved forever and starve later assignments."""
+        """An engine stopped/paused: drop its endpoint RESERVATIONS (opt-in
+        `engine.reserve`) and affinity hints, and clear its in-flight count.
+        Without this a dead engine's reservations would keep endpoints out
+        of reach forever."""
         with self._lock:
             prefix = f"{engine_key}|"
-            for k in [k for k in self._pipeline_slot if k.startswith(prefix)]:
-                self._pipeline_slot.pop(k, None)
+            for k in [k for k in self._hold if k.startswith(prefix)]:
+                self._hold_drop(k)
+            for k in [k for k in self._last if k.startswith(prefix)]:
+                self._last.pop(k, None)
+            self._live.pop(engine_key, None)
 
     def release_pipeline_slot(self, engine_key: str, pipeline_id: int) -> None:
-        """Drop ONE pipeline's endpoint reservation (multi shrink retires
-        individual producer threads)."""
+        """One pipeline retired (parallel-generation shrink): drop its
+        reservation and affinity hint."""
         with self._lock:
-            self._pipeline_slot.pop(f"{engine_key}|{pipeline_id}", None)
+            key = f"{engine_key}|{pipeline_id}"
+            self._hold_drop(key)
+            self._last.pop(key, None)
 
     def status(self) -> Dict[str, Any]:
         with self._lock:
@@ -2088,11 +2355,16 @@ class ModelOrchestrator:
                 # advertising a mode the operator never turned on.
                 "routing": str(self.cfg.llm.get("routing", "cost") or "cost").lower(),
                 "allowlists": dict(self.cfg.llm.get("allowlists") or {}),
-                # Who holds which endpoint slot (cap-fill allocator).  Every
-                # key is "engine_key|pipeline_id"; a held slot is occupied
-                # whether or not it is streaming right now.  Exposed so the
-                # pill/dashboard can show why a pipeline waits.
-                "pipeline_slots": dict(self._pipeline_slot),
+                # Endpoint affinity per parallel generation ("engine|pid" ->
+                # last endpoint streamed on) — telemetry, not a quota.
+                "pipeline_slots": dict(self._last),
+                # OPT-IN reservations (engine.reserve): endpoints held out of
+                # the shared pool for a project.
+                "reserved_slots": dict(self._hold),
+                # Fair service queue: which project's generation waits for
+                # the next slot (head first).
+                "service_queue": list(self._need_order),
+                "live_generations": dict(self._live),
             }
 
 

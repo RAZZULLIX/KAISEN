@@ -94,7 +94,7 @@ def _session(routes):
 def _pool_active(pid, **kw):
     entry = {"project_id": pid, "name": pid, "engine_state": "running",
              "generation": 4, "paused": False, "best_fitness": 1.2,
-             "best_metrics": {}, "multi": 2, "workers": 3}
+             "best_metrics": {}, "parallel_gens": 2, "workers": 3}
     entry.update(kw)
     return {"project_id": pid, "engine_state": "running",
             "state": {"generation": 4, "paused": False,
@@ -143,7 +143,7 @@ def _run_routes(pid):
     return {
         ("GET", "/api/projects"): PROJECTS,
         ("POST", "/api/engine/switch"): {"ok": True, "active_id": pid},
-        ("POST", "/api/engine/multi"): {"multi": 3},
+        ("POST", "/api/engine/parallel_gens"): {"parallel_gens": 3},
         ("GET", "/api/active"): _pool_active(pid),
         ("GET", "/api/iterations"): [{"generation": 1}],
         ("POST", "/api/engine/pause"): {"ok": True},
@@ -168,15 +168,15 @@ def test_run_generation_target():
     assert s._run_goal["gen_target"] == 20
 
 
-def test_run_budget_and_multi():
+def test_run_budget_and_parallel_gens():
     s = _session(_run_routes("md5-speed"))
     s.project = "md5-speed"
     out = s.cmd_run("RUN FOR 300 WITH 3")
     goal = s._run_goal
     assert goal["ts_deadline"] is not None
-    assert "300s" in out and "3 LLMs" in out
-    # multi was POSTed to the engine endpoint with the k value
-    assert ("POST", "/api/engine/multi") in [c[:2] for c in s.client.calls]
+    assert "300s" in out and "3 parallel generations" in out
+    # the generation count was POSTed to the engine endpoint with the k value
+    assert ("POST", "/api/engine/parallel_gens") in [c[:2] for c in s.client.calls]
 
 
 def test_run_on_pid_overrides_session():
@@ -195,22 +195,23 @@ def test_run_requires_project():
         s.cmd_run("5")
 
 
-def _multi_pool_routes():
-    """Two-engine pool: md5-speed (multi 2) + prime-counter (multi 1)."""
+def _parallel_gens_pool_routes():
+    """Two-engine pool: md5-speed (2 parallel generations) +
+    prime-counter (1)."""
     md5 = {"project_id": "md5-speed", "name": "md5-speed",
            "engine_state": "running", "generation": 4, "paused": False,
-           "best_fitness": 1.2, "best_metrics": {}, "multi": 2, "workers": 3,
+           "best_fitness": 1.2, "best_metrics": {}, "parallel_gens": 2, "workers": 3,
            "spec_revision": "abc", "autofix": {"max_tries": 5, "repair_max": 3},
            "valid_rate": {"valid_rate": 0.5, "outcome_counts": {}}, "fuzzy_top_n": 0}
     pc = {"project_id": "prime-counter", "name": "prime-counter",
           "engine_state": "running", "generation": 9, "paused": False,
-          "best_fitness": 3.3, "best_metrics": {}, "multi": 1, "workers": 2,
+          "best_fitness": 3.3, "best_metrics": {}, "parallel_gens": 1, "workers": 2,
           "spec_revision": "def", "autofix": {"max_tries": 5, "repair_max": 3},
           "valid_rate": {"valid_rate": 0.8, "outcome_counts": {}}, "fuzzy_top_n": 0}
     routes = {
         ("GET", "/api/projects"): PROJECTS,
         ("POST", "/api/engine/switch"): {"ok": True},
-        ("POST", "/api/engine/multi"): {"multi": 2},
+        ("POST", "/api/engine/parallel_gens"): {"parallel_gens": 2},
         ("GET", "/api/active"): {"project_id": "md5-speed", "engine_state": "running",
                                   "state": {"generation": 4, "paused": False, "best": {}},
                                   "engines": [md5, pc]},
@@ -221,7 +222,7 @@ def _multi_pool_routes():
 
 
 def test_run_all_starts_every_pool_member():
-    s = _session(_multi_pool_routes())
+    s = _session(_parallel_gens_pool_routes())
     s.project = "md5-speed"
     out = s.cmd_run_all("FOR 300 WITH 2")
     assert len(s._run_goals) == 2
@@ -229,13 +230,13 @@ def test_run_all_starts_every_pool_member():
                for g in s._run_goals)
     assert s._run_goal is None
     assert "2 pool projects" in out and "budget 300s" in out
-    # every engine got its switch + multi call
+    # every engine got its switch + parallel-gens call
     switches = [c for c in s.client.calls if c[0:2] == ("POST", "/api/engine/switch")]
     assert len(switches) == 2
 
 
 def test_run_all_without_budget_is_forever():
-    s = _session(_multi_pool_routes())
+    s = _session(_parallel_gens_pool_routes())
     s.project = "md5-speed"
     s.cmd_run_all("")
     assert len(s._run_goals) == 2
@@ -243,14 +244,14 @@ def test_run_all_without_budget_is_forever():
 
 
 def test_run_all_via_run_prefix():
-    s = _session(_multi_pool_routes())
+    s = _session(_parallel_gens_pool_routes())
     s.project = "md5-speed"
     s.cmd_run("ALL FOR 300")
     assert len(s._run_goals) == 2
 
 
-def test_budget_multi_table():
-    s = _session(_multi_pool_routes())
+def test_budget_pool_table():
+    s = _session(_parallel_gens_pool_routes())
     s._run_goals = [
         {"pid": "md5-speed", "gen_target": None, "ts_deadline": time.time() + 60,
          "start_gen": 0, "start_hist": 0, "start_best": None},
@@ -263,8 +264,8 @@ def test_budget_multi_table():
     assert "prime-counter: 0 scored" in out
 
 
-def test_wait_multi_completes_all():
-    s = _session(_multi_pool_routes())
+def test_wait_all_completes_all():
+    s = _session(_parallel_gens_pool_routes())
     s._run_goals = [
         {"pid": "md5-speed", "gen_target": None, "ts_deadline": time.time() - 10,
          "start_gen": 0, "start_hist": 0, "start_best": None},
@@ -276,9 +277,9 @@ def test_wait_multi_completes_all():
     assert s._run_goals == [] and s._run_goal is None
 
 
-def test_multi_goals_persist(tmp_path, monkeypatch):
+def test_pool_goals_persist(tmp_path, monkeypatch):
     monkeypatch.setattr("kaisen.kai._RUNS_FILE", tmp_path / "kai_runs.json")
-    s = _session(_multi_pool_routes())
+    s = _session(_parallel_gens_pool_routes())
     s._run_goals = [
         {"pid": "a", "gen_target": None, "ts_deadline": None,
          "start_gen": 0, "start_hist": 0, "start_best": None},
@@ -286,7 +287,7 @@ def test_multi_goals_persist(tmp_path, monkeypatch):
          "start_gen": 0, "start_hist": 0, "start_best": None},
     ]
     s._save_run_state()
-    s2 = _session(_multi_pool_routes())
+    s2 = _session(_parallel_gens_pool_routes())
     assert len(s2._run_goals) == 2 and s2._run_goal is None
 
 
@@ -303,52 +304,6 @@ def test_status_shows_utilization_line():
     s.project = "md5-speed"
     out = s.cmd_status("")
     assert "LLM PIPELINES 2/12 (3 in flight)" in out
-
-
-# ----------------------------------------------------------------------
-# FORGE parsing (n, ON pid, TIER, GOAL words)
-# ----------------------------------------------------------------------
-
-def _forge_routes(pid):
-    return {
-        ("GET", "/api/projects"): PROJECTS,
-        ("POST", "/api/swarm/start"): {"job_id": "j1"},
-        ("GET", "/api/swarm/j1"): {"job": {"state": "done",
-                                           "results": [{"rank": 1, "ok": True,
-                                                        "metrics": {"ms": 0.1}}]}},
-    }
-
-
-def test_forge_defaults():
-    s = _session(_forge_routes("md5-speed"))
-    s.project = "md5-speed"
-    out = s.cmd_forge("GOAL make the MD5 loop faster")
-    assert "1 draft(s)" in out
-    start = next(c for c in s.client.calls if c[0:2] == ("POST", "/api/swarm/start"))
-    body = start[2]
-    assert body["kind"] == "code_forge"
-    assert body["n"] == 3 and body["min_tier"] == "tiny"
-    assert body["project_id"] == "md5-speed"
-    assert "make the MD5 loop faster" in body["request"]
-
-
-def test_forge_n_tier_on():
-    s = _session(_forge_routes("prime-counter"))
-    s.project = "md5-speed"
-    s.cmd_forge("7 TIER small ON prime-counter GOAL do better")
-    start = next(c for c in s.client.calls if c[0:2] == ("POST", "/api/swarm/start"))
-    body = start[2]
-    assert body["n"] == 7 and body["min_tier"] == "small"
-    assert body["project_id"] == "prime-counter"
-    assert body["request"] == "do better"
-
-
-def test_forge_caps_n_at_12():
-    s = _session(_forge_routes("md5-speed"))
-    s.project = "md5-speed"
-    s.cmd_forge("99 GOAL x")
-    start = next(c for c in s.client.calls if c[0:2] == ("POST", "/api/swarm/start"))
-    assert start[2]["n"] == 12
 
 
 # ----------------------------------------------------------------------
@@ -494,10 +449,10 @@ def test_run_summary_uses_goal_pid():
         # both engines in the pool; the SELECTED one is md5-speed
         md5 = {"project_id": "md5-speed", "name": "md5-speed",
                "engine_state": "running", "generation": 4, "paused": False,
-               "best_fitness": 1.2, "best_metrics": {}, "multi": 2, "workers": 3}
+               "best_fitness": 1.2, "best_metrics": {}, "parallel_gens": 2, "workers": 3}
         pc = {"project_id": "prime-counter", "name": "prime-counter",
               "engine_state": "running", "generation": 9, "paused": False,
-              "best_fitness": 3.3, "best_metrics": {}, "multi": 1, "workers": 2}
+              "best_fitness": 3.3, "best_metrics": {}, "parallel_gens": 1, "workers": 2}
         return {"project_id": "md5-speed", "engine_state": "running",
                 "state": {"generation": 4, "paused": False, "best": {}},
                 "engines": [md5, pc]}

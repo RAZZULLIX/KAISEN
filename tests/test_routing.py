@@ -262,32 +262,60 @@ def test_status_aggregates_all_servers(orch):
     assert st["active_ids"] == ["a", "b"]
 
 
-# ── global cap-fill allocator (multi pipelines spread across endpoints) ──
+# ── parallel generations: SHARED pool (default), opt-in reserve / cap ──
+#
+# A slot is granted for ONE generation and released when the stream ends, so
+# no project can park on the pool.  Endpoint choice: priority bracket ->
+# cache affinity -> rotation across equals.  When projects contend, the head
+# of the service queue goes first and spends its turn on every attempt, so
+# generations ROTATE between projects.  Two knobs are OPT-IN per project:
+# `max_parallel` (its spend cap) and `reserve` (hold its endpoints).
 
-def test_cap_fill_assigns_pipelines_priority_first(orch):
-    """The user's spec: `multi=N` pipelines fill the highest-priority
+def test_alloc_priority_brackets_fill_in_order(orch):
+    """The user's spec: parallel generations fill the highest-priority
     endpoint up to its max_concurrent, then the next priority.  port1
-    (prio 2, cap 3), port2 (prio 2, cap 1), port3 (prio 1, cap 1):
-    multi=5 -> 3 on port1, 1 on port2, 1 on port3."""
+    (prio 2, cap 3), port2 (prio 2, cap 1), port3 (prio 1, cap 1): 5
+    generations -> 3 on port1, 1 on port2, 1 on port3."""
+    from collections import Counter
     p1 = _server(orch, "p1", tier="large", priority=2, max_concurrent=3)
     p2 = _server(orch, "p2", tier="large", priority=2, max_concurrent=1)
     p3 = _server(orch, "p3", tier="large", priority=1, max_concurrent=1)
     _register(orch, p1, p2, p3)
-    assigned = {}
-    for i in range(5):
+    assigned = []
+    for i in range(5):          # five generations in flight at once
         sid = orch._pick_server("tiny", pipeline_key=f"eng|{i}")
         assert sid is not None
-        assigned[i] = sid
-    from collections import Counter
-    c = Counter(assigned.values())
+        assigned.append(sid)
+    c = Counter(assigned)
     assert c["p1"] == 3, c   # cap 3 filled first (highest priority)
     assert c["p2"] == 1, c   # then the other prio-2 endpoint
     assert c["p3"] == 1, c   # then the lower-priority endpoint
+    for sid in assigned:
+        orch.release(sid)
 
 
-def test_cap_fill_lower_priority_untouched_while_high_has_room(orch):
-    """multi lower than the high tier's capacity never spills down: the
-    lower-priority endpoint stays unused until the higher tier is FULL."""
+def test_alloc_spreads_within_an_equal_priority_bracket(orch):
+    """The field bug: parallel generations over N EQUAL endpoints (same
+    tier AND priority, cap > 1 because the real slot count is unreadable)
+    stacked on the first boxes — 6 generations landed 3+3 on two servers
+    while the other four never received a request.  Equal endpoints are
+    consumed in ROTATION: one generation each."""
+    from collections import Counter
+    servers = [_server(orch, f"eq{i}", tier="large", priority=1,
+                       max_concurrent=3) for i in range(6)]
+    _register(orch, *servers)
+    assigned = []
+    for i in range(6):
+        sid = orch._pick_server("tiny", pipeline_key=f"eng|{i}")
+        assert sid is not None
+        assigned.append(sid)
+    assert set(assigned) == {f"eq{i}" for i in range(6)}, assigned
+    assert set(Counter(assigned).values()) == {1}, Counter(assigned)
+
+
+def test_alloc_lower_priority_untouched_while_high_has_room(orch):
+    """Fewer generations than the high bracket's capacity never spills
+    down: the lower-priority endpoint stays unused until it is FULL."""
     hi = _server(orch, "hi", tier="large", priority=2, max_concurrent=6)
     lo = _server(orch, "lo", tier="large", priority=1, max_concurrent=2)
     _register(orch, hi, lo)
@@ -297,132 +325,333 @@ def test_cap_fill_lower_priority_untouched_while_high_has_room(orch):
         orch.release(sid)
 
 
-def test_cap_fill_reservation_is_sticky_across_generations(orch):
-    """A pipeline keeps its endpoint slot across successive requests
-    (sticky reservation) — the same (engine, pipeline) key returns the
-    same server while it stays healthy."""
-    a = _server(orch, "stick-a", tier="large", priority=2, max_concurrent=2)
-    b = _server(orch, "stick-b", tier="large", priority=2, max_concurrent=2)
+def test_alloc_affinity_keeps_endpoint_across_generations(orch):
+    """A generation returns to the endpoint that already holds its KV while
+    that endpoint is free (cache affinity) — the same (engine, pipeline)
+    key keeps its server instead of churning the pool."""
+    a = _server(orch, "aff-a", tier="large", priority=2, max_concurrent=2)
+    b = _server(orch, "aff-b", tier="large", priority=2, max_concurrent=2)
     _register(orch, a, b)
     first = orch._pick_server("tiny", pipeline_key="eng|0")
     orch.release(first)
     second = orch._pick_server("tiny", pipeline_key="eng|0")
     orch.release(second)
-    assert first == second        # reservation survived the release
+    assert first == second
 
 
-def test_cap_fill_stale_reservation_reassigned_when_offline(orch):
-    """When a pipeline's held endpoint goes offline, the stale reservation
-    is dropped and the pipeline is reassigned elsewhere."""
-    a = _server(orch, "reassign-a", tier="large", priority=2, max_concurrent=2)
-    b = _server(orch, "reassign-b", tier="large", priority=2, max_concurrent=2)
+def test_alloc_affinity_dropped_when_its_endpoint_goes_offline(orch):
+    """When a generation's endpoint goes offline the stale affinity hint is
+    ignored and the generation streams elsewhere."""
+    a = _server(orch, "off-a", tier="large", priority=2, max_concurrent=2)
+    b = _server(orch, "off-b", tier="large", priority=2, max_concurrent=2)
     _register(orch, a, b)
     first = orch._pick_server("tiny", pipeline_key="eng|0")
     orch.release(first)
-    # the held endpoint dies
     orch._servers[first].mark_online(False)
     second = orch._pick_server("tiny", pipeline_key="eng|0")
     orch.release(second)
     assert second != first
-    assert second in ("reassign-a", "reassign-b")
+    assert second in ("off-a", "off-b")
 
 
-def test_cap_fill_waits_on_transient_saturation(orch):
-    """A healthy-but-busy held endpoint makes the pipeline WAIT (None) with
-    the reservation kept — not churn to another endpoint."""
-    a = _server(orch, "wait-a", tier="large", priority=2, max_concurrent=2)
-    b = _server(orch, "wait-b", tier="large", priority=2, max_concurrent=2)
+def test_alloc_saturated_endpoint_falls_through_to_a_free_one(orch):
+    """A full endpoint must never make a generation WAIT while another
+    endpoint has a free slot — that is the "server that does not work"
+    symptom (queued work next to idle slots)."""
+    a = _server(orch, "sat-a", tier="large", priority=2, max_concurrent=2)
+    b = _server(orch, "sat-b", tier="large", priority=2, max_concurrent=2)
     _register(orch, a, b)
     held = orch._pick_server("tiny", pipeline_key="eng|0")
-    orch.release(held)
-    # saturate the held endpoint's capacity with OTHER pipelines' requests
+    orch.release(held)                        # eng|0's generation finished
     hs = orch._servers[held]
     hs.acquire()
-    hs.acquire()
+    hs.acquire()                              # another generation saturates it
     assert hs._inflight == hs._capacity
     got = orch._pick_server("tiny", pipeline_key="eng|0")
-    assert got is None                     # waits, does not reassign
-    assert orch._pipeline_slot.get("eng|0") == held   # reservation kept
+    assert got is not None and got != held    # streams on the free endpoint
+    orch.release(got)
+    hs.release()
+    hs.release()
 
 
-def test_cap_fill_release_slots_on_engine_stop(orch):
-    """release_pipeline_slots returns a stopped engine's reservations to
-    the pool so later engines can use the endpoints."""
-    a = _server(orch, "rel-a", tier="large", priority=2, max_concurrent=1)
-    b = _server(orch, "rel-b", tier="large", priority=2, max_concurrent=1)
-    _register(orch, a, b)
-    sid = orch._pick_server("tiny", pipeline_key="engX|0")
-    orch.release(sid)
-    assert orch._pipeline_slot.get("engX|0") == sid
-    orch.release_pipeline_slots("engX")
-    assert "engX|0" not in orch._pipeline_slot
-    # slot free again: another engine can be assigned it
-    sid2 = orch._pick_server("tiny", pipeline_key="engY|0")
-    assert sid2 is not None
-
-
-def test_cap_fill_plain_callers_keep_per_request_pick(orch):
-    """No pipeline_key (deepwork/suggest/repair) -> unchanged per-request
-    selection, no reservation recorded."""
+def test_alloc_plain_callers_keep_per_request_pick(orch):
+    """No pipeline key (deepwork/suggest/repair) -> unchanged per-request
+    selection: no affinity, no per-project generation count."""
     a = _server(orch, "plain-a", tier="large")
     b = _server(orch, "plain-b", tier="large")
     _register(orch, a, b)
     assert orch._pick_server("tiny") is not None
-    assert orch._pipeline_slot == {}
+    assert orch._last == {}
+    assert orch._live == {}
 
 
-def test_cap_fill_rebalance_when_real_slots_shrink(orch):
-    """The user's reality check: config max_concurrent=6 reserved 6
-    pipelines, then llama.cpp /slots learns the box really has 2.  The
-    excess 4 reservations MUST be evicted (newest first) and reassigned
-    down the priority bracket — never queue invisibly behind 2 real
-    slots."""
+def test_alloc_full_pool_waits_not_oversubscribes(orch):
+    """When every slot in the pool is streaming, a new generation gets None
+    (waits) — an endpoint is never oversubscribed with a queue invisible
+    behind the real slots."""
+    a = _server(orch, "full-a", tier="large", priority=2, max_concurrent=2)
+    b = _server(orch, "full-b", tier="large", priority=2, max_concurrent=1)
+    _register(orch, a, b)
+    assigned = []
+    for i in range(3):          # 2 on a + 1 on b = whole pool in flight
+        sid = orch._pick_server("tiny", pipeline_key=f"e|{i}")
+        assert sid is not None
+        assigned.append(sid)
+    assert orch._pick_server("tiny", pipeline_key="e|9") is None
+    for sid in assigned:
+        orch.release(sid)
+
+
+def test_alloc_capacity_shrink_is_respected(orch):
+    """Config max_concurrent=6, then llama.cpp /slots learns the box really
+    has 2: at most 2 generations stream on it, and the next one spills down
+    the priority bracket instead of queueing invisibly behind them."""
     hi = _server(orch, "shrink-hi", tier="large", priority=2,
                  max_concurrent=6)
     lo = _server(orch, "shrink-lo", tier="large", priority=1,
                  max_concurrent=2)
     _register(orch, hi, lo)
-    # 6 pipelines reserve hi (config claims 6 slots)
-    for i in range(6):
-        sid = orch._pick_server("tiny", pipeline_key=f"e|{i}")
-        assert sid == "shrink-hi"
-        orch.release(sid)
-    assert sum(1 for v in orch._pipeline_slot.values()
-               if v == "shrink-hi") == 6
-    # /slots learns hi really has 2 -> next pick rebalances
+    inflight = [orch._pick_server("tiny", pipeline_key=f"e|{i}")
+                for i in range(6)]
+    assert set(inflight) == {"shrink-hi"}     # 6 real slots before the shrink
     orch._servers["shrink-hi"]._detected_slots = 2
-    got = orch._pick_server("tiny", pipeline_key="e|6")
-    if got:
-        orch.release(got)
-    # hi keeps 2 reservations (the cap); the 4 excess were evicted; the
-    # new pipeline e|6 was assigned DOWN the priority bracket to lo.
-    hi_kept = sum(1 for v in orch._pipeline_slot.values()
-                  if v == "shrink-hi")
-    assert hi_kept == 2, dict(orch._pipeline_slot)
-    assert got == "shrink-lo"
-    assert sum(1 for v in orch._pipeline_slot.values()
-               if v == "shrink-lo") == 1
-    # the 4 evicted pipelines re-request later: lo's quota (2) takes e|2
-    # (e|6 already holds one); the rest WAIT, not over-queue.
-    sid = orch._pick_server("tiny", pipeline_key="e|2")
-    assert sid == "shrink-lo"
-    orch.release(sid)
-    # lo full (cap 2): the remaining evicted pipelines must WAIT
-    assert orch._pick_server("tiny", pipeline_key="e|3") is None
-    assert orch._pick_server("tiny", pipeline_key="e|4") is None
-    assert orch._pick_server("tiny", pipeline_key="e|5") is None
-
-
-def test_cap_fill_all_quotas_full_waits_not_oversubscribes(orch):
-    """When every endpoint's real quota is full, a new pipeline gets None
-    (wait) — NEVER an acquire-only fallback that queues invisibly behind
-    real slots."""
-    a = _server(orch, "full-a", tier="large", priority=2, max_concurrent=2)
-    b = _server(orch, "full-b", tier="large", priority=2, max_concurrent=1)
-    _register(orch, a, b)
-    for i in range(3):          # 2 on a + 1 on b = both quotas full
-        sid = orch._pick_server("tiny", pipeline_key=f"e|{i}")
-        assert sid is not None
+    for sid in inflight[:4]:                  # those generations end
         orch.release(sid)
-    got = orch._pick_server("tiny", pipeline_key="e|9")
-    assert got is None          # waits, no oversubscription
+    assert hi._inflight == 2
+    got = orch._pick_server("tiny", pipeline_key="e|6")
+    assert got == "shrink-lo"                 # spilling down, not queueing
+    for sid in inflight[4:]:
+        orch.release(sid)
+    orch.release(got)
+
+
+def test_projects_rotate_generations_on_a_shared_pool(orch):
+    """Two projects, two endpoints: generations ROTATE — a project that
+    already had its turn may NOT take a second slot while the other waits,
+    and a slot freed when a generation ends is streamed on at once (no
+    endpoint idles while work is queued)."""
+    ep1 = _server(orch, "ep1", tier="large", max_concurrent=1)
+    ep2 = _server(orch, "ep2", tier="large", max_concurrent=1)
+    _register(orch, ep1, ep2)
+    orch._need_enter("projA")
+    orch._need_enter("projB")
+    try:
+        first = orch._pick_server("tiny", pipeline_key="projA|0")
+        assert first == "ep1"                    # head of the queue
+        # projB waits: projA may NOT take a second slot even though ep2 is
+        # free — the fairness unit is one generation per project
+        assert orch._pick_server("tiny", pipeline_key="projA|1") is None
+        second = orch._pick_server("tiny", pipeline_key="projB|0")
+        assert {first, second} == {"ep1", "ep2"}  # one slot each
+        # saturated: nobody is oversubscribed
+        assert orch._pick_server("tiny", pipeline_key="projA|1") is None
+        assert orch._pick_server("tiny", pipeline_key="projB|1") is None
+        # projA's generation ends -> the freed slot streams again immediately
+        orch.release(first)
+        orch._generation_done("projA|0")
+        nxt = orch._pick_server("tiny", pipeline_key="projA|1")
+        assert nxt == first
+        assert orch._servers[nxt]._inflight == 1
+        orch.release(nxt)
+        orch.release(second)
+    finally:
+        orch._need_exit("projA")
+        orch._need_exit("projB")
+
+
+def test_one_project_alone_takes_every_slot(orch):
+    """Nothing is capped per project: a project alone in the queue takes
+    every endpoint its generations ask for, so parallel_gens >= slots
+    leaves no server idle."""
+    servers = [_server(orch, f"solo{i}", tier="large", max_concurrent=1)
+               for i in range(6)]
+    _register(orch, *servers)
+    orch._need_enter("solo")
+    try:
+        got = [orch._pick_server("tiny", pipeline_key=f"solo|{i}")
+               for i in range(6)]
+        assert set(got) == {f"solo{i}" for i in range(6)}   # the whole pool
+        assert orch._pick_server("tiny", pipeline_key="solo|6") is None
+        for sid in got:
+            orch.release(sid)
+    finally:
+        orch._need_exit("solo")
+
+
+def test_engine_with_nothing_waiting_stops_holding_its_turn(orch):
+    """A project whose generations stopped waiting leaves the service queue,
+    so a parked project cannot block the ones behind it."""
+    ep1 = _server(orch, "q1", tier="large", max_concurrent=1)
+    ep2 = _server(orch, "q2", tier="large", max_concurrent=1)
+    _register(orch, ep1, ep2)
+    orch._need_enter("gone")
+    orch._need_enter("here")
+    held = orch._pick_server("tiny", pipeline_key="gone|0")
+    orch._need_exit("gone")
+    assert orch._need_order == ["here"]
+    orch.release(held)
+    got = orch._pick_server("tiny", pipeline_key="here|0")
+    assert got in ("q1", "q2")                # the parked project no longer blocks
+    assert orch._servers[got]._inflight == 1
+    orch.release(got)
+    orch._need_exit("here")
+
+
+def test_ineligible_head_does_not_block_the_queue(orch):
+    """A project whose requirement filters the free capacity out (min_tier
+    above the free endpoint's tier) spends its turn on the attempt instead
+    of blocking the projects behind it."""
+    small = _server(orch, "small-ep", tier="small", max_concurrent=1)
+    _register(orch, small)
+    orch._need_enter("bigonly")
+    orch._need_enter("anytier")
+    try:
+        assert orch._pick_server("large", pipeline_key="bigonly|0") is None
+        got = orch._pick_server("tiny", pipeline_key="anytier|0")
+        assert got == "small-ep"
+        orch.release(got)
+    finally:
+        orch._need_exit("bigonly")
+        orch._need_exit("anytier")
+
+
+# ── the two OPT-IN knobs: max_parallel (spend cap) and reserve ─────────
+
+def test_max_parallel_caps_one_project_without_blocking_others(orch):
+    """OPT-IN `engine.max_parallel`: a project stops taking slots once N of
+    its generations are in flight — and, crucially, a capped project does
+    NOT hold the pool: the project behind it is served."""
+    servers = [_server(orch, f"cap{i}", tier="large", max_concurrent=1)
+               for i in range(4)]
+    _register(orch, *servers)
+    orch._need_enter("A")
+    try:
+        a0 = orch._pick_server("tiny", pipeline_key="A|0", max_parallel=2)
+        a1 = orch._pick_server("tiny", pipeline_key="A|1", max_parallel=2)
+        assert a0 and a1 and a0 != a1
+        assert orch._live["A"] == 2
+        # capped: A's third generation waits — its turn is spent on the
+        # attempt, so the queue keeps moving
+        assert orch._pick_server("tiny", pipeline_key="A|2",
+                                 max_parallel=2) is None
+        # A has nothing else waiting (its 2 generations are streaming), so it
+        # leaves the queue; B is served even though A is at its cap
+        orch._need_exit("A")
+        orch._need_enter("B")
+        got = orch._pick_server("tiny", pipeline_key="B|0")
+        assert got is not None
+        assert orch._live["B"] == 1
+        got2 = orch._pick_server("tiny", pipeline_key="B|1")
+        assert got2 is not None               # B has no cap of its own
+        # one of A's generations ends -> A may take one more (cap is a
+        # ceiling on generations IN FLIGHT, not a lifetime budget)
+        orch.release(a0)
+        orch._generation_done("A|0")
+        assert orch._live["A"] == 1
+        orch._need_exit("B")
+        orch._need_enter("A")
+        again = orch._pick_server("tiny", pipeline_key="A|3", max_parallel=2)
+        assert again is not None
+        for sid in (a1, got, got2, again):
+            orch.release(sid)
+    finally:
+        orch._need_exit("A")
+        orch._need_exit("B")
+
+
+def test_reserve_holds_endpoints_for_a_project(orch):
+    """OPT-IN `engine.reserve`: the project HOLDS its endpoints across
+    generations (its pipeline always has a server), and a non-reserving
+    project cannot take a reserved slot."""
+    ep1 = _server(orch, "res1", tier="large", max_concurrent=1)
+    ep2 = _server(orch, "res2", tier="large", max_concurrent=1)
+    _register(orch, ep1, ep2)
+    orch._need_enter("owner")
+    try:
+        first = orch._pick_server("tiny", pipeline_key="owner|0", reserve=True)
+        second = orch._pick_server("tiny", pipeline_key="owner|1", reserve=True)
+        assert {first, second} == {"res1", "res2"}
+        assert set(orch._hold.values()) == {"res1", "res2"}
+        # both generations finish, but the endpoints stay HELD
+        orch.release(first)
+        orch._generation_done("owner|0")
+        orch.release(second)
+        orch._generation_done("owner|1")
+        # the owner's pipeline comes back to ITS endpoint (no churn)
+        again = orch._pick_server("tiny", pipeline_key="owner|0", reserve=True)
+        assert again == first
+        orch.release(again)
+        orch._generation_done("owner|0")
+        # the owner has nothing waiting; a shared project still gets nothing
+        # because every slot is reserved
+        orch._need_exit("owner")
+        orch._need_enter("other")
+        assert orch._pick_server("tiny", pipeline_key="other|0") is None
+    finally:
+        orch._need_exit("owner")
+        orch._need_exit("other")
+
+
+def test_reserve_released_when_the_engine_stops(orch):
+    """Stopping/pausing a reserving project returns its endpoints to the
+    shared pool (release_pipeline_slots)."""
+    ep1 = _server(orch, "rel1", tier="large", max_concurrent=1)
+    _register(orch, ep1)
+    orch._need_enter("owner")
+    try:
+        held = orch._pick_server("tiny", pipeline_key="owner|0", reserve=True)
+        assert held == "rel1"
+        orch.release(held)
+        orch._generation_done("owner|0")
+        orch._need_exit("owner")
+        orch._need_enter("other")
+        assert orch._pick_server("tiny", pipeline_key="other|0") is None
+        orch.release_pipeline_slots("owner")
+        assert orch._hold == {}
+        got = orch._pick_server("tiny", pipeline_key="other|0")
+        assert got == "rel1"
+        orch.release(got)
+    finally:
+        orch._need_exit("owner")
+        orch._need_exit("other")
+
+
+def test_generation_counter_tracks_release(orch):
+    """`_generation_done` drops the finished generation from the project's
+    in-flight count (what `max_parallel` is checked against) and wakes the
+    waiters."""
+    a = _server(orch, "count-a", tier="large", max_concurrent=1)
+    _register(orch, a)
+    sid = orch._pick_server("tiny", pipeline_key="countA|0")
+    assert orch._live == {"countA": 1}
+    orch.release(sid)
+    orch._generation_done("countA|0")
+    assert orch._live == {}
+    assert orch._last == {"countA|0": sid}     # affinity survives the release
+
+
+def test_pool_scales_to_hundreds_of_endpoints(orch):
+    """The pool must drive hundreds of endpoints (this is what replaced the
+    old Swarm layer): N generations over N single-slot endpoints land ONE
+    per endpoint — no stacking (the twins bug) and no endpoint left idle —
+    a fully saturated pool WAITS instead of over-subscribing an endpoint,
+    and a freed slot is handed out again at once."""
+    n = 400
+    servers = [_server(orch, f"ep{i:03d}", tier="large", priority=1,
+                       max_concurrent=1) for i in range(n)]
+    _register(orch, *servers)
+
+    assigned = [orch._pick_server("tiny", pipeline_key=f"p|{i}")
+                for i in range(n)]
+    assert all(assigned), "every endpoint must take exactly one generation"
+    assert len(set(assigned)) == n, "generations must spread one per endpoint"
+
+    # saturated: a new generation waits, it never double-books an endpoint
+    assert orch._pick_server("tiny", pipeline_key="p|overflow") is None
+
+    # a finished generation frees its endpoint for the next one immediately
+    orch.release(assigned[0])
+    orch._generation_done("p|0")
+    got = orch._pick_server("tiny", pipeline_key="p|after")
+    assert got is not None, "the freed slot must be usable at once"
+    orch.release(got)

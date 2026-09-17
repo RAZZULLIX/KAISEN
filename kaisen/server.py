@@ -155,7 +155,6 @@ class DashboardServer:
         # its PROJECT selection between requests (see docs/KAI.md).
         self._kai_sessions: Dict[str, Any] = {}
         self._kai_lock = threading.Lock()
-        self._swarm = None
         self._agent_state: Dict[str, Any] = {"running": False, "turns": [], "summary": "", "tokens": "", "started": None}
         self._agent_cancel = threading.Event()
         self._setup_routes()
@@ -235,7 +234,7 @@ class DashboardServer:
             data = {
                 "selected": self._selected_project_id,
                 "engines": {
-                    pid: {"multi": getattr(eng, "_multi", 1)}
+                    pid: {"parallel_gens": getattr(eng, "_parallel_gens", 1)}
                     for pid, eng in self.engines.items()
                 },
             }
@@ -246,7 +245,8 @@ class DashboardServer:
     def _restore_engine_pool(self, registry: ProjectRegistry) -> None:
         """Bring back the pool recorded before the last shutdown/crash.
         Only real projects restore (temp/ is wiped at startup); engines
-        boot with their saved multi.  Best-effort — never blocks startup."""
+        boot with their saved parallel generations.  Best-effort — never
+        blocks startup."""
         data = load_json(self._pool_file, None)
         if not isinstance(data, dict):
             return
@@ -261,7 +261,7 @@ class DashboardServer:
                 eng = ProjectEngine(
                     project,
                     # ONE process-wide orchestrator: every engine's acquire
-                    # gate, cap-fill reservations and Server objects must be
+                    # gate, endpoint reservations and Server objects must be
                     # SHARED.  A private orchestrator per engine let N
                     # engines each run max_concurrent requests per box
                     # (N x the real capacity) and made the pill mix
@@ -271,7 +271,8 @@ class DashboardServer:
                     worker_count=project.default_workers,
                     events=EngineEvent(),
                 )
-                eng.start(multi=int(info.get("multi") or project.default_multi),
+                eng.start(parallel_gens=int(info.get("parallel_gens")
+                                            or project.default_parallel_gens),
                           paused=self._restore_paused)
                 self.engines[pid] = eng
                 restored += 1
@@ -295,6 +296,13 @@ class DashboardServer:
                 snap = eng.snapshot()
             except Exception:
                 snap = None
+            # The shared pool's per-project job depth (queued / in flight):
+            # one call, so the row reads consistently.
+            pool = getattr(eng, "pool", None)
+            try:
+                depth = pool.queue_depth() if pool is not None else {}
+            except Exception:
+                depth = {}
             row = {
                 "project_id": pid,
                 "name": eng.project.name if eng.project else pid,
@@ -303,8 +311,14 @@ class DashboardServer:
                 "paused": (st.paused if st else True),
                 "best_fitness": best.get("fitness"),
                 "best_metrics": dict(best.get("metrics") or {}),
-                "multi": getattr(eng, "_multi", 1),
-                "workers": len(getattr(getattr(eng, "pool", None), "_procs", {}) or {}),
+                "parallel_gens": getattr(eng, "_parallel_gens", 1),
+                "max_parallel": getattr(eng, "_max_parallel", None),
+                "reserve": bool(getattr(eng, "_reserve", False)),
+                "max_workers": getattr(eng, "_max_workers", None),
+                "reserve_workers": getattr(eng, "_reserve_workers", None),
+                "jobs_queued": (depth.get("queued") or {}).get(pid, 0),
+                "jobs_running": (depth.get("running") or {}).get(pid, 0),
+                "workers": len(getattr(pool, "_procs", {}) or {}),
                 "engine_error": getattr(eng, "_startup_error", ""),
             }
             if snap:
@@ -334,15 +348,6 @@ class DashboardServer:
             return self.engine.orchestrator
         return self._shared_orchestrator()
 
-    def _swarm_coord(self):
-        """Swarm coordinator, created on first use (orchestrator-backed)."""
-        if self._swarm is None:
-            from .swarm import SwarmCoordinator
-            self._swarm = SwarmCoordinator(
-                self._orch(),
-                project_getter=lambda pid: self._registry_for(pid)[0],
-            )
-        return self._swarm
 
     # ------------------------------------------------------------------ #
 
@@ -368,10 +373,6 @@ class DashboardServer:
         r.add_post("/api/projects/{pid}/smoke", self._api_project_smoke)
         r.add_post("/api/projects/{pid}/score", self._api_project_score)
         r.add_post("/api/projects/{pid}/pipeline-suggest", self._api_project_pipeline_suggest)
-        r.add_post("/api/swarm/start", self._api_swarm_start)
-        r.add_get("/api/swarm", self._api_swarm_list)
-        r.add_get("/api/swarm/{job_id}", self._api_swarm_status)
-        r.add_post("/api/swarm/{job_id}/cancel", self._api_swarm_cancel)
         r.add_post("/api/projects/{pid}/agent/start", self._api_project_agent_start)
         r.add_get("/api/agent/status", self._api_agent_status)
         r.add_post("/api/agent/cancel", self._api_agent_cancel)
@@ -382,7 +383,6 @@ class DashboardServer:
         r.add_put("/api/prefs", self._api_prefs_set)
         r.add_post("/api/prefs/reset", self._api_prefs_reset)
         r.add_get("/api/toolchains", self._api_toolchains)
-        r.add_post("/api/config-agent", self._api_config_agent)
         r.add_get("/api/projects/{pid}/activate", self._api_project_activate)
         r.add_post("/api/engine/switch", self._api_engine_switch)
         r.add_post("/api/engine/start", self._api_engine_start)
@@ -402,7 +402,7 @@ class DashboardServer:
         r.add_get("/api/iterations", self._api_iterations_legacy)
         r.add_post("/api/workers/{wid}/kill", self._api_worker_kill_legacy)
         r.add_post("/api/workers/{wid}/kill-process", self._api_worker_kill_process_legacy)
-        r.add_post("/api/engine/multi", self._api_engine_multi)
+        r.add_post("/api/engine/parallel_gens", self._api_engine_parallel_gens)
         r.add_get("/open_folder/{path:.*}", self._api_open_folder)
         r.add_get("/api/model/status", self._api_model_status_legacy)
         r.add_get("/api/models", self._api_models_legacy)
@@ -849,43 +849,6 @@ class DashboardServer:
         return _json({"ok": False, "error": result.get("error", "suggest failed")}, result.get("status", 502))
 
     # ------------------------------------------------------------------ #
-    # swarm
-    # ------------------------------------------------------------------ #
-    async def _api_swarm_start(self, request):
-        data = await request.json()
-        kind = str(data.get("kind", "answer"))
-        req_text = str(data.get("request", ""))
-        project_id = data.get("project_id")
-        if kind in ("code_forge", "pipeline") and not project_id:
-            if self.engine is not None:
-                project_id = self.engine.project.id
-            else:
-                return _json({"ok": False, "error": "project_id required (no engine running)"}, 400)
-        try:
-            n = int(data.get("n", 3))
-            max_concurrent = int(data.get("max_concurrent", 4))
-        except (TypeError, ValueError):
-            return _json({"ok": False, "error": "n/max_concurrent must be numbers"}, 400)
-        job = await asyncio.to_thread(
-            self._swarm_coord().start,
-            kind, req_text, project_id, n, max_concurrent,
-            min_tier=str(data.get("min_tier", "tiny")),
-        )
-        return _json({"ok": True, "job_id": job.id})
-
-    async def _api_swarm_list(self, request):
-        return _json({"jobs": self._swarm_coord().list_jobs()})
-
-    async def _api_swarm_status(self, request):
-        job = self._swarm_coord().get(request.match_info["job_id"])
-        if job is None:
-            return _json({"error": "job not found"}, 404)
-        return _json({"job": job.snapshot()})
-
-    async def _api_swarm_cancel(self, request):
-        ok = self._swarm_coord().cancel(request.match_info["job_id"])
-        return _json({"ok": ok}, 404 if not ok else 200)
-
     async def _api_suggest_status(self, request):
         with self._suggest_lock:
             st = dict(self._suggest_state)
@@ -1092,7 +1055,7 @@ class DashboardServer:
         return _json(await asyncio.to_thread(self._smoke_project, p))
 
     def _smoke_project(self, p) -> Dict[str, Any]:
-        """Shared smoke runner (endpoint + agent + config agent)."""
+        """Shared smoke runner (spec endpoint + project agent)."""
         import shutil as _shutil
         import tempfile as _tempfile
         from pathlib import Path as _Path
@@ -1364,84 +1327,6 @@ class DashboardServer:
                 self.engine.orchestrator._reload_servers()
         return _json({"ok": ok})
 
-    async def _api_config_agent(self, request):
-        """Natural-language reconfiguration: one validated action per call.
-        The LLM maps the user's words onto the action schema; the framework
-        validates and applies it, snapshotting first so it is revertible."""
-        from . import promptlib, snapshots, ui_prefs
-        from .agent import deep_merge, extract_json_actions
-        data = await request.json()
-        user_request = str(data.get("request", ""))
-        if not user_request.strip():
-            return _json({"ok": False, "error": "empty request"}, 400)
-        orch = self._orch()
-        tier = promptlib.detect_tier(orch.active_config)
-        pid = data.get("project_id") or (self.engine.project.id if self.engine else None)
-        project = self._registry_for(pid)[0] if pid else None
-        ctx_parts = [f"active_project: {pid or 'none'}"]
-        if project:
-            ctx_parts.append(f"project language: {project.spec.get('language')}")
-            ctx_parts.append(f"metrics: {list((project.spec.get('metrics') or {}).keys())}")
-        ctx_parts.append("prefs: " + json.dumps(ui_prefs.load_prefs())[:800])
-        prompt = promptlib.config_agent_prompt(tier, user_request, "\n".join(ctx_parts))
-        try:
-            raw = await asyncio.to_thread(lambda: orch.request_stream(prompt)[0])
-        except Exception as e:
-            return _json({"ok": False, "error": f"LLM call failed: {e}"}, 502)
-        actions = extract_json_actions(raw, key="action")
-        if not actions:
-            return _json({"ok": False, "error": "the model produced no parseable action", "raw": raw[-500:]}, 502)
-        act = actions[0]
-        action = str(act.get("action", ""))
-        if action == "set_pref":
-            err = ui_prefs.set_pref(str(act.get("path", "")), act.get("value"))
-            if err:
-                return _json({"ok": False, "error": err}, 400)
-            snapshots.take_config_snapshot(f"config-agent pref: {act.get('path')}")
-            return _json({"ok": True, "action": action, "result": "preference applied",
-                          "prefs": ui_prefs.load_prefs(), "css_vars": ui_prefs.apply_theme_to_css_vars(),
-                          "reply": f"✓ {act.get('path')} set"})
-        if action in ("edit_project", "add_metric"):
-            if not project:
-                return _json({"ok": False, "error": "no active project to edit"}, 400)
-            if action == "add_metric":
-                key = str(act.get("key", "")).strip()
-                if not key:
-                    return _json({"ok": False, "error": "add_metric needs a key"}, 400)
-                changes = {"metrics": {key: {
-                    "label": str(act.get("label", key)),
-                    "unit": str(act.get("unit", "")),
-                    "direction": str(act.get("direction", "lower")),
-                    "weight": float(act.get("weight", 1)),
-                }}}
-            else:
-                changes = act.get("changes")
-                if not isinstance(changes, dict):
-                    return _json({"ok": False, "error": "edit_project needs changes"}, 400)
-            import copy as _copy
-            new_spec = _copy.deepcopy(project.spec)
-            new_spec.pop("dir", None)
-            deep_merge(new_spec, changes)
-            new_spec["id"] = project.id
-            bad = self._scan_spec_commands(new_spec)
-            if bad:
-                return _json({"ok": False, "error": f"guardrail blocked: {bad}"}, 400)
-            snapshots.take_project_snapshot(project.path, f"config-agent {action}")
-            try:
-                self.registry.update_spec(project.id, new_spec)
-                self.registry.scan()
-            except ValueError as e:
-                return _json({"ok": False, "error": str(e)}, 400)
-            return _json({"ok": True, "action": action, "result": "project updated", "reply": f"✓ project {project.id} updated"})
-        if action == "run_smoke":
-            if not project:
-                return _json({"ok": False, "error": "no active project"}, 400)
-            res = self._smoke_project(project)
-            return _json({"ok": res.get("ok"), "action": action, "result": res,
-                          "reply": f"smoke: {'PASS' if res.get('ok') else 'FAIL'} at {res.get('stage')}"})
-        # answer / unknown → plain text reply
-        return _json({"ok": True, "action": "answer", "result": str(act.get("text", raw[:400])), "reply": str(act.get("text", raw[:400]))})
-
     async def _api_prefs_get(self, request):
         from . import ui_prefs
         return _json({"prefs": ui_prefs.load_prefs(), "defaults": ui_prefs.DEFAULTS, "css_vars": ui_prefs.apply_theme_to_css_vars()})
@@ -1493,10 +1378,11 @@ class DashboardServer:
     async def _api_engine_start(self, request):
         eng = self._require_engine()
         data = await request.json() if request.can_read_body else {}
-        multi = int(data.get("multi", 1)) if isinstance(data, dict) else 1
+        parallel_gens = (int(data.get("parallel_gens", 1))
+                         if isinstance(data, dict) else 1)
         # eng.start() boots the worker pool + producers — off the event loop
         # so a heavy boot can't freeze the dashboard.
-        await asyncio.to_thread(eng.start, multi)
+        await asyncio.to_thread(eng.start, parallel_gens)
         err = getattr(eng, "_startup_error", "")
         if err and eng.engine_state == "stopped":
             return _json({"ok": False, "state": eng.engine_state, "error": err})
@@ -1524,24 +1410,41 @@ class DashboardServer:
                       "max_candidates": max_cand})
 
     async def _api_engine_workers(self, request):
-        """Runtime resource knob: resize the SHARED worker pool to exactly
-        `count` processes (adds or removes; removing a busy worker kills its
-        in-flight evaluation). The pool is global — one queue, one worker
-        set, every project's jobs drain through it. POST
-        {"project_id", "count"}."""
+        """Runtime worker control for one project.
+
+        `count`  — resize the SHARED pool to `count` processes (adds or
+                   removes; removing a busy worker kills its in-flight
+                   evaluation). The pool is global: one scheduler, one
+                   worker set, every project's jobs drain through it.
+        `max_workers`     — OPTIONAL ceiling on THIS project's outstanding
+                            jobs (null/0 clears it).
+        `reserve_workers` — OPTIONAL jobs GUARANTEED to this project, served
+                            without waiting for its turn (null/0 clears it).
+
+        POST {"project_id"?, "count"?, "max_workers"?, "reserve_workers"?}"""
         data = await request.json() if request.can_read_body else {}
         pid = str(data.get("project_id") or "") if isinstance(data, dict) else ""
-        try:
-            count = int(data.get("count", 0)) if isinstance(data, dict) else 0
-        except (TypeError, ValueError):
-            return _json({"ok": False, "error": "count must be an integer"}, 400)
-        if count < 1:
-            return _json({"ok": False, "error": "count must be >= 1"}, 400)
         eng = self._engine_for(pid or None)
         if eng is None:
             return _json({"ok": False, "error": "no engine running"}, 400)
-        eff = await asyncio.to_thread(eng.set_workers, count)
-        return _json({"ok": True, "project_id": eng.project.id, "workers": eff})
+        out: Dict[str, Any] = {"ok": True, "project_id": eng.project.id}
+        if isinstance(data, dict) and data.get("count") is not None:
+            try:
+                count = int(data.get("count") or 0)
+            except (TypeError, ValueError):
+                return _json({"ok": False, "error": "count must be an integer"}, 400)
+            if count < 1:
+                return _json({"ok": False, "error": "count must be >= 1"}, 400)
+            out["workers"] = await asyncio.to_thread(eng.set_workers, count)
+        if isinstance(data, dict) and (data.get("max_workers") is not None
+                                       or data.get("reserve_workers") is not None):
+            out.update(await asyncio.to_thread(
+                eng.set_worker_share,
+                data.get("max_workers"), data.get("reserve_workers")))
+            self._persist_engine_pool()
+        if len(out) == 2 and out["ok"]:      # nothing asked for: report state
+            out["limits"] = eng.pool.limits(eng.project.id)
+        return _json(out)
 
     async def _api_custom_code(self, request):
         data = await request.json()
@@ -1583,7 +1486,8 @@ class DashboardServer:
                                 worker_count=project.default_workers, events=events)
             # Boot off the event loop — engine start spawns worker subprocesses.
             await asyncio.to_thread(
-                eng.start, project.default_multi, paused=self.cfg.engine_start_paused)
+                eng.start, project.default_parallel_gens,
+                paused=self.cfg.engine_start_paused)
             self.engines[pid] = eng
             started = True
             self._persist_engine_pool()
@@ -1964,9 +1868,13 @@ class DashboardServer:
             }
         return _json({
             "workers": out,
+            "queue": (eng.pool.queue_depth() if hasattr(eng.pool, "queue_depth")
+                      else {}),
             "schema": spec.get("metrics", {}),
             "telemetry": spec.get("telemetry") or {},
-            "multi": getattr(eng, "_multi", 1),
+            "parallel_gens": getattr(eng, "_parallel_gens", 1),
+            "max_parallel": getattr(eng, "_max_parallel", None),
+            "reserve": bool(getattr(eng, "_reserve", False)),
             # WHICH engine these numbers belong to — the parallel-gens
             # control targets this project, so the GUI never has to guess.
             "project_id": eng.project.id,
@@ -2158,11 +2066,12 @@ class DashboardServer:
 
 
     async def _api_llm_live_legacy(self, request):
-        if self.engine is None:
+        pool = list(self.engines.values())
+        if not pool:
             # No engine: report cleanly (200) instead of 400 spam — this is
             # polled every 150 ms while the live-output modal is open.
             return _json({"mode": "live", "generating": False, "tps": 0, "sessions": []})
-        eng = self._require_engine()
+        eng = self.engine or pool[0]
         gen = request.query.get("gen")
         if gen:
             # Archive mode: a finished generation's prompt + raw LLM reply.
@@ -2183,7 +2092,14 @@ class DashboardServer:
         llm = eng.orchestrator.status()
         tps = max([s["stats"]["last_tps"] for s in llm.get("servers", []) if s["stats"].get("last_tps")] or [0])
         by_id = {s["id"]: s for s in llm.get("servers", [])}
-        sessions = eng.sessions.snapshot()
+        # POOL-WIDE, exactly like the pill: every engine's chats, not just
+        # the selected project's.  Reading only the selected engine made the
+        # live view look dead whenever another project was the one streaming.
+        sessions: List[Dict[str, Any]] = []
+        for e in pool:
+            for sess in e.sessions.snapshot():
+                sess["project_id"] = e.project.id
+                sessions.append(sess)
         server = request.query.get("server")
         slot = request.query.get("slot")
         for s in sessions:
@@ -2202,10 +2118,21 @@ class DashboardServer:
             ]
         if slot is not None:
             sessions = [s for s in sessions if str(s.get("slot") or "") == slot]
+        # Is the pool actually able to serve anything?  A waiting chat with
+        # every endpoint offline/banned/disabled is a different story from a
+        # busy pool, and the modal must say which one it is looking at.
+        usable = 0
+        for sv in llm.get("servers", []):
+            if sv.get("enabled", True) and not sv.get("banned") \
+                    and sv.get("online") is not False:
+                usable += 1
         return _json({
             "mode": "live",
-            "generating": eng.is_generating,
+            "generating": any(e.is_generating for e in pool),
             "tps": tps,
+            "engines": [e.project.id for e in pool],
+            "usable_servers": usable,
+            "configured_servers": len(llm.get("servers", [])),
             "sessions": sessions,
         })
     async def _api_debug_logs_legacy(self, request):
@@ -2259,30 +2186,42 @@ class DashboardServer:
         ok = eng.kill_worker_process(wid)
         return _json({"ok": ok, "message": f"Worker {wid} process killed." if ok else f"Worker {wid} has no running process."})
 
-    async def _api_engine_multi(self, request):
-        """Parallel-generation pipelines.  WITHOUT a project_id the value
-        applies to EVERY active engine in the pool (the dashboard chip is a
-        pool-wide knob); WITH one, it targets that engine only."""
+    async def _api_engine_parallel_gens(self, request):
+        """PARALLEL GENERATIONS for a project — how many generations of this
+        project may stream at once (and, optionally, its spend cap and
+        reservation).  WITHOUT a project_id the count applies to EVERY
+        active engine in the pool (the dashboard chip is a pool-wide knob);
+        WITH one, it targets that engine only.
+
+        Body: {"parallel_gens": N, "project_id": "?",
+               "max_parallel": N|null, "reserve": bool}"""
         data = await request.json() if request.can_read_body else {}
         try:
-            n = int(data.get("multi", 1) or 1) if isinstance(data, dict) else 1
+            n = int(data.get("parallel_gens", 1) or 1) if isinstance(data, dict) else 1
         except (TypeError, ValueError):
             n = 1
         pid = str(data.get("project_id") or "") if isinstance(data, dict) else ""
+        max_parallel = (data.get("max_parallel") if isinstance(data, dict) else None)
+        reserve = data.get("reserve") if isinstance(data, dict) else None
         if pid:
             eng = self._engine_for(pid)
             if eng is None:
                 return _json({"ok": False, "error": "no engine running"}, 400)
-            n = eng.set_multi(n)
+            n = eng.set_parallel_gens(n)
+            if max_parallel is not None or reserve is not None:
+                eng.set_share(max_parallel=max_parallel, reserve=reserve)
             self._persist_engine_pool()
-            return _json({"ok": True, "multi": n, "project_id": eng.project.id})
+            return _json({"ok": True, "parallel_gens": n,
+                          "max_parallel": getattr(eng, "_max_parallel", None),
+                          "reserve": bool(getattr(eng, "_reserve", False)),
+                          "project_id": eng.project.id})
         if not self.engines:
             return _json({"ok": False, "error": "no engine running"}, 400)
         applied: Dict[str, int] = {}
         for eid, eng in list(self.engines.items()):
-            applied[eid] = int(eng.set_multi(n))
+            applied[eid] = int(eng.set_parallel_gens(n))
         self._persist_engine_pool()
-        return _json({"ok": True, "multi": n, "applied": applied})
+        return _json({"ok": True, "parallel_gens": n, "applied": applied})
 
     async def _api_worker_kill_legacy(self, request):
         eng = self._require_engine()

@@ -5,6 +5,138 @@ All notable changes to KAISEN are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **The live stream window showed nothing while other projects streamed.**
+  `/api/llm/live` read only the SELECTED engine's chats, while the pill
+  aggregated every engine — so with several projects running the modal sat
+  empty (and its tps read 0) even though generations were streaming
+  elsewhere.  It is pool-wide now, like the pill, and each chat names its
+  project when the pool has more than one engine.
+- **Pill tps was a wall-clock average with a 1 s floor.** It ramped up from
+  ~1 (`1.0`, `6.0`, `13.0`, `20.0` …) and was simply wrong for a short
+  generation: 40 tokens in 0.5 s read as 40 tok/s instead of 80.  TPS is now
+  measured over a 3-second WINDOW, so it shows the rate that is happening
+  now (a stall drops it immediately) and reports `0.0` until a real window
+  exists rather than inventing a number.
+- **One aborted stream exiled a healthy endpoint.** Any `stream` error
+  marked the server offline, and it stayed out of routing until the periodic
+  reprobe (30 s by default) — during which every pipeline waited: empty live
+  view, 0 tps, generations frozen.  Now a `connection` error still means
+  offline, but a stream that dies mid-response is tolerated once (it is
+  usually our own Stop/Pause aborting it) and only exiles the endpoint when
+  it repeats; a confirmed call clears the streak.
+- **A stalled pool re-probes on demand.** When no endpoint is usable
+  (all offline/banned/disabled) the pick path fires an immediate, rate
+  limited reprobe instead of waiting out the periodic cycle — measured
+  recovery after a box comes back: **1.3 s** (was up to 30 s).  The live
+  view names the state instead of looking broken: `WAITING FOR A FREE LLM
+  SLOT` vs `NO USABLE LLM SERVER — offline/banned; probing again
+  automatically`.
+
+### Changed
+
+- **Generations are never queued; worker jobs are, and fairly.** The
+  producer used to pause whenever the shared job backlog passed
+  `workers.queue_size` — a queue in front of generations, which is
+  nonsense for a zero-second decision.  The gate is gone: producers keep
+  generating, and the only thing that queues is the worker JOB they
+  produce.  The queue moved from the raw FIFO pipe into the pool itself,
+  so jobs are handed to free workers **in rotation between the projects
+  that have work waiting** — the same fairness the LLM pool gives
+  generations — instead of one project draining the whole backlog first.
+  The backlog is bounded by the TOTAL worker allowance
+  (`workers.max_count`, queued + running, never per project), so
+  `workers.queue_size` is gone from the config, the settings panel and
+  the docs; `/api/workers` reports the live queue, the dashboard's worker
+  chip shows `workers: − N +` with `q queued/allowance`, and each engine
+  row summarises how the project uses both pools (gens/cap/reserved,
+  jobs running+queued/cap/reserved).
+
+### Added
+
+- **`engine.max_workers: N`** (optional) — the most of this project's
+  jobs that may RUN at once (a machine-load cap; the project's jobs still
+  queue freely, so it never throttles generation).
+- **`engine.reserve_workers: K`** (optional) — jobs GUARANTEED to this
+  project: served without waiting for its turn in the rotation.
+  Both are settable at runtime through `POST /api/engine/workers`
+  (`{"project_id", "count"?, "max_workers"?, "reserve_workers"?}`), and
+  the server exposes the scheduler state (`queued`, `running`, `order`,
+  `limits`, `total`, `cap`).
+
+### Removed
+
+- **The Swarm feature is gone — the shared pool + KAI already drive many
+  endpoints.** Swarm was a second, redundant parallel-LLM layer on top of
+  the endpoint pool: a coordinator module with three job kinds, four
+  `/api/swarm*` endpoints, five prompt builders, the KAI `FORGE` command
+  (and its `SMITH`/`DRAFTS` aliases), the topbar `⚡ Swarm` button with its
+  modal, and the swarm JS/CSS.  Removed end to end: `kaisen/swarm.py`,
+  the coordinator + routes + handlers, `promptlib.swarm_*`,
+  `cmd_forge`/FORGE help/aliases, the UI button/modal/state/renderers, the
+  `.swarm-*`/`.sw-*` styles, the FORGE tests, and the README/MANUAL/KAI
+  documentation (the MANUAL renumbered, cross-references included).  What
+  replaces it is what already existed: `parallel_gens` generations for a
+  project and KAI's `RUN … WITH <k>` share every configured endpoint
+  through the round-robin pool, which scales to hundreds of servers (see
+  `tests/test_routing.py::test_pool_scales_to_hundreds_of_endpoints`).
+
+- **"Tell KAISEN…" (the Ctrl+K command palette) is gone.** The
+  natural-language config agent is purged end to end: the topbar nav
+  entry, the palette modal, its JS (`openPalette`/`submitPalette`/
+  `undoLastChange`, the Ctrl+K keybinding) and CSS, the
+  `POST /api/config-agent` endpoint with its handler, and the
+  `config_agent_prompt` / `CONFIG_AGENT_ACTIONS` prompt machinery.  The
+  pieces it shared stay exactly as they were: theme presets
+  (`ACCENT_PRESETS`), UI prefs, the project agent, and the snapshot store
+  that Settings → Snapshots, the project agent and KAI use.
+
+- **`multi` is now `parallel_gens` — "parallel generations" everywhere.**
+  One word, one meaning: how many generations of a project may stream at
+  once.  The old spelling is gone with no aliases: project spec
+  `engine.parallel_gens`, CLI `--parallel-gens`, config
+  `engine.default_parallel_gens`, API
+  `POST /api/engine/parallel_gens`, snapshot key `parallel_gens`,
+  `engine_pool.json` field `parallel_gens`, `set_parallel_gens()` on the
+  engine, and the dashboard chip/ids (`parallel-gens-chip`,
+  `parallel-gens-count`, `pj-parallel-gens`).  The KAI grammar is
+  unchanged (`RUN <pid> WITH <k>`), and the multi-ENGINE helpers that only
+  meant "several projects" are named for that now (`_wait_all`, the pool
+  route fixtures).
+
+- **The endpoint pool is SHARED by default — reservations are opt-in.**
+  Slots used to be reserved per pipeline and held for the pipeline's whole
+  life: a project that started first parked on every slot it could reach
+  and kept them between its own generations, so the projects behind it
+  queued while the pool sat idle, and 6 generations over 6 boxes landed
+  3+3 on two of them.  Now a slot is granted for ONE generation and
+  released when the stream ends, and a service queue rotates between the
+  projects that have generations waiting — generations alternate between
+  projects instead of one project taking the pool.  NOTHING is capped per
+  project: one project with `parallel_gens: 6` and six endpoints runs six
+  generations at once, and ten projects on six endpoints rotate.  A freed
+  slot is streamed on immediately (no queued work next to idle slots), a
+  turn that cannot be used (skill/tier filters, own cap) is spent rather
+  than held, and `acquire()` keeps every endpoint at its real capacity
+  (`min(max_concurrent, /slots count)`).
+
+### Added
+
+- **`engine.max_parallel: N`** (optional) — spend cap: the most
+  generations of THIS project in flight at once.  Absent = no cap.
+- **`engine.reserve: true`** (optional) — reservation: this project HOLDS
+  its endpoints across generations so its pipelines always have a server,
+  and other projects cannot take those slots.  Default: false, the pool
+  stays shared.  Both are settable at runtime through
+  `POST /api/engine/parallel_gens`, and the orchestrator status now exposes
+  `service_queue`, `reserved_slots` and `live_generations` for the
+  dashboard/telemetry.  Reset points only when the project asks for them;
+  affinity (a generation returning to the endpoint that holds its KV)
+  applies whenever the endpoint is free.
+
 ## [KAISEN 0.1.8-alpha (worker resize keeps the queue)] — 2026-09-10
 
 Adding or erasing workers must never touch queued jobs.

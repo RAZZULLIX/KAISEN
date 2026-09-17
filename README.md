@@ -2,7 +2,7 @@
 
 改善 AI システム — **squeeze every bit out of every watt.**
 
-An agentic AI coding harness: describe your program in words, and a swarm of
+An agentic AI coding harness: describe your program in words, and a pool of
 local (or frontier) models evolves it through a guarded pipeline —
 build → verify → score — while you watch every generation live.
 
@@ -28,16 +28,9 @@ history: [`CHANGELOG.md`](CHANGELOG.md).
    tier-aware prompts (tiny/small/large), extracts their code, guardrails
    it, and scores every candidate for real. Linters (pyflakes/ruff,
    `bash -n`, `node --check`, gcc-family) auto-fix mechanical errors.
-4. **⚡ Swarm** — parallel agents across all active servers: forge N drafts
-   (each scored by the real pipeline), build N validated pipeline designs,
-   or plan → execute → synthesize.
 5. **🧠 Agent** — a multi-turn tool loop over a project: reads the spec,
    history, champion, lessons; runs the pipeline; edits the spec with
    validation. Every mutation snapshots first.
-6. **⌘ Tell KAISEN…** (Ctrl+K) — the GUI flows with the LLM: natural
-   language reconfigures appearance, project specs, metrics, and more, as
-   one validated action at a time — always revertible.
-
 ## KAI — the LLM-facing API (optimization sidecar)
 
 KAISEN is not only a human tool. **KAI** is its line-oriented protocol that
@@ -201,7 +194,6 @@ resolution, two-stage scoring, budget semantics, and the LLM repair flow
 kaisen/
   engine.py      evolution loop (producer → workers → champion)
   pipeline.py    build → verify* → score* runner (inline steps, autofix)
-  swarm.py       parallel multi-agent coordinator (3 kinds)
   agent.py       JSON-action tool loop per project
   kai.py         KAI protocol — the LLM-facing API (stdio + /kai HTTP)
   suggest.py     guarded AI project/pipeline builder
@@ -223,7 +215,7 @@ projects/        one directory per project: project.json + harness + data
 ./install.sh                    # venv + deps; PEP-668 safe (Ubuntu 24.04/26.04, Debian 12+)
 # ...or by hand:  python3 -m venv .venv && ./.venv/bin/pip install -r requirements.txt
 ./.venv/bin/python main.py      # dashboard on http://127.0.0.1:8080 (loopback only)
-.venv/bin/python main.py --project my-project --multi 2 --workers 4
+.venv/bin/python main.py --project my-project --parallel-gens 2 --workers 4
 ```
 
 Config lives in `config.json` (gitignored; see `config.example.json`).

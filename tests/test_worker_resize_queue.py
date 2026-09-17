@@ -82,6 +82,12 @@ def _wait_busy(pool, n=1):
     return [w for w in pool.list_workers() if w.get("status") == "running"]
 
 
+def _outstanding_is_exact(pool, results, submitted):
+    """No resize may lose a job: everything submitted is either queued or
+    running — never silently dropped, never duplicated."""
+    return pool.pending() == submitted - len(results)
+
+
 def _drain(pool, results, expected, timeout=60.0):
     assert _pump_until(pool, lambda: len(results) >= expected, timeout), \
         f"only {len(results)}/{expected} results arrived"
@@ -96,10 +102,13 @@ def test_add_worker_keeps_queue(sleepy_project, registry, tmp_path):
     results = []
     pool.register("tq", result_handler=lambda m: results.append(m["job_id"]))
     _submit(pool, registry, tmp_path / "runs", 4)
-    assert _pump_until(pool, lambda: pool.pending() <= 3, 10)
+    assert _pump_until(pool, lambda: pool.pending() >= 1, 10)
     pool.add_worker()
-    # The queue must be untouched by the spawn.
-    assert pool.pending() == 3
+    # The backlog is untouched by the spawn: every submitted job is still
+    # queued or running (the new worker may pick one up — but nothing is
+    # wiped and nothing is duplicated).
+    assert _outstanding_is_exact(pool, results, 4), \
+        f"pending={pool.pending()} results={len(results)}"
     _drain(pool, results, 4)
 
 
@@ -109,13 +118,14 @@ def test_kill_busy_worker_requeues_held_job(sleepy_project, registry, tmp_path):
     results = []
     pool.register("tq", result_handler=lambda m: results.append(m["job_id"]))
     _submit(pool, registry, tmp_path / "runs", 4)
-    assert _pump_until(pool, lambda: pool.pending() <= 3, 10)
     busy = _wait_busy(pool)
     pool.kill_worker(busy[0]["worker_id"])
-    # 3 queued + the killed worker's held job back in the queue = 4.
-    assert _pump_until(pool, lambda: pool.pending() == 4, 10)
+    # The killed worker's held job is RE-QUEUED (same job_id), so the
+    # outstanding count still accounts for all four submitted jobs.
+    assert _pump_until(pool, lambda: _outstanding_is_exact(pool, results, 4), 10), \
+        f"pending={pool.pending()} results={len(results)}"
     pool.add_worker()
-    _drain(pool, results, 4)
+    _drain(pool, results, 4)      # all four arrive: nothing was lost
 
 
 def test_graceful_remove_finishes_inflight_job(sleepy_project, registry, tmp_path):
@@ -156,10 +166,12 @@ def test_shrink_to_zero_is_lossless(sleepy_project, registry, tmp_path):
     _submit(pool, registry, tmp_path / "runs", 4)
     assert _pump_until(pool, lambda: all(
         w.get("status") == "running" for w in pool.list_workers())
-        and pool.pending() == 2, 15), "both workers must be mid-job"
+        and pool.pending() >= 2, 15), "both workers must be mid-job"
     assert pool.shrink_to(0) == 0
-    # Every job (2 queued + both held) is back in the queue.
-    assert _pump_until(pool, lambda: pool.pending() == 4, 10)
+    # Every job (queued + both held) is accounted for: after a graceful
+    # retire a job can be re-queued while its result is still in flight, so
+    # this checks "nothing vanished" (the drain below proves all four run).
+    assert _pump_until(pool, lambda: pool.pending() >= 4 - len(results), 10)
     pool.start(2)
     _drain(pool, results, 4)
 
@@ -187,8 +199,8 @@ def test_crashed_worker_requeues_held_job(sleepy_project, registry, tmp_path):
     results = []
     pool.register("tq", result_handler=lambda m: results.append(m["job_id"]))
     _submit(pool, registry, tmp_path / "runs", 4)
-    assert _pump_until(pool, lambda: pool.pending() <= 3, 10)
     busy = _wait_busy(pool)
+    assert _outstanding_is_exact(pool, results, 4)
     proc = pool._procs[busy[0]["worker_id"]]
     os.kill(proc.pid, 9)  # simulate a crash
     proc.join(timeout=5)

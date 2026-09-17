@@ -42,7 +42,6 @@ body {
   gap: 16px;
 }
 
-
 .brand-mark {
   width: 32px; height: 32px; border-radius: 10px;
   background: radial-gradient(circle at top left, rgba(0,232,124,0.35), transparent 60%),
@@ -137,6 +136,7 @@ body {
 .panel-title { font-size: 14px; text-transform: uppercase; letter-spacing: 0.14em; color: var(--text2); }
 .panel-subtitle { font-size: 12px; color: var(--muted); }
 .panel-badges { display: flex; gap: 8px; align-items: center; font-size: 11px; }
+.chip-sub { color: var(--muted); font-size: 11px; margin-left: 2px; }
 .chip { padding: 4px 10px; border-radius: var(--radius-pill); border: 1px solid var(--border2); color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; }
 .chip-accent { border-color: rgba(0,232,124,0.7); color: var(--accent); background: rgba(0,232,124,0.06); }
 .tabs { display: flex; gap: 6px; font-size: 12px; margin-bottom: 8px; overflow-x: auto; padding-bottom: 8px; }
@@ -517,10 +517,6 @@ textarea { min-height: 80px; resize: vertical; }
 /* metrics chips in header kpis */
 .metric-chip .kpi-label { font-size: 9px; }
 
-
-
-
-
 /* welcome state — shown when no project is active */
 .welcome {
   display: flex;
@@ -652,6 +648,7 @@ img.footer-mark { height: 14px; width: 14px; object-fit: cover; border-radius: 3
 .fleet-dot.stopped { background: #555; }
 .fleet-name { display: inline-flex; align-items: baseline; gap: 8px; font-weight: 600; font-size: 14px; color: var(--text); }
 .fleet-id { font-size: 11px; font-family: monospace; color: var(--muted); font-weight: 400; }
+.fleet-pool { color: var(--text2); font-variant-numeric: tabular-nums; opacity: 0.85; }
 .fleet-stat { font-size: 12px; color: var(--muted); white-space: nowrap; }
 .fleet-stat b { color: var(--text2); font-weight: 600; }
 .fleet-metrics { color: var(--muted); font-family: monospace; }
@@ -952,28 +949,7 @@ select, textarea, input[type="text"], input[type="number"], input[type="password
 .parse-row .metric-key { flex: 0 0 150px; font-family: monospace; font-size: 12px; color: var(--muted); }
 .parse-row input { font-family: monospace; font-size: 12px; }
 
-/* ─────────────── swarm modal ─────────────── */
-.swarm-content { max-width: 1000px; }
-.swarm-form { display: flex; flex-direction: column; gap: 8px; border-bottom: 1px dashed var(--border2); padding-bottom: 12px; }
-.swarm-section-title { font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted); margin: 10px 0 6px; }
-.swarm-log { font-family: monospace; font-size: 12px; color: var(--text2); }
-.swarm-tasks { display: flex; flex-direction: column; gap: 5px; margin-top: 6px; }
-.sw-task { display: flex; align-items: center; gap: 9px; font-size: 12px; }
-.sw-task-state { text-transform: uppercase; font-size: 10px; letter-spacing: 0.08em; color: var(--muted); flex: 0 0 64px; }
-.sw-task-text { color: var(--text2); font-family: monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.sw-dot { width: 8px; height: 8px; border-radius: 50%; background: #333; flex: 0 0 auto; }
-.sw-dot.streaming { background: var(--accent); box-shadow: 0 0 8px rgba(0,232,124,0.7); animation: session-pulse 1.2s ease-in-out infinite; }
-.sw-dot.done { background: var(--accent); }
-.sw-dot.failed { background: var(--danger); }
-.swarm-results { display: flex; flex-direction: column; gap: 8px; }
-.sw-result { border: 1px solid var(--border2); border-radius: 10px; padding: 10px 12px; font-size: 13px; }
-.sw-result.ok { border-color: rgba(0,232,124,0.4); }
-.sw-result.bad { border-color: rgba(255,75,106,0.4); }
-.sw-result-head { color: var(--text2); display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-.sw-code { font-family: monospace; font-size: 11px; background: #0a0a0a; border: 1px solid var(--border2); border-radius: 8px; padding: 10px; max-height: 260px; overflow: auto; margin: 8px 0; white-space: pre-wrap; word-break: break-word; }
-
-/* ─────────────── live config / palette / agent / snapshots ─────────────── */
-.palette-overlay { align-items: flex-start; padding-top: 14vh; }
+/* ─────────────── live config / agent / snapshots ─────────────── */
 
 /* styled file buttons (replace the browser-default control) */
 .file-btn {
@@ -1017,25 +993,6 @@ select, textarea, input[type="text"], input[type="number"], input[type="password
   white-space: nowrap;
 }
 .attach-input:focus-visible + .attach-chip { outline: 2px solid var(--accent); }
-.palette-box {
-  background: var(--surface);
-  border: 1px solid var(--accent);
-  border-radius: 14px;
-  padding: 14px 16px;
-  width: min(720px, 92vw);
-  box-shadow: 0 0 60px rgba(0,232,124,0.15), var(--shadow-soft);
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-.palette-row { display: flex; align-items: center; gap: 12px; }
-.palette-mark { font-size: 18px; color: var(--accent); text-shadow: 0 0 12px rgba(0,232,124,0.7); }
-.palette-input {
-  flex: 1; background: transparent; border: none; outline: none;
-  color: var(--text); font-size: 15px; padding: 6px 2px;
-}
-.palette-result { border-top: 1px dashed var(--border2); padding-top: 10px; font-size: 13px; }
-.palette-actions { display: flex; gap: 8px; margin-top: 10px; }
 .agent-tool { color: var(--accent); font-family: monospace; font-weight: 600; }
 .agent-transcript { min-height: 200px; max-height: 40vh; overflow-y: auto; }
 .accent-presets { display: flex; gap: 8px; flex-wrap: wrap; }

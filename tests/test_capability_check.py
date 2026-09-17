@@ -10,7 +10,12 @@ from kaisen.llm import ModelOrchestrator, Server
 
 def _cfg_entry(**over):
     base = {
-        "id": "srv", "type": "llama", "url": "http://127.0.0.1:8502/completion",
+        # NEVER a real service port: 8502-8504 are live llama.cpp boxes on
+        # this machine, and this orchestrator starts probe threads — a test
+        # pointing at one of them hammered it with keyless requests (401
+        # storm in the server's log).  A dead loopback port is unreachable
+        # whether or not a test forgets to stub the HTTP call.
+        "id": "srv", "type": "llama", "url": "http://127.0.0.1:8611/completion",
         "tier": "small", "max_concurrent": 2, "context_window": 50000,
     }
     base.update(over)

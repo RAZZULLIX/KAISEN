@@ -4,7 +4,7 @@
 
     python main.py                          # GUI only (pick a project there)
     python main.py --project compression    # run compression + GUI
-    python main.py --project sorter --multi 2 --workers 4
+    python main.py --project sorter --parallel-gens 2 --workers 4
 """
 
 from __future__ import annotations
@@ -26,8 +26,9 @@ def main() -> None:
     parser.add_argument("--kai", action="store_true",
                         help="run the KAI protocol stdio server (LLM-facing API)")
     parser.add_argument("--workers", type=int, default=None, help="worker process count (overrides project/config defaults)")
-    parser.add_argument("--multi", type=int, default=None,
-                        help="number of generators (overrides project defaults)")
+    parser.add_argument("--parallel-gens", type=int, default=None,
+                        help="parallel generations for this project "
+                             "(overrides the project/config default)")
     args = parser.parse_args()
 
     if args.kai:
@@ -48,12 +49,14 @@ def main() -> None:
         from kaisen.engine import ProjectEngine
         project = registry.require(args.project)
         n_workers = args.workers if args.workers is not None else project.default_workers
-        multi = args.multi if args.multi is not None else project.default_multi
+        parallel_gens = (args.parallel_gens if args.parallel_gens is not None
+                         else project.default_parallel_gens)
         engine = ProjectEngine(project, orchestrator, registry, worker_count=n_workers)
-        print(f"[KAISEN] starting project '{project.id}' with {n_workers} workers, {multi} generators")
+        print(f"[KAISEN] starting project '{project.id}' with {n_workers} workers, "
+              f"{parallel_gens} parallel generations")
         # Default: start PAUSED — the user presses play.  Override in
         # config.json ("engine": {"start_paused": false}).
-        engine.start(multi=multi, paused=cfg.engine_start_paused)
+        engine.start(parallel_gens=parallel_gens, paused=cfg.engine_start_paused)
 
     if args.no_server:
         try:

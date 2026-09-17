@@ -20,7 +20,6 @@
         <div class="nav-item" data-view="projects" role="button" tabindex="0" onclick="switchView('projects')"><div class="nav-item-icon" aria-hidden="true">▣</div><span>Projects</span></div>
         <div class="nav-item" data-view="notes" role="button" tabindex="0" onclick="switchView('notes')"><div class="nav-item-icon" aria-hidden="true">📝</div><span>Notes</span></div>
         <div class="nav-item" data-view="config" role="button" tabindex="0" onclick="switchView('config')"><div class="nav-item-icon" aria-hidden="true">⚙</div><span>Settings</span></div>
-        <div class="nav-item" data-view="palette" role="button" tabindex="0" onclick="openPalette()"><div class="nav-item-icon" aria-hidden="true">⌘</div><span>Tell KAISEN…</span></div>
       </div>
       <div class="status-pill" id="status-pill" role="button" tabindex="0" aria-label="System status — expand for details and controls" onclick="toggleStatusExpand()">
         <div class="status-label" id="status-label">
@@ -69,7 +68,6 @@
           </div>
           <div class="header-actions">
 
-            <button class="btn" onclick="openSwarmModal()">⚡ Swarm</button>
             <button class="btn btn-primary" id="btn-inject-code" onclick="openCustomCodeModal()">+ Inject Code</button>
           </div>
         </header>
@@ -90,7 +88,7 @@
             <div class="panel-header">
               <div><div class="panel-title">Worker Telemetry</div><div class="panel-subtitle">Per-worker execution metrics & artifacts</div></div>
 
-              <div class="panel-badges"><span class="chip">auto-refresh: 1s</span><span class="chip" id="multi-chip">parallel gens: <button class="btn btn-sm" aria-label="Fewer parallel generations" onclick="adjustMulti(-1)" title="Fewer parallel generations">−</button> <span id="multi-count">—</span> <button class="btn btn-sm" aria-label="More parallel generations" onclick="adjustMulti(1)" title="More parallel generations">+</button></span><button class="btn btn-sm" onclick="addWorker()">+ Add Worker</button></div>
+              <div class="panel-badges"><span class="chip">auto-refresh: 1s</span><span class="chip" id="parallel-gens-chip">parallel gens: <button class="btn btn-sm" aria-label="Fewer parallel generations" onclick="adjustParallelGens(-1)" title="Fewer parallel generations">−</button> <span id="parallel-gens-count">—</span> <button class="btn btn-sm" aria-label="More parallel generations" onclick="adjustParallelGens(1)" title="More parallel generations">+</button></span><span class="chip" id="worker-pool-chip">workers: <button class="btn btn-sm" aria-label="Fewer worker processes" onclick="adjustWorkerPool(-1)" title="Fewer worker processes (a busy one finishes or is requeued)">−</button> <span id="worker-pool-count">—</span> <button class="btn btn-sm" aria-label="More worker processes" onclick="adjustWorkerPool(1)" title="More worker processes">+</button> <span class="chip-sub" id="worker-queue-count" title="jobs queued / total allowance">q —</span></span></div>
             </div>
             <div class="panel-body">
               <div class="tabs" id="worker-tabs"></div>
@@ -274,8 +272,7 @@
           <section class="panel">
             <div class="panel-header"><div class="panel-title">Workers</div></div>
             <div class="form-row"><label>Default count</label><input id="cfg-wcount" type="number"></div>
-            <div class="form-row"><label>Max count</label><input id="cfg-wmax" type="number"></div>
-            <div class="form-row"><label>Queue size</label><input id="cfg-wqueue" type="number"></div>
+            <div class="form-row"><label>Max count (total jobs outstanding)</label><input id="cfg-wmax" type="number"></div>
           </section>
           <section class="panel">
             <div class="panel-header"><div class="panel-title">LLM defaults</div></div>
@@ -375,7 +372,11 @@
             <div class="form-row"><label>Auto-fix build errors (default fixer)</label><input id="pj-autofix" type="checkbox"></div>
             <div class="form-row"><label>Custom fixer script (path, overrides default)</label><input id="pj-autofix-custom" placeholder="harness/autofix.py — optional"></div>
             <div class="form-row"><label>Startup workers (blank = config default)</label><input id="pj-workers" type="number" min="1" placeholder="config default"></div>
-            <div class="form-row"><label>Startup parallel gens (blank = config default)</label><input id="pj-multi" type="number" min="1" placeholder="config default"></div>
+            <div class="form-row"><label>Max workers — jobs in flight, blank = no cap</label><input id="pj-max-workers" type="number" min="1" placeholder="no cap (shares the whole pool)"></div>
+            <div class="form-row"><label>Reserved workers — guaranteed job slots, blank = none</label><input id="pj-reserve-workers" type="number" min="1" placeholder="none (shared pool)"></div>
+            <div class="form-row"><label>Startup parallel generations (blank = config default)</label><input id="pj-parallel-gens" type="number" min="1" placeholder="config default"></div>
+            <div class="form-row"><label>Max parallel generations — blank = no cap</label><input id="pj-max-parallel" type="number" min="1" placeholder="no cap (shares the whole pool)"></div>
+            <div class="form-row"><label>Reserve endpoints — hold this project's LLM slots</label><input id="pj-reserve" type="checkbox"></div>
           </section>
         </div>
         <div id="cfg-servers" class="tab-content" style="display: none;">
@@ -668,61 +669,6 @@
         <button class="btn btn-sm" onclick="closeSmokeModal()">Close</button>
       </div>
       <div id="smoke-content" class="console-body"></div>
-    </div>
-  </div>
-
-  <div id="swarm-modal" class="modal-overlay console-modal" role="dialog" aria-modal="true" aria-label="Swarm agents" style="display: none;">
-    <div class="console-content swarm-content">
-      <div class="console-header">
-        <span>⚡ SWARM — parallel agents</span>
-        <span id="swarm-meta" class="console-sub"></span>
-        <button class="btn btn-sm" onclick="closeSwarmModal()">Close</button>
-      </div>
-      <div class="swarm-form">
-        <div class="form-row">
-          <label>Mission</label>
-          <select id="swarm-kind">
-            <option value="code_forge" selected>Forge code — N drafts, each scored by the real pipeline</option>
-            <option value="pipeline">Build pipeline — N validated project designs</option>
-            <option value="answer">Answer — plan → parallel agents → synthesize</option>
-          </select>
-        </div>
-        <div class="form-row" id="swarm-project-row">
-          <label>Project</label>
-          <select id="swarm-project"></select>
-        </div>
-        <div class="form-row" style="align-items:flex-start;">
-          <label>Your request (plain words)</label>
-          <textarea id="swarm-request" rows="2" placeholder="e.g. find a fundamentally faster way to count primes, keep the same outputs"></textarea>
-        </div>
-        <div class="form-row">
-          <label>Agents</label>
-          <select id="swarm-n"><option>2</option><option selected>3</option><option>4</option><option>6</option></select>
-          <label style="width:auto;margin-left:20px;">Parallel slots</label>
-          <select id="swarm-conc"><option>2</option><option selected>3</option><option>4</option><option>6</option></select>
-          <button class="btn btn-primary" style="margin-left:auto;" onclick="startSwarm()">▶ Launch swarm</button>
-        </div>
-      </div>
-      <div id="swarm-live" style="display:none;">
-        <div class="swarm-section-title">LIVE</div>
-        <div id="swarm-log" class="swarm-log"></div>
-        <div id="swarm-tasks" class="swarm-tasks"></div>
-      </div>
-      <div id="swarm-results" style="display:none;">
-        <div class="swarm-section-title">RESULTS</div>
-        <div id="swarm-results-body" class="swarm-results"></div>
-      </div>
-    </div>
-  </div>
-
-  <div id="palette-modal" class="modal-overlay palette-overlay" role="dialog" aria-modal="true" aria-label="Tell KAISEN" style="display: none;">
-    <div class="palette-box">
-      <div class="palette-row">
-        <span class="palette-mark">◸△◹</span>
-        <input id="palette-input" class="palette-input" placeholder="Tell KAISEN what to change — e.g. \"make the accent orange\" or \"add a memory metric to my project\"…">
-        <button class="btn btn-primary btn-sm" onclick="submitPalette()">Do it</button>
-      </div>
-      <div id="palette-result" class="palette-result" style="display:none;"></div>
     </div>
   </div>
 

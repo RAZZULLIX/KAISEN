@@ -205,7 +205,7 @@ def test_auth_failure_does_not_mark_offline(tmp_cfg):
 # --------------------------------------------------------------------------- #
 
 def test_health_is_shared_across_orchestrators(tmp_cfg):
-    """Engines/suggest/swarm each build their own orchestrator; one discovery
+    """Engines and suggest each build their own orchestrator; one discovery
     must propagate everywhere (the old per-instance state diverged)."""
     sid = f"shared-{uuid.uuid4().hex[:8]}"
     tmp_cfg.llm["servers"] = [{"id": sid, "type": "llama",

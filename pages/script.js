@@ -247,11 +247,13 @@ function showWelcome(show) {
 async function fetchState() {
   try {
     const [wRes, sRes] = await Promise.all([api('/api/workers'), api('/api/state')]);
+    renderWorkerPool({ workers: Object.keys(wRes.workers || {}).length,
+                       queue: wRes.queue });
     if (wRes.no_engine || sRes.no_engine) return; // no engine — loadActive() owns the welcome state
     showWelcome(false);
     renderWorkers(wRes.workers || {}, wRes.schema || {}, wRes.telemetry || {}, sRes.best_metrics || {});
     document.getElementById('kpi-gen').textContent = sRes.generation ?? '--';
-    if (wRes.multi != null) syncMultiFromServer(Number(wRes.multi));
+    if (wRes.parallel_gens != null) syncParallelGens(Number(wRes.parallel_gens));
   } catch (e) {
     // One failed poll tick is not "engine gone" — never flip the
     // dashboard to the welcome picker over a transient hiccup.
@@ -259,6 +261,39 @@ async function fetchState() {
     console.error('state poll failed:', e);
   }
 }
+// worker pool chip: process count +/- (pool-wide) with the live queue depth
+let poolWorkerTarget = null;   // last server-confirmed pool size
+let poolQueueDepth = null;     // queued jobs (shared scheduler)
+
+function renderWorkerPool(pool) {
+  const n = document.getElementById('worker-pool-count');
+  const q = document.getElementById('worker-queue-count');
+  if (pool && pool.workers != null) {
+    poolWorkerTarget = Number(pool.workers);
+    if (n) n.textContent = poolWorkerTarget;
+  }
+  if (pool && pool.queue) {
+    const queued = Number(pool.queue.total || 0);
+    const cap = Number(pool.queue.cap || 0);
+    poolQueueDepth = queued;
+    if (q) q.textContent = `q ${queued}/${cap}`;
+    if (q) q.title = `${queued} job(s) queued or running — the pool never queues more than the ${cap} total workers; generations are never queued`;
+  }
+}
+
+async function adjustWorkerPool(delta) {
+  const target = Math.max(1, (poolWorkerTarget ?? 1) + delta);
+  try {
+    // Resize the SHARED pool globally (any engine can carry the call).
+    const r = await api('/api/engine/workers', {
+      method: 'POST', body: JSON.stringify({ count: target }) });
+    if (r && r.error) throw new Error(r.error);
+    poolWorkerTarget = Number(r.workers ?? target);
+    renderWorkerPool({ workers: poolWorkerTarget });
+    toast(`Worker pool: ${poolWorkerTarget} process(es)`);
+  } catch (e) { systemAlert('Worker resize failed: ' + e.message); }
+}
+
 async function addWorker() {
   try {
     await api('/api/workers/add', { method: 'POST' });
@@ -266,60 +301,60 @@ async function addWorker() {
   } catch (e) { systemAlert('Add worker failed: ' + e.message); }
 }
 // ---- parallel gens (+/-): optimistic UI, coalesced absolute sends ----
-let multiValue = null;    // unknown until the first server sync — never fake 1
-let multiServer = null;   // last server-confirmed value
-let multiSending = false;
-let multiProjects = 0;    // how many engines the last pool-wide set touched
+let gensValue = null;     // unknown until the first server sync — never fake 1
+let gensServer = null;    // last server-confirmed value
+let gensSending = false;
+let gensProjects = 0;     // how many engines the last pool-wide set touched
 
-function renderMulti() {
-  const el = document.getElementById('multi-count');
-  if (el) el.textContent = multiValue ?? '—';
-  const chip = document.getElementById('multi-chip');
+function renderParallelGens() {
+  const el = document.getElementById('parallel-gens-count');
+  if (el) el.textContent = gensValue ?? '—';
+  const chip = document.getElementById('parallel-gens-chip');
   if (chip) {
-    chip.querySelectorAll('button').forEach(b => { b.disabled = multiValue === null; });
-    chip.title = multiProjects
-      ? `Parallel generations — pool-wide (${multiProjects} active projects)`
+    chip.querySelectorAll('button').forEach(b => { b.disabled = gensValue === null; });
+    chip.title = gensProjects
+      ? `Parallel generations — pool-wide (${gensProjects} active projects)`
       : 'Parallel generations — pool-wide';
   }
 }
 
-function syncMultiFromServer(n) {
+function syncParallelGens(n) {
   // Adopt the server value only when no local change is pending,
   // so the 1s poll never clobbers an optimistic in-flight click.
-  if (multiSending || multiValue !== multiServer) return;
-  multiValue = multiServer = n;
-  renderMulti();
+  if (gensSending || gensValue !== gensServer) return;
+  gensValue = gensServer = n;
+  renderParallelGens();
 }
 
-async function pushMulti() {
-  if (multiSending || multiValue === multiServer) return;
-  multiSending = true;
-  const target = multiValue;
+async function pushParallelGens() {
+  if (gensSending || gensValue === gensServer) return;
+  gensSending = true;
+  const target = gensValue;
   try {
-    const r = await api('/api/engine/multi', { method: 'POST', body: JSON.stringify({ multi: target }) });
-    if (!r || !r.ok || r.multi == null) throw new Error('multi request rejected');
-    const n = Number(r.multi);
-    if (n !== target) { multiValue = n; renderMulti(); } // server clamped — reflect truth
-    if (r.applied) { multiProjects = Object.keys(r.applied).length; }
-    if (multiValue !== multiServer) {
+    const r = await api('/api/engine/parallel_gens', { method: 'POST', body: JSON.stringify({ parallel_gens: target }) });
+    if (!r || !r.ok || r.parallel_gens == null) throw new Error('parallel_gens request rejected');
+    const n = Number(r.parallel_gens);
+    if (n !== target) { gensValue = n; renderParallelGens(); } // server clamped — reflect truth
+    if (r.applied) { gensProjects = Object.keys(r.applied).length; }
+    if (gensValue !== gensServer) {
       // Clicks arrived while this round-trip was in flight: send the latest.
-      multiSending = false;
-      pushMulti();
+      gensSending = false;
+      pushParallelGens();
       return;
     }
   } catch (e) {
     // Server didn't take it: snap back to the last confirmed value.
     console.error(e);
-    multiValue = multiServer;
-    renderMulti();
+    gensValue = gensServer;
+    renderParallelGens();
   }
-  multiSending = false;
+  gensSending = false;
 }
 
-function adjustMulti(delta) {
-  multiValue = Math.max(1, (multiValue ?? multiServer ?? 1) + delta);
-  renderMulti();
-  pushMulti();
+function adjustParallelGens(delta) {
+  gensValue = Math.max(1, (gensValue ?? gensServer ?? 1) + delta);
+  renderParallelGens();
+  pushParallelGens();
 }
 async function killWorkerProcess(id) {
   systemConfirm(`Kill the process worker ${id} is currently running? The worker survives and returns to idle.`, async () => {
@@ -329,7 +364,6 @@ async function killWorkerProcess(id) {
     } catch (e) { console.error(e); }
   });
 }
-
 
 
 // ------------------------------------------------------------------ //
@@ -665,6 +699,7 @@ function renderFleet(engines) {
       <span class="fleet-dot ${stateCls}"></span>
       <span class="fleet-name">${escapeHtml(name)}<span class="fleet-id">${escapeHtml(String(id))}</span></span>
       <span class="fleet-stat">gen <b>${escapeHtml(String(gen))}</b></span>
+      <span class="fleet-stat fleet-pool" title="${escapeHtml(poolTitle(e))}">${poolBadges(e)}</span>
       <span class="fleet-stat">best <b>${escapeHtml(best)}</b>${metricBits ? ' <span class="fleet-metrics">' + metricBits + '</span>' : ''}</span>
       ${e.engine_error ? `<span class="fleet-error" title="${escapeHtml(e.engine_error)}">${escapeHtml(e.engine_error)}</span>` : ''}
       <span class="fleet-actions">
@@ -674,6 +709,33 @@ function renderFleet(engines) {
       </span>`;
     c.appendChild(row);
   });
+}
+
+// Compact, tooltip-explained badges for how THIS project uses the shared
+// pools: gens (parallel generations, cap, reserved endpoints) and jobs
+// (queued/running worker jobs, job cap, reserved workers).
+function poolBadges(e) {
+  const bits = [];
+  const g = e.parallel_gens != null ? e.parallel_gens : '?';
+  bits.push(`⟠ ${g}${e.max_parallel ? '/' + e.max_parallel : ''}`);
+  if (e.reserve) bits.push('⟠🔒');
+  const run = e.jobs_running || 0, q = e.jobs_queued || 0;
+  bits.push(`⚙ ${run}${q ? '+' + q : ''}${e.max_workers ? '/' + e.max_workers : ''}`);
+  if (e.reserve_workers) bits.push(`⚙🔒${e.reserve_workers}`);
+  return bits.map(escapeHtml).join(' ');
+}
+
+function poolTitle(e) {
+  const lines = [
+    `parallel generations: ${e.parallel_gens ?? '?'}` +
+      (e.max_parallel ? ` (max ${e.max_parallel})` : ' (no cap)') +
+      (e.reserve ? ', endpoints reserved' : ', shared pool'),
+    `worker jobs: ${e.jobs_running || 0} running` +
+      (e.jobs_queued ? `, ${e.jobs_queued} queued` : '') +
+      (e.max_workers ? ` (max ${e.max_workers})` : ' (no cap)') +
+      (e.reserve_workers ? `, ${e.reserve_workers} reserved` : ', shared pool'),
+  ];
+  return lines.join(' | ');
 }
 
 async function fleetTogglePause(id, paused) {
@@ -818,10 +880,20 @@ function renderLiveSessions(container, data) {
     const chatLabel = s.waiting
       ? 'WAITING FOR FREE LLM'
       : (perServer[s.server_id] > 1 ? `${name} ${s.slot}` : name);
-    el.title.textContent = `> ${chatLabel} · gen ${s.gen}`;
+    const poolWide = (data.engines || []).length > 1;
+    el.title.textContent = `> ${chatLabel}`
+      + (poolWide && s.project_id ? ` · ${s.project_id}` : '')
+      + ` · gen ${s.gen}`;
     el.prompt.textContent = s.prompt || 'Awaiting input...';
     el.output.textContent = s.text || '… waiting for first token …';
-    el.status.textContent = s.waiting ? '[WAITING — ALL SERVERS BUSY/BANNED/DISABLED]' : `[STREAMING ACTIVE] ${s.tps.toFixed(1)} TPS`;
+    const noServer = (data.usable_servers === 0 && (data.configured_servers || 0) > 0);
+    el.status.textContent = s.waiting
+      ? (noServer
+          ? '[NO USABLE LLM SERVER — offline/banned; probing again automatically]'
+          : '[WAITING FOR A FREE LLM SLOT]')
+      : (s.tps > 0
+          ? `[STREAMING ACTIVE] ${s.tps.toFixed(1)} TPS`
+          : `[STREAMING — ${s.prefill ? 'PREFILL' : 'measuring rate'}]`);
     el.status.style.color = s.waiting ? 'var(--muted)' : 'var(--warning)';
     container.appendChild(el.root);
   }
@@ -832,10 +904,6 @@ function renderLiveSessions(container, data) {
     }
   }
 }
-
-
-
-
 
 
 // ------------------------------------------------------------------ //
@@ -1336,7 +1404,8 @@ function engineCell(eng, p) {
   if (!eng) return '<span class="eng-off">not started</span>';
   const gen = eng.generation != null ? eng.generation : '?';
   const sub = [];
-  // multi is POOL-WIDE now (the dashboard chip) — per-engine values are
+  // parallel generations are POOL-WIDE at runtime (the dashboard chip); the
+  // per-project value is its startup sizing —
   // redundant and would suggest a control that no longer exists here.
   if (eng.autofix && (eng.autofix.max_tries != null || eng.autofix.repair_max != null)) {
     sub.push(`fix ${eng.autofix.max_tries ?? 0}/${eng.autofix.repair_max ?? 0}`);
@@ -2145,7 +2214,6 @@ async function loadConfig() {
     document.getElementById('cfg-port').value = c.server.port;
     document.getElementById('cfg-wcount').value = c.workers.default_count;
     document.getElementById('cfg-wmax').value = c.workers.max_count;
-    document.getElementById('cfg-wqueue').value = c.workers.queue_size;
     document.getElementById('cfg-llm-timeout').value = c.llm.read_timeout;
     document.getElementById('cfg-llm-nodata').value = (c.llm.nodata_timeout !== undefined ? c.llm.nodata_timeout : 120);
     document.getElementById('cfg-llm-firsttoken').value = (c.llm.first_token_timeout !== undefined ? c.llm.first_token_timeout : 0);
@@ -2234,7 +2302,6 @@ async function saveConfig() {  const body = {
     workers: {
       default_count: parseInt(document.getElementById('cfg-wcount').value || '4'),
       max_count: parseInt(document.getElementById('cfg-wmax').value || '32'),
-      queue_size: parseInt(document.getElementById('cfg-wqueue').value || '8'),
     },
     llm: {
       read_timeout: parseFloat(document.getElementById('cfg-llm-timeout').value || '1200'),
@@ -2303,7 +2370,11 @@ function renderProjectConfig() {
   document.getElementById('pj-autofix-custom').value = (typeof af === 'string') ? af : '';
   const eng = s.engine || {};
   document.getElementById('pj-workers').value = eng.workers || '';
-  document.getElementById('pj-multi').value = eng.multi || '';
+  document.getElementById('pj-max-workers').value = eng.max_workers || '';
+  document.getElementById('pj-reserve-workers').value = eng.reserve_workers || '';
+  document.getElementById('pj-max-parallel').value = eng.max_parallel || '';
+  document.getElementById('pj-reserve').checked = !!eng.reserve;
+  document.getElementById('pj-parallel-gens').value = eng.parallel_gens || '';
   renderPipeCanvas(s);
   renderMetricsEditor(s);
 }
@@ -2573,189 +2644,9 @@ async function aiSuggestPipeline() {
 }
 
 // ------------------------------------------------------------------ //
-// swarm — parallel agents over the active servers
-// ------------------------------------------------------------------ //
-let swarmJobId = null;
-let swarmPollTimer = null;
-let swarmLastJob = null;
-
-async function openSwarmModal() {
-  document.getElementById('swarm-modal').style.display = 'flex';
-  const req = document.getElementById('swarm-request');
-  const spec = activeSpec;
-  if (spec && spec.prompts && spec.prompts.goal) req.value = spec.prompts.goal;
-  else if (spec && spec.description) req.value = spec.description;
-  document.getElementById('swarm-live').style.display = 'none';
-  document.getElementById('swarm-results').style.display = 'none';
-  swarmJobId = null;
-  swarmLastJob = null;
-  try {
-    const pl = await api('/api/projects');
-    const sel = document.getElementById('swarm-project');
-    sel.innerHTML = '';
-    (pl.projects || []).forEach(p => {
-      const o = document.createElement('option');
-      o.value = p.id;
-      o.textContent = p.name + ' (' + p.id + ')';
-      if (p.id === activeProjectId) o.selected = true;
-      sel.appendChild(o);
-    });
-    document.getElementById('swarm-project-row').style.display = (pl.projects || []).length > 1 ? 'flex' : 'none';
-  } catch (e) {}
-}
-function closeSwarmModal() {
-  document.getElementById('swarm-modal').style.display = 'none';
-  if (swarmPollTimer) { clearInterval(swarmPollTimer); swarmPollTimer = null; }
-}
-async function startSwarm() {
-  const kind = document.getElementById('swarm-kind').value;
-  const body = {
-    kind,
-    request: document.getElementById('swarm-request').value.trim() || 'Improve the program',
-    n: parseInt(document.getElementById('swarm-n').value || '3'),
-    max_concurrent: parseInt(document.getElementById('swarm-conc').value || '3'),
-  };
-  if (kind !== 'answer') {
-    body.project_id = activeProjectId || document.getElementById('swarm-project').value;
-    if (!body.project_id) return systemAlert('Pick a project first (or start the engine on one).');
-  }
-  try {
-    const r = await api('/api/swarm/start', { method: 'POST', body: JSON.stringify(body) });
-    swarmJobId = r.job_id;
-    document.getElementById('swarm-live').style.display = 'block';
-    document.getElementById('swarm-results').style.display = 'block';
-    clearInterval(swarmPollTimer);
-    swarmPollTimer = setInterval(pollSwarm, 1200);
-    pollSwarm();
-  } catch (e) { systemAlert('Swarm start failed: ' + e.message); }
-}
-async function pollSwarm() {
-  if (!swarmJobId) return;
-  let j;
-  try { j = (await api(`/api/swarm/${swarmJobId}`)).job; } catch (e) { return; }
-  swarmLastJob = j;
-  renderSwarm(j);
-  if (['done', 'failed', 'cancelled'].includes(j.state)) {
-    clearInterval(swarmPollTimer);
-    swarmPollTimer = null;
-  }
-}
-function renderSwarm(job) {
-  document.getElementById('swarm-meta').textContent = `${job.kind} · ${job.state} · ${escapeHtml(job.request.slice(0, 60))}`;
-  const log = document.getElementById('swarm-log');
-  const lines = (job.events || []).filter(e => ['phase', 'error', 'results', 'finished'].includes(e.type)).slice(-7);
-  log.innerHTML = lines.map(e => {
-    const txt = e.type === 'phase' ? `${e.data.phase}: ${e.data.message || ''}`
-      : e.type === 'error' ? `✕ ${e.data.message}`
-      : e.type === 'results' ? `✓ ${e.data.count} result(s)`
-      : `state: ${e.data.state}`;
-    return `<div class="console-line">${escapeHtml(txt)}</div>`;
-  }).join('') || '<div class="console-line muted">starting…</div>';
-  const tasksEl = document.getElementById('swarm-tasks');
-  tasksEl.innerHTML = (job.tasks || []).map((t, i) => {
-    const st = t.state || 'waiting';
-    const dot = st === 'streaming' ? 'sw-dot streaming' : st === 'done' ? 'sw-dot done' : st === 'failed' ? 'sw-dot failed' : 'sw-dot';
-    const preview = escapeHtml((t.preview || t.task || t.error || '')).slice(0, 90);
-    return `<div class="sw-task"><span class="${dot}"></span><span class="sw-task-state">${escapeHtml(st)}</span><span class="sw-task-text">${preview}</span></div>`;
-  }).join('') || '<div class="console-line muted">no tasks yet</div>';
-  const resEl = document.getElementById('swarm-results-body');
-  const rs = job.results || [];
-  if (job.kind === 'code_forge') {
-    resEl.innerHTML = rs.length ? rs.map((d, i) => `
-      <div class="sw-result ${d.ok ? 'ok' : 'bad'}">
-        <div class="sw-result-head">#${d.rank || i + 1} ${d.ok ? '✓' : '✕'} ${escapeHtml(JSON.stringify(d.metrics || {}))}${d.reason ? ` <span class="muted">${escapeHtml(d.reason)}</span>` : ''}</div>
-        ${d.ok ? `<details><summary>code</summary><pre class="sw-code">${escapeHtml(d.code || '')}</pre></details>
-        <button class="btn btn-sm btn-primary" onclick="applySwarmResult(${i})">Use this</button>` : ''}
-      </div>`).join('') : '<div class="console-line muted">waiting for results…</div>';
-  } else if (job.kind === 'pipeline') {
-    resEl.innerHTML = rs.length ? rs.map((d, i) => `
-      <div class="sw-result ${d.ok ? 'ok' : 'bad'}">
-        <div class="sw-result-head">#${i + 1} ${d.ok ? '✓ validated' : '✕ ' + escapeHtml(d.error || 'failed')} ${escapeHtml((d.notes || []).join(' · '))}</div>
-        ${d.ok ? `<button class="btn btn-sm btn-primary" onclick="reviewSwarmSpec(${i})">Review &amp; apply</button>` : ''}
-      </div>`).join('') : '<div class="console-line muted">waiting for results…</div>';
-  } else {
-    const ans = rs[0] && rs[0].answer;
-    resEl.innerHTML = ans ? `<div class="console-block">${escapeHtml(ans)}</div>` : '<div class="console-line muted">waiting for the synthesizer…</div>';
-  }
-}
-async function applySwarmResult(i) {
-  if (!swarmLastJob) return;
-  const d = swarmLastJob.results[i];
-  if (!d) return;
-  try {
-    const r = await api('/api/queue/custom_code', { method: 'POST', body: JSON.stringify({ code: d.code, source: 'swarm' }) });
-    if (r.ok) toast(`Swarm draft #${d.rank || i + 1} queued as generation ${r.generation}.`);
-    else systemAlert('Queue failed: ' + (r.error || 'unknown'));
-  } catch (e) { systemAlert('Queue failed: ' + e.message); }
-}
-async function reviewSwarmSpec(i) {
-  if (!swarmLastJob) return;
-  const d = swarmLastJob.results[i];
-  if (!d || !d.spec) return;
-  pipeSuggestProjectId = swarmLastJob.project_id || activeProjectId;
-  document.getElementById('sr-spec').value = JSON.stringify(d.spec, null, 2);
-  document.getElementById('sr-id-row').style.display = 'none';
-  document.getElementById('sr-create-btn').textContent = '✓ Apply to my project';
-  document.getElementById('sr-notes').innerHTML = '<span class="sr-notes-ok">✓ swarm design — validated (guardrails + lint + smoke run). Review the JSON, then apply.</span>';
-  seedDesignerFromSpec('sr', d.spec);
-  document.getElementById('suggest-result-modal').style.display = 'flex';
-}
-
-
-
-// ------------------------------------------------------------------ //
-// live config — natural language reconfiguration (Ctrl+K palette)
+// live config — theme presets
 // ------------------------------------------------------------------ //
 const ACCENT_PRESETS = ['#00e87c', '#00bbf9', '#ff6b35', '#f15bb5', '#8ac926', '#6a4c93', '#ffca3a', '#e8e8e8'];
-let lastConfigSnapshot = null;
-
-function openPalette() {
-  document.getElementById('palette-modal').style.display = 'flex';
-  document.getElementById('palette-result').style.display = 'none';
-  const inp = document.getElementById('palette-input');
-  inp.value = '';
-  inp.focus();
-}
-function closePalette() { document.getElementById('palette-modal').style.display = 'none'; }
-async function submitPalette() {
-  const inp = document.getElementById('palette-input');
-  const request = inp.value.trim();
-  if (!request) return;
-  const res = document.getElementById('palette-result');
-  res.style.display = 'block';
-  res.innerHTML = '<div class="console-line" style="color:var(--warning);">Thinking…</div>';
-  try {
-    const r = await api('/api/config-agent', { method: 'POST', body: JSON.stringify({ request }) });
-    if (r.ok) {
-      lastConfigSnapshot = r.action;
-      const reply = r.reply || 'done';
-      res.innerHTML = `<div class="console-line" style="color:var(--accent);">${escapeHtml(reply)}</div>
-        ${r.action === 'run_smoke' && r.result ? `<div class="console-line">${escapeHtml(JSON.stringify(r.result))}</div>` : ''}
-        <div class="palette-actions">
-          ${r.action !== 'answer' ? '<button class="btn btn-sm" onclick="undoLastChange()">↺ Undo</button>' : ''}
-          <button class="btn btn-sm" onclick="closePalette()">Done</button>
-        </div>`;
-      if (r.css_vars) applyCssVars(r.css_vars);
-      if (r.action === 'set_pref') { loadPrefs(); }
-      if (r.action === 'edit_project' || r.action === 'add_metric') { activeSpec = null; if (currentView === 'config') openSettingsBar(settingsTab || 'general'); loadProjects(); }
-    } else {
-      res.innerHTML = `<div class="console-line" style="color:var(--danger);">✕ ${escapeHtml(r.error || 'failed')}</div><div class="palette-actions"><button class="btn btn-sm" onclick="closePalette()">Close</button></div>`;
-    }
-  } catch (e) {
-    res.innerHTML = `<div class="console-line" style="color:var(--danger);">✕ ${escapeHtml(e.message)}</div>`;
-  }
-}
-async function undoLastChange() {
-  try {
-    const list = await api('/api/snapshots' + (activeProjectId ? `?project_id=${activeProjectId}` : ''));
-    const snaps = list.snapshots || [];
-    if (!snaps.length) return systemAlert('No snapshot to revert to.');
-    const r = await api('/api/snapshots/restore', { method: 'POST', body: JSON.stringify({ id: snaps[0].id, project_id: activeProjectId }) });
-    if (r.ok) { toast('Reverted to the previous snapshot.'); loadPrefs(); activeSpec = null; loadProjects(); }
-    else systemAlert('Revert failed: ' + (r.error || 'unknown'));
-  } catch (e) { systemAlert('Revert failed: ' + e.message); }
-}
-
 // ------------------------------------------------------------------ //
 // UI prefs — theme application
 // ------------------------------------------------------------------ //
@@ -2901,7 +2792,6 @@ async function cancelAgent() {
 }
 
 
-
 function renderMetricsEditor(s) {
   const c = document.getElementById('pj-metrics');
   c.innerHTML = '';
@@ -2957,9 +2847,15 @@ function collectProjectConfig() {
   s.skills.autofix_build = afCustom || document.getElementById('pj-autofix').checked;
   s.engine = s.engine || {};
   const wv = parseInt(document.getElementById('pj-workers').value || '');
-  const mv = parseInt(document.getElementById('pj-multi').value || '');
+  const mv = parseInt(document.getElementById('pj-parallel-gens').value || '');
+  const num = (id) => { const v = parseInt(document.getElementById(id).value || ''); return v > 0 ? v : null; };
   s.engine.workers = wv > 0 ? wv : null;
-  s.engine.multi = mv > 0 ? mv : null;
+  s.engine.parallel_gens = mv > 0 ? mv : null;
+  // OPTIONAL sharing knobs — blank means "share the whole pool"
+  s.engine.max_workers = num('pj-max-workers');
+  s.engine.reserve_workers = num('pj-reserve-workers');
+  s.engine.max_parallel = num('pj-max-parallel');
+  s.engine.reserve = document.getElementById('pj-reserve').checked;
   const steps = { build: {}, verify: [], score: [] };
   pipeNodes.forEach(n => {
     if (n.stage === 'build') steps.build = n.step;
@@ -3582,13 +3478,6 @@ fillLangSelect(document.getElementById('pj-lang'));
 fillLangSelect(document.getElementById('np-lang'));
 fillLangSelect(document.getElementById('sp-lang'), true);
 fillLangSelect(document.getElementById('cc-lang'));
-
-document.addEventListener('keydown', (e) => {
-  if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'K')) {
-    e.preventDefault();
-    openPalette();
-  }
-});
 
 loadPrefs();
 

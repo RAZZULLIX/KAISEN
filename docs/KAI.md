@@ -50,7 +50,7 @@ deliberately tolerant, because LLMs decorate everything:
 | `STATUS` | engine + pool overview, per-project; includes `LLM PIPELINES x/y (z in flight)` utilization line |
 | `SPEC [id]` | the project's spec: steps, metrics, goal |
 | `RUN [<n>] [FOR <secs>] [WITH <k>] [ON <pid>]` | start evolution (forever by default), background. `<n>` = stop after n SCORED generations; `FOR <secs>` = time budget (paused time excluded — only burns while the engine runs); both = whichever comes first |
-| `RUN ALL [FOR <secs>] [WITH <k>]` | start every pool member at once — same budget and pipeline count each; everything about multi-engine mode is optional |
+| `RUN ALL [FOR <secs>] [WITH <k>]` | start every pool member at once — same budget and `k` parallel generations each; everything about multi-engine mode is optional |
 | `BUDGET` | the in-flight run's budget: scored so far vs target + time remaining |
 | `BUDGET SERVER [<sid>] [SET max_tokens <n> reset <r> [max_generations <n>]]` | per-server usage budget (optional): caps tokens/generations inside a reset window; an exhausted server drops out of routing until it rolls over. `n` = `1000000` / `1M` / `2.5M`; `r` = `30s` / `5m` / `12h` / `3d` / `1w` / `12:00:00` (= 12h). Blank clears a limit |
 | `SCORE <path> [ON <pid>]` | score any file through the project's pipeline — no engine, no run (audit copy under `runs/score_*`) |
@@ -74,7 +74,6 @@ deliberately tolerant, because LLMs decorate everything:
 | `CREATE <id> [TEMP] <spec-json>` | create a project from an explicit spec; TEMP = temp-rooted |
 | `FACTORY [ALGOS a,b] [LANGS c,python,rust,go] [CASES n] [BUILD_TIMEOUT sec] [CASE_TIMEOUT sec] [FORCE]` | generate algorithm × language projects (each self-checked: baseline builds, passes its seeded fuzz gate vs reference, scores) and register them; existing ids are skipped unless `FORCE` (delete + recreate) |
 | `AUTOFIX [tries <n>] [repair <n\|off>] [candidates <n>]` | per-run compile-loop caps for the session project: deterministic autofix turns (default 5), LLM repair attempts (default 3; `off` = deterministic only, then fail), candidate fallback blocks (default 3) |
-| `FORGE [<n>] [TIER <t>] [ON <pid>] [GOAL <words>]` | n parallel scored drafts (max 12) |
 | `HELP` | this reference |
 
 ## Grammar notes
@@ -84,7 +83,7 @@ deliberately tolerant, because LLMs decorate everything:
   any order; `ON <pid>` targets another pool member.
 - Multi-line commands (`BASELINE`, `CANDIDATE`) end with a line that is
   exactly `END`.
-- `FORGE` blocks until the swarm job finishes (or ~20 minutes). `FACTORY`
+- `FACTORY`
   blocks while it generates + self-checks every project (a full 40-project
   run takes a few minutes).
 

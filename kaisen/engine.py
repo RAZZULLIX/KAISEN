@@ -15,6 +15,7 @@ paused/stop flags, periodic deepwork + lessons (spec-driven).
 
 from __future__ import annotations
 
+import collections
 import difflib
 import os
 import random
@@ -26,7 +27,6 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from . import skills as skills_mod
-from .config import get_config
 from .llm import GenerationCancelled, ModelOrchestrator, ServerError
 from .memory import ProjectMemory
 from .projects import Project, ProjectRegistry
@@ -98,6 +98,14 @@ class Session:
         self.cancel = threading.Event()
         self._tokens = 0
         self.tps = 0.0
+        # Recent (time, cumulative-tokens) samples — the TPS is measured over
+        # a short WINDOW, not since the session started: a wall-clock average
+        # ramps up from zero (the old max(1.0, elapsed) floor reported ~1 tps
+        # then 6, 13, 20 on the way to the real rate) and it is plain wrong
+        # for a short generation (40 tokens in 0.5s read as 40 tok/s instead
+        # of 80).  The window answers "how fast is it going RIGHT NOW".
+        self._samples: collections.deque = collections.deque(maxlen=512)
+        self._window = 3.0
         # First token arrival — the reference point for the REAL decode
         # rate.  tps measured from session creation used to include the
         # queue wait and prefill, so the pill showed "random" numbers that
@@ -128,7 +136,25 @@ class Session:
         # REAL decode rate: tokens / time since the FIRST token.  The queue
         # wait and the prefill are not part of the generation's speed.  The
         # denominator floor keeps the first-token instant from spiking.
-        self.tps = self._tokens / max(1.0, now - self._first_token_at)
+        self._samples.append((now, self._tokens))
+        self.tps = self._windowed_tps(now)
+
+    def _windowed_tps(self, now: float, window: float | None = None) -> float:
+        """Decode rate over the last `window` seconds.  Needs a couple of
+        samples to mean anything; before that it falls back to the honest
+        since-first-token rate with a 0.5 s floor (no spike, no ramp)."""
+        win = self._window if window is None else window
+        while len(self._samples) > 2 and now - self._samples[0][0] > win:
+            self._samples.popleft()
+        if len(self._samples) >= 2:
+            t0, n0 = self._samples[0]
+            dt = now - t0
+            if dt >= 0.2 and self._tokens > n0:
+                return (self._tokens - n0) / dt
+        # Not enough signal yet (first token, or a sub-0.2 s window): report
+        # 0.0 — "not measured yet" beats a made-up number that the pill would
+        # show as the model's speed.
+        return 0.0
 
     def finish(self, server_id: Optional[str] = None, error: str = "") -> None:
         self.server_id = server_id
@@ -298,7 +324,16 @@ class ProjectEngine:
         # this latch prevents re-queueing every generation while it runs.
         self._baseline_reeval_pending = False
         self._worker_count = worker_count
-        self._multi = 1
+        self._parallel_gens = 1
+        # OPTIONAL per-project pool knobs (project spec engine.max_parallel /
+        # engine.reserve).  Defaults: no cap, no reservation — the pool is
+        # shared and generations rotate between projects.
+        self._max_parallel: int | None = project.max_parallel
+        self._reserve: bool = project.reserve
+        # OPTIONAL worker knobs (project spec engine.max_workers /
+        # engine.reserve_workers) — the worker-side twins of the two above.
+        self._max_workers: int | None = project.max_workers
+        self._reserve_workers: int | None = project.reserve_workers
         # Opt-in fuzzy prompt basis: when > 0, each generation's prompt is
         # seeded with a RANDOM one of the top N scored iterations instead of
         # the champion (default 0 = champion always — the safe behavior).
@@ -336,7 +371,7 @@ class ProjectEngine:
             self.state.save()
             self._emit_state()
 
-    def start(self, multi: int = 1, paused: bool = False) -> None:
+    def start(self, parallel_gens: int = 1, paused: bool = False) -> None:
         """Start the engine.  `paused=True` boots the worker pool, pump
         and baseline evaluation but spawns NO producers — nothing
         generates until the user presses play."""
@@ -356,21 +391,28 @@ class ProjectEngine:
         self._bootstrap_baseline()
         # Route THIS project's results/progress to this engine's handlers.
         # The pool is shared: registering is per-project, never exclusive.
-        self.pool.register(self.project.id, self._on_result, self._on_progress)
+        self.pool.register(self.project.id, self._on_result, self._on_progress,
+                           max_workers=self._max_workers,
+                           reserve_workers=self._reserve_workers)
         # Shared pool sizing: ensure AT LEAST this engine's requested count
         # (pool.start only grows; other projects' requests don't multiply).
         self.pool.start(self._worker_count)
         if self._pump_thread is None or not self._pump_thread.is_alive():
             self._pump_thread = threading.Thread(target=self._pump_loop, daemon=True)
             self._pump_thread.start()
-        self._multi = max(1, int(multi))
+        self._parallel_gens = max(1, int(parallel_gens))
+        # Re-read the optional share knobs (a spec edit applies on restart).
+        self._max_parallel = self.project.max_parallel
+        self._reserve = self.project.reserve
+        self._max_workers = self.project.max_workers
+        self._reserve_workers = self.project.reserve_workers
         if not paused:
-            self._ensure_producers(self._multi)
+            self._ensure_producers(self._parallel_gens)
         self._log("engine started (paused — press play)" if paused else "engine started")
 
     def _ensure_producers(self, n: int) -> None:
         # Prune dead threads, then top up to n.  Each producer carries its
-        # own stop event so `set_multi` can retire individual pipelines, and
+        # own stop event so `set_parallel_gens` can retire individual pipelines, and
         # its OWN pipeline id — list position is NOT the id (a middle thread
         # dying would compress the list and make position != id, silently
         # colliding two live pipelines on one cap-fill reservation key).
@@ -386,9 +428,10 @@ class ProjectEngine:
             alive.append((t, ev, pid))
         self._producer_threads = alive
 
-    def set_multi(self, n: int) -> int:
-        """Adjust the number of parallel generation pipelines at runtime.
-        Returns the effective count."""
+    def set_parallel_gens(self, n: int) -> int:
+        """Adjust the number of PARALLEL GENERATIONS for this project at
+        runtime (how many generations may stream at once).  Returns the
+        effective count."""
         n = max(1, int(n))
         self._ensure_producers(n)
         retired: List[int] = []
@@ -396,7 +439,7 @@ class ProjectEngine:
             _t, ev, pid = self._producer_threads.pop()
             ev.set()
             retired.append(pid)
-        self._multi = n
+        self._parallel_gens = n
         # Retired pipelines no longer exist: their endpoint reservations go
         # back to the pool (the remaining pipelines keep theirs).
         if retired:
@@ -408,6 +451,48 @@ class ProjectEngine:
                 pass
         self._log(f"parallel generation pipelines: {n}")
         return n
+
+    def set_share(self, max_parallel: Any = None,
+                  reserve: bool | None = None) -> Dict[str, Any]:
+        """Runtime knobs for how this project uses the SHARED pool.
+        `max_parallel` = the most generations of this project in flight at
+        once (None/0 = no cap: it may take every free slot); `reserve` =
+        hold this project's endpoints across generations (default false:
+        the pool is always shared).  Returns the effective values."""
+        if max_parallel is not None:
+            try:
+                n = int(max_parallel)
+            except (TypeError, ValueError):
+                n = 0
+            self._max_parallel = n if n > 0 else None
+        if reserve is not None:
+            self._reserve = bool(reserve)
+        self._log(f"pool share: {self._max_parallel or 'no cap'} parallel "
+                  f"generations, "
+                  f"{'endpoints reserved' if self._reserve else 'shared pool'}")
+        return {"max_parallel": self._max_parallel, "reserve": self._reserve}
+
+    def set_worker_share(self, max_workers: Any = None,
+                         reserve_workers: Any = None) -> Dict[str, Any]:
+        """Runtime knobs for how this project uses the SHARED worker pool.
+        `max_workers` = the most jobs this project may have outstanding at
+        once (None/0 = no cap); `reserve_workers` = jobs GUARANTEED to this
+        project, served without waiting for its turn in the rotation
+        (None/0 = none).  Returns the effective values."""
+        self._max_workers = self.pool.set_limits(
+            self.project.id, max_workers=max_workers)["max_workers"] \
+            if max_workers is not None else self._max_workers
+        self._reserve_workers = self.pool.set_limits(
+            self.project.id,
+            reserve_workers=reserve_workers)["reserve_workers"] \
+            if reserve_workers is not None else self._reserve_workers
+        self._log("worker pool: "
+                  + (f"max {self._max_workers} jobs" if self._max_workers
+                     else "no job cap")
+                  + (f", {self._reserve_workers} reserved"
+                     if self._reserve_workers else ", shared"))
+        return {"max_workers": self._max_workers,
+                "reserve_workers": self._reserve_workers}
 
     def set_fuzzy(self, top_n: int) -> int:
         """Opt-in fuzzy prompt basis (KAI FUZZY): 0 = champion always
@@ -474,9 +559,9 @@ class ProjectEngine:
         st = self.engine_state
         if st in (STATE_PAUSING, STATE_PAUSED):
             self._set_state(STATE_RUNNING)
-            self._ensure_producers(self._multi)
+            self._ensure_producers(self._parallel_gens)
         elif st in (STATE_STOPPED, STATE_STOPPING):
-            self.start(multi=self._multi)
+            self.start(parallel_gens=self._parallel_gens)
         return True
 
     def request_stop(self) -> bool:
@@ -518,15 +603,12 @@ class ProjectEngine:
                     continue
                 self._refresh_spec()
                 self._check_baseline_source()
-                qsize = int(get_config().workers.get("queue_size", 15))
-                # Queue-based backpressure on the SHARED pool: producers
-                # keep preparing while the workers test; they pause only
-                # when the shared queue backlog fills.  Every engine sees
-                # the same queue depth, so N projects share one bounded
-                # backlog instead of N independent in-flight counts.
-                if self.pool.pending() >= max(1, qsize):
-                    time.sleep(1.0)
-                    continue
+                # GENERATIONS ARE NEVER QUEUED.  A generation is a
+                # zero-second decision: the producer keeps generating, and
+                # the only thing that queues is the WORKER JOB it produces.
+                # The pool bounds that queue globally (the total worker
+                # allowance) and dispatches it round-robin between projects,
+                # so a slow harness can never turn into a stalled producer.
                 gen = self.state.next_generation()
                 gen_dir = self._make_gen_dir(gen)
                 champion_path = self._champion_path()
@@ -562,6 +644,8 @@ class ProjectEngine:
                             session=session,
                             skill="generation",
                             engine_key=self.project.id,
+                            reserve=self._reserve,
+                            max_parallel=self._max_parallel,
                         )
                         self._gen_server[gen] = sid
                         session.finish(server_id=sid)
@@ -1844,7 +1928,11 @@ class ProjectEngine:
             "metric_goodness": goodness,
             "scores": {"active": score_key, "types": types},
             "workers": self.pool.list_workers(),
-            "multi": self._multi,
+            "parallel_gens": self._parallel_gens,
+            "max_parallel": self._max_parallel,
+            "reserve": self._reserve,
+            "max_workers": self._max_workers,
+            "reserve_workers": self._reserve_workers,
             "llm": self.orchestrator.status(),
             "guardrails": self._guardrail_status(),
             "sessions": self.sessions.snapshot(),

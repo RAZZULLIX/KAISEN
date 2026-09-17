@@ -223,7 +223,7 @@ def test_safe_flight(tmp_path):
         orch = ModelOrchestrator(cfg)
         eng = ProjectEngine(project, orchestrator=orch, registry=registry,
                             worker_count=1)
-        eng.start(multi=1, paused=False)
+        eng.start(parallel_gens=1, paused=False)
         try:
             deadline = time.time() + 240
             while time.time() < deadline:

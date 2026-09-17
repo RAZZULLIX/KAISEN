@@ -21,14 +21,14 @@ class FakeEngine:
     """Minimal stand-in for ProjectEngine over the pool-control surface."""
 
     def __init__(self, pid, engine_state="running", generation=4,
-                 best=None, multi=2, workers=3, paused=False):
+                 best=None, parallel_gens=2, workers=3, paused=False):
         self.project = SimpleNamespace(id=pid, name=pid)
         self.engine_state = engine_state
         self._st = SimpleNamespace(generation=generation, paused=paused,
                                    best=best or {})
-        self._multi = multi
+        self._parallel_gens = parallel_gens
         self.pool = SimpleNamespace(_procs={i: None for i in range(workers)})
-        self.set_multi_calls = []
+        self.set_parallel_gens_calls = []
 
     @property
     def state(self):
@@ -50,9 +50,16 @@ class FakeEngine:
     def request_resume(self):
         self._st.paused = False
 
-    def set_multi(self, n):
-        self._multi = n
-        self.set_multi_calls.append(n)
+    def set_parallel_gens(self, n):
+        self._parallel_gens = n
+        self.set_parallel_gens_calls.append(n)
+        return n
+
+    def set_share(self, max_parallel=None, reserve=None):
+        if max_parallel is not None:
+            self._max_parallel = int(max_parallel) or None
+        if reserve is not None:
+            self._reserve = bool(reserve)
         return n
 
     def set_fuzzy(self, n):
@@ -383,14 +390,15 @@ def test_engine_resume_scoped_to_pid(api):
     assert not srv.engines["a-proj"].state.paused
 
 
-def test_engine_multi_scoped_to_pid(api):
+def test_engine_parallel_gens_scoped_to_pid(api):
     srv, base = api
     _seed_engines(srv, ["a-proj", "b-proj"])
-    r = requests.post(base + "/api/engine/multi", json={"multi": 5, "project_id": "b-proj"},
+    r = requests.post(base + "/api/engine/parallel_gens",
+                      json={"parallel_gens": 5, "project_id": "b-proj"},
                       timeout=5)
-    assert r.json()["multi"] == 5
-    assert srv.engines["b-proj"]._multi == 5
-    assert srv.engines["a-proj"]._multi == 2  # untouched
+    assert r.json()["parallel_gens"] == 5
+    assert srv.engines["b-proj"]._parallel_gens == 5
+    assert srv.engines["a-proj"]._parallel_gens == 2  # untouched
 
 
 def test_engine_fuzzy_endpoint(api):
@@ -412,7 +420,7 @@ def test_engine_pool_persist_and_restore(tmp_cfg, registry):
     srv1 = DashboardServer(registry, tmp_cfg, engine=None,
                            host="127.0.0.1", port=8080, temp_root=temp_root,
                            restore_paused=True)
-    srv1.engines["pool-a"] = FakeEngine("pool-a", multi=3)
+    srv1.engines["pool-a"] = FakeEngine("pool-a", parallel_gens=3)
     srv1._selected_project_id = "pool-a"
     srv1._persist_engine_pool()
     assert (tmp_cfg.path.parent / "engine_pool.json").exists()
@@ -420,7 +428,7 @@ def test_engine_pool_persist_and_restore(tmp_cfg, registry):
                            host="127.0.0.1", port=8080, temp_root=temp_root,
                            restore_paused=True)
     assert "pool-a" in srv2.engines
-    assert srv2.engines["pool-a"]._multi == 3
+    assert srv2.engines["pool-a"]._parallel_gens == 3
     assert srv2._selected_project_id == "pool-a"
     srv2.engines["pool-a"].stop()
 
@@ -437,7 +445,7 @@ def test_engines_share_one_orchestrator(tmp_cfg, registry):
     pool_file = tmp_cfg.path.parent / "engine_pool.json"
     pool_file.write_text(_json.dumps({
         "selected": "pool-o1",
-        "engines": {"pool-o1": {"multi": 1}, "pool-o2": {"multi": 1}},
+        "engines": {"pool-o1": {"parallel_gens": 1}, "pool-o2": {"parallel_gens": 1}},
     }))
     srv = DashboardServer(registry, tmp_cfg, engine=None,
                           host="127.0.0.1", port=8080,
@@ -727,3 +735,45 @@ def test_event_loop_not_blocked_under_engine_load(api):
     r2 = requests.get(base + "/api/projects", timeout=5)
     assert r2.status_code == 200
     assert time.time() - t0 < 8
+
+# ----------------------------------------------------------------------
+# the live stream view (pool-wide, not just the selected engine)
+# ----------------------------------------------------------------------
+
+def test_live_endpoint_reports_every_engines_chats(api, tmp_cfg, registry):
+    """The modal used to read only the SELECTED engine: with another project
+    streaming it showed nothing — "the live view never works"."""
+    srv, base = api
+    tmp_cfg.llm["servers"] = [{"id": "one", "type": "llama",
+                               "url": "http://127.0.0.1:1/completion",
+                               "max_concurrent": 1, "enabled": True}]
+    tmp_cfg.llm["active_ids"] = ["one"]
+    from kaisen.engine import ProjectEngine
+    from kaisen.llm import ModelOrchestrator
+    orch = ModelOrchestrator(tmp_cfg)
+    orch._servers["one"].mark_online(True)   # deterministic: no probe race
+    for pid, gen in (("streamer", 7), ("idle", 2)):
+        project = registry.create(pid, {
+            "id": pid, "name": pid, "language": "python",
+            "steps": {"build": {"program": "harness/build.py",
+                                "args": ["{candidate}", "{artifact}"]},
+                      "verify": [], "score": []},
+            "metrics": {"ms": {"label": "ms", "unit": "ms",
+                               "direction": "lower", "weight": 1}},
+            "data": {}})
+        eng = ProjectEngine(project, orchestrator=orch, registry=registry,
+                            worker_count=0)
+        sess = eng.sessions.begin("code", gen, "p")
+        sess.push("hello from " + pid)
+        sess.server_id = "one"
+        srv.engines[pid] = eng
+    try:
+        srv.engine = srv.engines["idle"]          # the IDLE one is selected
+        d = requests.get(base + "/api/llm/live", timeout=5).json()
+        seen = {(x.get("project_id"), x.get("gen")) for x in d["sessions"]}
+        assert ("streamer", 7) in seen, d["sessions"]
+        assert ("idle", 2) in seen
+        assert d["engines"] == ["streamer", "idle"]
+        assert d["usable_servers"] == 1 and d["configured_servers"] == 1
+    finally:
+        srv.engines.clear()

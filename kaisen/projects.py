@@ -59,7 +59,9 @@ DEFAULT_SPEC: Dict[str, Any] = {
     "metrics": {},
     "telemetry": {"enabled": True, "progress_token": "KAISEN_PROGRESS", "live_fields": []},
     # Startup sizing: project > config defaults > built-in 1/1.
-    "engine": {"workers": None, "multi": None},
+    "engine": {"workers": None, "parallel_gens": None,
+               "max_parallel": None, "reserve": False,
+               "max_workers": None, "reserve_workers": None},
     "select": {"hysteresis": 1.0001},
     "guardrails": {"enabled": True, "allow_extra": [], "deny_extra": []},
     "prompts": {"generation_dir": "prompts/generation", "study": "", "lesson": ""},
@@ -231,16 +233,54 @@ class Project:
         return 1
 
     @property
-    def default_multi(self) -> int:
+    def default_parallel_gens(self) -> int:
         """Startup sizing priority: project spec > config defaults > 1."""
         from .config import get_config
-        spec_n = (self.spec.get("engine") or {}).get("multi")
+        spec_n = (self.spec.get("engine") or {}).get("parallel_gens")
         if spec_n:
             return max(1, int(spec_n))
-        cfg_n = get_config().engine.get("default_multi")
+        cfg_n = get_config().engine.get("default_parallel_gens")
         if cfg_n:
             return max(1, int(cfg_n))
         return 1
+
+    @property
+    def max_parallel(self) -> int | None:
+        """OPTIONAL spend cap: the most generations of THIS project that may
+        be in flight at once.  None (default) = no cap — the project shares
+        the pool with every other project, one generation per turn."""
+        n = (self.spec.get("engine") or {}).get("max_parallel")
+        if n in (None, "", 0, "0"):
+            return None
+        return max(1, int(n))
+
+    @property
+    def max_workers(self) -> int | None:
+        """OPTIONAL spend cap on the SHARED worker pool: the most jobs this
+        project may have outstanding (queued + running) at once.  None
+        (default) = no cap — its jobs share the whole pool, one per turn."""
+        n = (self.spec.get("engine") or {}).get("max_workers")
+        if n in (None, "", 0, "0"):
+            return None
+        return max(1, int(n))
+
+    @property
+    def reserve_workers(self) -> int | None:
+        """OPTIONAL guaranteed worker slots: this project is served up to
+        this many concurrent jobs without waiting for its turn in the
+        rotation.  None (default) = no reservation, the pool is shared."""
+        n = (self.spec.get("engine") or {}).get("reserve_workers")
+        if n in (None, "", 0, "0"):
+            return None
+        return max(1, int(n))
+
+    @property
+    def reserve(self) -> bool:
+        """OPTIONAL reservation: when true this project HOLDS its endpoint
+        slots across generations so its pipelines always have a server.
+        Default false — slots are never reserved, the pool is always
+        shared (one generation per project turn)."""
+        return bool((self.spec.get("engine") or {}).get("reserve"))
 
 
 class ProjectRegistry:
