@@ -303,9 +303,10 @@
           </section>
           <section class="panel">
             <div class="panel-header"><div class="panel-title">Telegram</div></div>
-            <div class="form-row"><label>Bot token<span class="field-now" id="cfg-tg-token-src"></span></label>
+            <div class="form-row"><label>Bot token</label>
               <div class="inline-check">
-                <input id="cfg-tg-token" type="password" placeholder="123456:ABC… (env KAISEN_TG_TOKEN wins)">
+                <input id="cfg-tg-token" type="password" placeholder="123456:ABC…">
+                <button class="btn btn-sm" id="cfg-tg-loadenv-btn" onclick="loadTelegramFromEnv()" style="display:none;" title="Copy the token from the KAISEN_TG_TOKEN environment variable into secrets.json — the value is never shown in the browser">Load from env</button>
                 <button class="btn btn-sm" id="cfg-tg-check-btn" onclick="checkTelegramToken()" title="Ask Telegram whether this token works (once, on demand — not on every keystroke)">Check</button>
                 <span class="check-result" id="cfg-tg-check-result"></span>
               </div>

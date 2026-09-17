@@ -302,6 +302,16 @@ message needs the Telegram channel configured (§16) — without it the engine
 logs that it skipped it.  `ping` remains the built-in one-line notice;
 `telegram` is *your* message, and the two can be used together.
 
+**From KAI** (so an agent can arm the whole thing, no JSON editing):
+`SUCCESS` shows the goal (criterion, actions, message, attachments, and
+`MET gen N on <date>` once it fired); `SUCCESS proved_open >= 2 THEN
+telegram,stop` sets it; `SUCCESS MESSAGE` + lines + `END` writes the message
+(`SUCCESS MESSAGE <text>` for one line); `SUCCESS ATTACH
+champion,llm_output,prompt` chooses the files; `SUCCESS THEN ping` changes
+only the actions; `SUCCESS CLEAR` drops message + attachments; `SUCCESS OFF`
+removes the goal.  A wrong variable or attachment comes back as `ERR …`, never
+as a message with blank spots.
+
 Examples:
 
 ```json
@@ -1116,7 +1126,15 @@ Backed by `notes.json` (gitignored).
   (`env` / `secrets.json`), so the GUI cannot read the secret back.
   **Check** next to the field asks Telegram's `getMe` ON DEMAND — once, when
   you click it, not on every keystroke — and answers `✔ works — @your_bot`
-  or Telegram's own error (`✖ Unauthorized`).
+  or Telegram's own error (`✖ Unauthorized`).  A **Load from env** button
+  appears when `KAISEN_TG_TOKEN` is set: it copies the env token into
+  `secrets.json` so it keeps working once the variable is gone (the value is
+  never shown in the browser).
+- **The same from KAI** — `TELEGRAM STATUS` (token set? from where? chat id?
+  ready?), `TELEGRAM LOAD` (env → secrets.json), `TELEGRAM CHECK` (getMe),
+  `TELEGRAM CHAT <id>` (destination).  `TELEGRAM TOKEN …` is refused on
+  purpose: a secret typed into a session lands in its transcript, so the
+  command names the right path instead.
 - **Goal messages** — a project can send a custom message when its goal is
   reached, with the winning file, the LLM reply and the prompt attached
   (§5, `then: ["telegram"]`).

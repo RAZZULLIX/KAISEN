@@ -2342,18 +2342,10 @@ async function loadConfig() {
     document.getElementById('cfg-factory-case').value = (f.case_timeout !== undefined && f.case_timeout !== null ? f.case_timeout : '');
     document.getElementById('cfg-autofix').checked = !!(c.autofix && c.autofix.build_enabled);
     document.getElementById('cfg-tg-token').value = c.telegram.token || '';
-    const tgSrc = document.getElementById('cfg-tg-token-src');
-    if (tgSrc) {
-      // One short yellow line beside the field: WHERE the token in effect
-      // comes from.  Env wins over the file, so when it says the env var is
-      // in charge, a saved token is being ignored — say that, not "from env".
-      const src = c.telegram.token_source;
-      tgSrc.textContent = src === 'env'
-        ? 'env KAISEN_TG_TOKEN is in charge — it overrides what you save'
-        : src === 'secrets.json' ? 'from secrets.json'
-        : src === 'config.json' ? 'from config.json (moved to secrets.json on the next start)'
-        : 'saved to secrets.json (0600, gitignored)';
-    }
+    // The env var wins over anything saved, so when it IS set offer the
+    // one-click way to make it durable — and never print its value anywhere.
+    const tgEnvBtn = document.getElementById('cfg-tg-loadenv-btn');
+    if (tgEnvBtn) tgEnvBtn.style.display = (c.telegram.token_source === 'env') ? '' : 'none';
     document.getElementById('cfg-tg-chat').value = c.telegram.chat_id || '';
     const s = c.safety;
     document.getElementById('cfg-safety').innerHTML = `
@@ -2485,6 +2477,27 @@ async function checkTelegramToken() {
     out.classList.add('err');
   }
   btn.disabled = false;
+}
+
+// LOAD FROM ENV — copy KAISEN_TG_TOKEN into secrets.json so an env-provided
+// token becomes durable (survives the env var going away).  The value is
+// never sent to the browser: the field keeps showing the mask.
+async function loadTelegramFromEnv() {
+  const out = document.getElementById('cfg-tg-check-result');
+  try {
+    const r = await api('/api/telegram/load_env', { method: 'POST', body: '{}' });
+    if (r && r.ok) {
+      out.textContent = '✔ env token stored in secrets.json';
+      out.className = 'check-result ok';
+      loadConfig();
+    } else {
+      out.textContent = `✖ ${(r && r.error) || 'no env token'}`;
+      out.className = 'check-result err';
+    }
+  } catch (e) {
+    out.textContent = '✖ ' + e.message;
+    out.className = 'check-result err';
+  }
 }
 
 async function applyConfig() {

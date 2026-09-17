@@ -6,7 +6,8 @@ import time
 
 import pytest
 
-from kaisen.kai import ALIASES, _ALIAS_INDEX, KaiSession, KaiError, _split
+from kaisen.kai import (ALIASES, _ALIAS_INDEX, KaiSession, KaiError, _split,
+                        run_lines)
 
 
 # ----------------------------------------------------------------------
@@ -682,3 +683,178 @@ def test_gen_on_pid_overrides_session():
     out = s.cmd_gen("42 ON prime-counter")
     assert "prime-counter" in out
     assert s.client.calls[0][1].endswith("/prime-counter/gen/42")
+
+
+# ----------------------------------------------------------------------
+# TELEGRAM — channel setup without putting the token in the transcript
+# ----------------------------------------------------------------------
+
+def test_telegram_status_reports_source_and_readiness():
+    s = _session({("GET", "/api/config"): {"telegram": {
+        "token_set": True, "token_source": "secrets.json", "chat_id": "42"}}})
+    out = s.cmd_telegram("")
+    assert "token set (from secrets.json)" in out
+    assert "chat 42" in out and "ready to send" in out
+
+
+def test_telegram_status_says_incomplete_without_chat():
+    s = _session({("GET", "/api/config"): {"telegram": {
+        "token_set": True, "token_source": "env", "chat_id": ""}}})
+    assert "incomplete" in s.cmd_telegram("STATUS")
+
+
+def test_telegram_load_imports_the_env_token():
+    s = _session({
+        ("POST", "/api/telegram/load_env"): {"ok": True},
+        ("GET", "/api/config"): {"telegram": {"token_set": True,
+                                              "token_source": "env", "chat_id": "1"}},
+    })
+    out = s.cmd_telegram("LOAD")
+    assert "loaded from the environment" in out and "from env" in out
+    assert ("POST", "/api/telegram/load_env", {}) in s.client.calls
+
+
+def test_telegram_load_without_env_reports_the_error():
+    s = _session({("POST", "/api/telegram/load_env"):
+                  {"ok": False, "error": "KAISEN_TG_TOKEN is not set"}})
+    out = s.dispatch("TELEGRAM LOAD")
+    assert out.startswith("ERR") and "KAISEN_TG_TOKEN is not set" in out
+
+
+def test_telegram_check_reports_the_bot_or_the_rejection():
+    s = _session({("POST", "/api/telegram/check"): {"ok": True, "username": "kaisen_bot"}})
+    assert s.cmd_telegram("CHECK") == "OK telegram token works — @kaisen_bot"
+    bad = _session({("POST", "/api/telegram/check"): {"ok": False, "error": "Unauthorized"}})
+    assert bad.dispatch("TELEGRAM CHECK") == "ERR telegram token rejected: Unauthorized"
+
+
+def test_telegram_chat_sets_the_destination():
+    s = _session({
+        ("PUT", "/api/config"): {"ok": True},
+        ("GET", "/api/config"): {"telegram": {"token_set": True,
+                                              "token_source": "secrets.json", "chat_id": "-100"}},
+    })
+    assert "chat set to -100" in s.cmd_telegram("CHAT -100")
+    assert ("PUT", "/api/config", {"telegram": {"chat_id": "-100"}}) in s.client.calls
+
+
+def test_telegram_refuses_a_token_typed_through_kai():
+    """A token typed into a KAI session lands in the transcript: the command
+    must refuse it, name the right path, and write nothing."""
+    s = _session({})
+    err = s.dispatch("TELEGRAM TOKEN 123456:ABC")
+    assert err.startswith("ERR")
+    assert "KAISEN_TG_TOKEN" in err and "TELEGRAM LOAD" in err
+    assert not any(c[0] == "PUT" for c in s.client.calls)
+
+
+# ----------------------------------------------------------------------
+# SUCCESS — the goal: criterion, actions, custom message, attachments
+# ----------------------------------------------------------------------
+
+def _goal_session(goal=None, put_ok=True, active=None):
+    """A session whose project 'demo' carries `goal`, with PUT scripted."""
+    spec = {"id": "demo", "name": "Demo",
+            "steps": {"build": {"program": "gcc", "args": []}, "verify": [], "score": []},
+            "metrics": {"ms": {"direction": "lower"}}}
+    if goal is not None:
+        spec["goal"] = goal
+
+    def put(call):
+        if put_ok:
+            return {"ok": True, "spec": call[2]["spec"]}
+        return {"ok": False,
+                "error": "invalid project spec: goal.message: unknown variable {nope}"}
+
+    s = _session({("GET", "/api/projects/demo/spec"): {"spec": spec},
+                  ("PUT", "/api/projects/demo/spec"): put,
+                  ("GET", "/api/active"): active if active is not None else _pool_active("demo")})
+    s.project = "demo"
+    return s
+
+
+def _last_spec(s):
+    return [c for c in s.client.calls if c[0] == "PUT"][-1][2]["spec"]
+
+
+def test_success_without_a_goal_says_how_to_set_one():
+    out = _goal_session().cmd_success("")
+    assert out.startswith("OK") and "has no goal" in out
+    assert "SUCCESS <metric> <op> <value>" in out
+
+
+def test_success_sets_criterion_and_actions():
+    s = _goal_session()
+    out = s.cmd_success("ms <= 10 THEN telegram,stop")
+    assert out == "OK demo: goal ms <= 10 THEN telegram, stop (message 0 line(s))" or \
+        out.startswith("OK demo: goal ms <= 10 THEN telegram, stop")
+    assert _last_spec(s)["goal"] == {"when": {"metric": "ms", "op": "<=", "value": 10},
+                                     "then": ["telegram", "stop"]}
+
+
+def test_success_changes_only_the_actions_with_then():
+    s = _goal_session({"when": {"metric": "ms", "op": "<=", "value": 10}, "then": ["stop"]})
+    s.cmd_success("THEN stop,ping,telegram")
+    assert _last_spec(s)["goal"] == {"when": {"metric": "ms", "op": "<=", "value": 10},
+                                     "then": ["stop", "ping", "telegram"]}
+
+
+def test_success_message_one_line():
+    s = _goal_session({"when": {"metric": "ms", "op": "<=", "value": 10}, "then": ["telegram"]})
+    s.cmd_success("MESSAGE done at gen {generation}")
+    assert _last_spec(s)["goal"]["message"] == "done at gen {generation}"
+
+
+def test_success_message_block_and_the_next_command_still_runs():
+    """`SUCCESS MESSAGE` + lines + END sets a multi-line message — and must
+    NOT swallow the commands that follow it."""
+    s = _goal_session({"when": {"metric": "ms", "op": "<=", "value": 10}, "then": ["telegram"]})
+    out = run_lines(s, ["SUCCESS MESSAGE", "hello {project}", "second line", "END", "STATUS"])
+    assert _last_spec(s)["goal"]["message"] == "hello {project}\nsecond line"
+    assert any(c[0] == "GET" and c[1] == "/api/active" for c in s.client.calls), \
+        "STATUS after the block must have run"
+    assert "OK" in out
+
+
+def test_success_attach_clear_and_off():
+    s = _goal_session({"when": {"metric": "ms", "op": "<=", "value": 10},
+                       "then": ["telegram"], "attach": ["champion"]})
+    s.cmd_success("ATTACH champion,llm_output,prompt")
+    assert _last_spec(s)["goal"]["attach"] == ["champion", "llm_output", "prompt"]
+    s.cmd_success("ATTACH none")
+    assert "attach" not in _last_spec(s)["goal"]
+    s.cmd_success("CLEAR")
+    assert "attach" not in _last_spec(s)["goal"] and "message" not in _last_spec(s)["goal"]
+    assert "goal removed" in s.dispatch("SUCCESS OFF")
+    assert "goal" not in _last_spec(s)
+
+
+def test_success_shows_met_generation_and_date():
+    met = _pool_active("demo", goal={"met": True, "met_generation": 7,
+                                     "met_at": 1789660000, "detail": "ms <= 10 (seen 9)"})
+    s = _goal_session({"when": {"metric": "ms", "op": "<=", "value": 10}, "then": ["stop"]},
+                      active=met)
+    out = s.cmd_success("")
+    assert "MET gen 7 on 2026-09-17" in out
+
+
+def test_success_surfaces_a_validation_error():
+    """A bad variable ends as ERR from the server — never a message with a
+    blank spot."""
+    s = _goal_session({"when": {"metric": "ms", "op": "<=", "value": 10}, "then": ["telegram"]},
+                      put_ok=False)
+    err = s.dispatch("SUCCESS MESSAGE hello {nope}")
+    assert err.startswith("ERR") and "unknown variable {nope}" in err
+
+
+def test_success_message_requires_the_telegram_action():
+    s = _goal_session({"when": {"metric": "ms", "op": "<=", "value": 10}, "then": ["stop"]})
+    err = s.dispatch("SUCCESS MESSAGE hi")
+    assert err.startswith("ERR") and "telegram" in err
+    assert not [c for c in s.client.calls if c[0] == "PUT"], "nothing may be written"
+
+
+def test_success_rejects_a_bad_value_and_unknown_verb():
+    s = _goal_session()
+    assert s.dispatch("SUCCESS ms <= ten").startswith("ERR")
+    assert s.dispatch("SUCCESS wobble").startswith("ERR")

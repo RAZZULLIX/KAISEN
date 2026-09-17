@@ -503,6 +503,7 @@ class DashboardServer:
         r.add_get("/api/config", self._api_config_get)
         r.add_put("/api/config", self._api_config_put)
         r.add_post("/api/telegram/check", self._api_telegram_check)
+        r.add_post("/api/telegram/load_env", self._api_telegram_load_env)
         r.add_get("/api/guardrails", self._api_guardrails)
         r.add_get("/api/autofix", self._api_autofix_get)
         r.add_post("/api/autofix", self._api_autofix_set)
@@ -1857,6 +1858,19 @@ class DashboardServer:
             token = self.cfg.telegram_token
         res = await asyncio.to_thread(telegram.check_token, token)
         return _json(res)
+
+    async def _api_telegram_load_env(self, request):
+        """Copy KAISEN_TG_TOKEN from the environment into secrets.json.
+
+        Makes an env-provided token durable (it keeps working once the env
+        var is gone) without the browser ever receiving the value — the GUI
+        keeps showing the mask.
+        """
+        token = os.environ.get("KAISEN_TG_TOKEN", "").strip()
+        if not token:
+            return _json({"ok": False, "error": "KAISEN_TG_TOKEN is not set"}, 400)
+        save_secret("telegram", "token", token)
+        return _json({"ok": True, "token_set": True, "token_source": "env"})
 
     async def _api_guardrails(self, request):
         return _json(guardrail_state(self.cfg))

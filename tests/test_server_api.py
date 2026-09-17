@@ -503,6 +503,23 @@ def test_telegram_token_goes_to_secrets_not_config(api, tmp_cfg, tmp_path, monke
     assert got["token_source"] == "secrets.json"
 
 
+def test_load_from_env_stores_the_env_token(api, tmp_path, monkeypatch):
+    """LOAD FROM ENV makes an env-provided token durable in secrets.json —
+    the browser never receives the value, and with no env var it says so."""
+    srv, base = api
+    monkeypatch.setattr("kaisen.config.SECRETS_FILE", tmp_path / "secrets.json")
+    monkeypatch.setenv("KAISEN_TG_TOKEN", "999:ENVTOKEN")
+
+    r = requests.post(base + "/api/telegram/load_env", json={}, timeout=5).json()
+    assert r["ok"] is True
+    stored = json.loads((tmp_path / "secrets.json").read_text())
+    assert stored["telegram"]["token"] == "999:ENVTOKEN"
+
+    monkeypatch.delenv("KAISEN_TG_TOKEN")
+    r = requests.post(base + "/api/telegram/load_env", json={}, timeout=5)
+    assert r.status_code == 400 and "not set" in r.json()["error"]
+
+
 def test_telegram_check_reports_ok_and_rejection(api, monkeypatch):
     """The Check button asks Telegram (getMe) once, on demand — and reports
     what Telegram said, not a guess."""

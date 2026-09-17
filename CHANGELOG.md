@@ -35,6 +35,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Telegram's `getMe` ON DEMAND — once, when clicked, not on every keystroke
   — and answers `✔ works — @your_bot` or Telegram's own error.  It can also
   validate the *stored* token without the GUI ever knowing it.
+- **KAI can arm a goal and its Telegram message.**  `SUCCESS` shows the
+  project's goal (criterion, actions, message, attachments, and
+  `MET gen N on <date>` once it fired); `SUCCESS <metric> <op> <value> [THEN
+  a,b]` sets it; `SUCCESS MESSAGE` + lines + `END` writes the custom message
+  (`SUCCESS MESSAGE <text>` for one line, and a block never swallows the
+  commands that follow it); `SUCCESS ATTACH champion,llm_output,prompt`;
+  `SUCCESS CLEAR` drops message + attachments; `SUCCESS OFF` removes the
+  goal.  Everything is validated server-side, so a bad variable returns
+  `ERR …` listing what is available instead of sending a message with blank
+  spots.  `TELEGRAM STATUS|LOAD|CHECK|CHAT <id>` covers the channel from a
+  session — `LOAD` imports `KAISEN_TG_TOKEN` into secrets.json, and
+  `TELEGRAM TOKEN …` is refused on purpose so a secret never lands in a
+  session transcript.
+- **`Load from env` beside the Telegram token field** (Settings): it appears
+  when `KAISEN_TG_TOKEN` is set and copies the token into secrets.json so it
+  keeps working once the variable is gone — the value is never shown in the
+  browser.  The field is labelled simply `Bot token`, with one short yellow
+  note saying where the token in effect comes from.
 - **`telegram` goal action — your own message, with attachments.**  A goal
   may carry a multi-line `message` with `{variables}`
   (`{project}`, `{goal}`, `{seen}`, `{generation}`, `{datetime}`,

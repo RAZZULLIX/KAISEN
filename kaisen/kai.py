@@ -171,6 +171,29 @@ BARE command lines, never prefixed with OK. Commands (case-insensitive):
                              REMEMBER it: the size survives a restart, so
                              KAI and the GUI always agree. Without <n> it
                              reports the size + this project's job limits.
+  SUCCESS [<metric> <op> <value> [THEN a,b]] | MESSAGE [<text>] | ATTACH <a,b> | CLEAR | OFF
+                             the project's SUCCESS GOAL.  Bare SUCCESS shows
+                             it (criterion, actions, message, attachments,
+                             and MET gen N + date if it already fired).
+                             `SUCCESS proved_open >= 2 THEN telegram,stop`
+                             sets the criterion and actions.  MESSAGE with no
+                             text starts a block ending with END (multi-line);
+                             `MESSAGE <text>` sets one line.  ATTACH takes
+                             champion, llm_output, prompt (or `none`).
+                             CLEAR drops the message/attachments; OFF removes
+                             the goal.  Variables: {project} {project_id}
+                             {metric} {op} {value} {seen} {goal} {generation}
+                             {date} {time} {datetime} {fitness} {metrics}
+                             {detail} {actions}.  Validation is server-side:
+                             a typo returns ERR, never a blank spot.
+  TELEGRAM [STATUS|LOAD|CHECK|CHAT <id>]
+                             the Telegram channel.  STATUS: token set, from
+                             where, chat id, ready?  LOAD copies
+                             KAISEN_TG_TOKEN from the environment into
+                             secrets.json (0600, gitignored).  CHECK asks
+                             Telegram whether the token works.  CHAT sets the
+                             destination.  The token is NEVER typed through
+                             KAI — it would land in the transcript.
   BUDGET SERVER [<sid>] [SET max_tokens <n> reset <r> max_generations <n>]
                              per-server usage budget (optional). Caps tokens /
                              generations inside a reset window so a frontier
@@ -262,6 +285,8 @@ ALIASES: Dict[str, List[str]] = {
     "WAIT": ["WAIT", "SYNC", "AWAIT", "JOIN"],
     "BUDGET": ["BUDGET", "TIME", "REMAINING", "LEFT"],
     "WORKERS": ["WORKERS", "WORKER", "PROCS"],
+    "TELEGRAM": ["TELEGRAM", "TG"],
+    "SUCCESS": ["SUCCESS", "GOALMSG", "GOALTEXT"],
     "LOGS": ["LOGS", "LOG", "TAIL"],
     "MODELCHECK": ["MODELCHECK", "CHECKMODEL", "MCHECK"],
     "SERVERS": ["SERVERS", "LLM", "BACKENDS"],
@@ -843,6 +868,214 @@ class KaiSession:
                          f"{lim.get('max_workers') or 'no cap'}, reserved "
                          f"{lim.get('reserve_workers') or 'none'}")
         return " ".join(parts)
+
+    # -- telegram channel -------------------------------------------------
+    def _telegram_status(self) -> str:
+        """One line: is the channel usable, and where does the token come from."""
+        cfg = self.client.call("GET", "/api/config", read_timeout=10.0)
+        tg = cfg.get("telegram") or {}
+        token = "set" if tg.get("token_set") else "NOT set"
+        src = tg.get("token_source") or "unset"
+        chat = tg.get("chat_id") or "NOT set"
+        ready = "ready to send" if (tg.get("token_set") and tg.get("chat_id")) else "incomplete"
+        return f"token {token} (from {src}), chat {chat} — {ready}"
+
+    def cmd_telegram(self, arg: str) -> str:
+        """The Telegram channel — and no secrets through the chat.
+
+        TELEGRAM              status: token set? from where? chat id? ready?
+        TELEGRAM LOAD         copy KAISEN_TG_TOKEN from the environment into
+                              secrets.json (0600, gitignored) — the token
+                              itself never travels through KAI
+        TELEGRAM CHECK        ask Telegram (getMe) whether the token works
+        TELEGRAM CHAT <id>    set the destination chat id
+        """
+        tokens = arg.split()
+        verb = tokens[0].upper() if tokens else ""
+        value = " ".join(tokens[1:]).strip()
+        if verb in ("", "STATUS"):
+            return f"OK telegram {self._telegram_status()}"
+        if verb == "LOAD":
+            res = self.client.call("POST", "/api/telegram/load_env", {}, read_timeout=30.0)
+            if res.get("error"):
+                raise KaiError(str(res["error"]))
+            return f"OK telegram token loaded from the environment — {self._telegram_status()}"
+        if verb == "CHECK":
+            res = self.client.call("POST", "/api/telegram/check", {}, read_timeout=60.0)
+            if not res.get("ok"):
+                raise KaiError(f"telegram token rejected: {res.get('error')}")
+            who = f"@{res['username']}" if res.get("username") else (res.get("name") or "bot")
+            return f"OK telegram token works — {who}"
+        if verb == "CHAT":
+            if not value:
+                raise KaiError("TELEGRAM CHAT <id> — the destination chat id")
+            self.client.call("PUT", "/api/config", {"telegram": {"chat_id": value}},
+                             read_timeout=30.0)
+            return f"OK telegram chat set to {value} — {self._telegram_status()}"
+        if verb in ("TOKEN", "KEY"):
+            # Deliberately NOT a command: a token typed into a KAI session
+            # lands in the transcript.  Say how to do it instead.
+            raise KaiError("the token is never typed through KAI — put it in "
+                           "KAISEN_TG_TOKEN and run TELEGRAM LOAD, or use "
+                           "Settings → Telegram")
+        raise KaiError("TELEGRAM [STATUS|LOAD|CHECK|CHAT <id>]")
+
+    # -- success goal (criterion, actions, message, attachments) ----------
+    def _success_line(self, goal: Dict[str, Any]) -> str:
+        when = goals_mod.when_of(goal)
+        if not when:
+            return "no goal"
+        actions = ", ".join(goals_mod.actions_of(goal)) or "none"
+        extra = []
+        if goal.get("message"):
+            n = len(str(goal["message"]).splitlines())
+            extra.append(f"message {n} line(s)")
+        if goal.get("attach"):
+            extra.append("attach " + ",".join(goals_mod.attachments_of(goal)))
+        return (f"goal {when.get('metric')} {when.get('op')} {when.get('value')} "
+                f"THEN {actions}" + (f" ({'; '.join(extra)})" if extra else ""))
+
+    def _put_spec(self, pid: str, spec: Dict[str, Any]) -> None:
+        res = self.client.call("PUT", f"/api/projects/{pid}/spec", {"spec": spec},
+                               read_timeout=30.0)
+        if not res.get("ok"):
+            raise KaiError(str(res.get("error") or "spec rejected"))
+
+    def _goal_met_note(self, pid: str) -> List[str]:
+        """`MET gen N on <date>` when this goal already fired (state, not the
+        engine: a finished project may not be in the pool)."""
+        try:
+            act = self._active_state()
+            row = next((e for e in (act.get("engines") or [])
+                        if e.get("project_id") == pid), None)
+            fired = (row or {}).get("goal") or {}
+            if not fired.get("met"):
+                return []
+            when = ""
+            try:
+                when = " on " + time.strftime("%Y-%m-%d %H:%M",
+                                              time.localtime(float(fired.get("met_at"))))
+            except (TypeError, ValueError):
+                pass
+            return [f"MET gen {fired.get('met_generation')}{when}"]
+        except Exception:
+            return []
+
+    def cmd_success(self, arg: str, lines: Optional[List[str]] = None) -> str:
+        """The project's SUCCESS goal — criterion, actions, custom message.
+
+        SUCCESS                                    show the goal (+ MET, if fired)
+        SUCCESS <metric> <op> <value> [THEN a,b]   set the criterion/actions
+        SUCCESS THEN stop,telegram                 change only the actions
+        SUCCESS MESSAGE <text>                     set a one-line message
+        SUCCESS MESSAGE + lines + END              set a multi-line message
+        SUCCESS ATTACH champion,llm_output,prompt  files to send
+        SUCCESS CLEAR                              drop message + attachments
+        SUCCESS OFF                                remove the goal
+
+        The message variables ({project} {goal} {seen} {generation} {datetime}
+        {fitness} {metrics} {detail} {actions} …) are validated server-side:
+        a typo comes back as ERR, never as a message with blank spots.
+        """
+        pid = self._need_project()
+        spec = (self.client.call("GET", f"/api/projects/{pid}/spec",
+                                 read_timeout=10.0) or {}).get("spec") or {}
+        if not spec:
+            raise KaiError(f"project '{pid}' not found")
+        goal = dict(spec.get("goal") or {})
+        text = " ".join(arg.split())
+        upper = text.upper()
+
+        if not text:
+            if not goals_mod.when_of(goal):
+                return (f"OK {pid} has no goal — set one with "
+                        f"`SUCCESS <metric> <op> <value> THEN stop,telegram`")
+            out = [f"OK {self._success_line(goal)}"]
+            if goal.get("message"):
+                out.append("MESSAGE:")
+                out.extend("  " + ln for ln in str(goal["message"]).splitlines())
+            if goal.get("attach"):
+                out.append("ATTACH " + ", ".join(goals_mod.attachments_of(goal)))
+            out.extend(self._goal_met_note(pid))
+            return "\n".join(out)
+
+        if upper == "OFF":
+            if not goal:
+                return f"OK {pid} has no goal"
+            spec.pop("goal", None)
+            self._put_spec(pid, spec)
+            return f"OK {pid}: goal removed — nothing will stop this project now"
+
+        if upper == "CLEAR":
+            for key in ("message", "attach"):
+                goal.pop(key, None)
+            spec["goal"] = goal
+            self._put_spec(pid, spec)
+            return f"OK {pid}: message and attachments cleared — {self._success_line(goal)}"
+
+        if upper.startswith("MESSAGE"):
+            body = text[len("MESSAGE"):].strip()
+            if body:
+                msg = body
+            elif lines:
+                msg = "\n".join(lines)
+            else:
+                raise KaiError("SUCCESS MESSAGE needs text: `SUCCESS MESSAGE <text>` "
+                               "or `SUCCESS MESSAGE` + lines + END")
+            if "telegram" not in goals_mod.actions_of(goal):
+                raise KaiError("the message needs the telegram action first — "
+                               "`SUCCESS <metric> <op> <value> THEN telegram,stop`")
+            goal["message"] = msg
+            spec["goal"] = goal
+            self._put_spec(pid, spec)
+            return (f"OK {pid}: message set ({len(msg.splitlines())} line(s)) — "
+                    f"{self._success_line(goal)}")
+
+        if upper.startswith("ATTACH"):
+            raw = text[len("ATTACH"):].strip()
+            names = [n for n in re.split(r"[,\s]+", raw) if n]
+            if names and names[0].lower() in ("none", "clear", "off", "-"):
+                goal.pop("attach", None)
+                what = "attachments cleared"
+            else:
+                goal["attach"] = names
+                what = "attachments " + ",".join(names)
+            if "telegram" not in goals_mod.actions_of(goal):
+                raise KaiError("attachments need the telegram action first — "
+                               "`SUCCESS <metric> <op> <value> THEN telegram,stop`")
+            spec["goal"] = goal
+            self._put_spec(pid, spec)
+            return f"OK {pid}: {what} — {self._success_line(goal)}"
+
+        # criterion form: <metric> <op> <value> [THEN action,action]
+        head, then_names = text, None
+        split = re.split(r"\bTHEN\b", text, maxsplit=1, flags=re.IGNORECASE)
+        if len(split) == 2:
+            head = split[0].strip()
+            then_names = [n for n in re.split(r"[,\s]+", split[1].strip()) if n]
+        parts = head.split()
+        if not parts and then_names:
+            if not goals_mod.when_of(goal):
+                raise KaiError("set the criterion first: "
+                               "`SUCCESS <metric> <op> <value> THEN ...`")
+            goal["then"] = then_names
+        elif len(parts) == 3:
+            metric, op, raw_value = parts
+            try:
+                value = float(raw_value)
+            except ValueError:
+                raise KaiError(f"'{raw_value}' is not a number — "
+                               f"`SUCCESS <metric> <op> <value>`")
+            goal["when"] = {"metric": metric, "op": op,
+                            "value": int(value) if value.is_integer() else value}
+            if then_names:
+                goal["then"] = then_names
+        else:
+            raise KaiError("SUCCESS [<metric> <op> <value> [THEN action,action]] | "
+                           "MESSAGE [<text>] | ATTACH <names> | CLEAR | OFF")
+        spec["goal"] = goal
+        self._put_spec(pid, spec)
+        return f"OK {pid}: {self._success_line(goal)}"
 
     def cmd_budget(self, arg: str) -> str:
         """Two forms:
@@ -1684,6 +1917,10 @@ class KaiSession:
                 return self.cmd_budget(rest)
             if cmd == "WORKERS":
                 return self.cmd_workers(rest)
+            if cmd == "TELEGRAM":
+                return self.cmd_telegram(rest)
+            if cmd == "SUCCESS":
+                return self.cmd_success(rest, code_lines or [])
             if cmd == "PAUSE":
                 return self.cmd_pause(rest)
             if cmd == "RESUME":
@@ -1725,6 +1962,22 @@ class KaiSession:
             return f"ERR {type(e).__name__}: {e}"
 
 
+def _wants_block(line: str) -> bool:
+    """Does this line open a multi-line block that ends with END?
+
+    CANDIDATE/BASELINE always do.  SUCCESS does ONLY for a bare `MESSAGE`:
+    `SUCCESS MESSAGE <text>` is a one-line message, and it must not swallow
+    the commands that follow it.
+    """
+    word, rest = _split(line)
+    cmd = _ALIAS_INDEX.get(word)
+    if cmd in ("CANDIDATE", "BASELINE"):
+        return True
+    if cmd == "SUCCESS":
+        return " ".join(rest.split()).upper() == "MESSAGE"
+    return False
+
+
 def run_lines(session: KaiSession, lines: List[str]) -> str:
     """Execute a list of command lines, gathering CANDIDATE blocks.
 
@@ -1733,8 +1986,7 @@ def run_lines(session: KaiSession, lines: List[str]) -> str:
     i = 0
     while i < len(lines):
         line = lines[i].rstrip("\r\n")
-        word, _ = _split(line)
-        if _ALIAS_INDEX.get(word) in ("CANDIDATE", "BASELINE"):
+        if _wants_block(line):
             code: List[str] = []
             i += 1
             while i < len(lines) and lines[i].strip() != "END":
@@ -1762,7 +2014,7 @@ def serve_stdio(host: str, port: int, auto_start: bool = True) -> None:
         if not line.strip():
             continue
         word, _ = _split(line)
-        if _ALIAS_INDEX.get(word) in ("CANDIDATE", "BASELINE"):
+        if _wants_block(line):
             code: List[str] = []
             for raw2 in sys.stdin:
                 line2 = raw2.rstrip("\r\n")
