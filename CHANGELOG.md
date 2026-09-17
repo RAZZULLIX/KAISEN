@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [KAISEN 0.1.10-alpha (goals: a project can be DONE)] — 2026-09-17
+
+### Added
+
+- **Project goals — stop the project when it is done.** A spec may now
+  declare a success criterion plus what to do when it is met:
+
+  ```json
+  "goal": {"when": {"metric": "proved_open", "op": ">=", "value": 2},
+           "then": ["stop", "ping"]}
+  ```
+
+  `when` compares one metric — any metric declared in `metrics`, or the
+  reserved `fitness` / `generation` — against a target; `then` defaults to
+  `["stop", "ping"]`.  The check runs after every applied evaluation (the
+  baseline included) against the **champion**, so a lucky non-champion
+  candidate cannot end the run, and a goal the baseline already satisfies
+  stops immediately instead of burning a budget.  `stop` cancels the
+  in-flight streams, releases the project's worker registration and latches
+  the goal in `state.json`, so the next start does **not** resume a finished
+  project; `ping` writes the engine log line + a `goal_met` history row and
+  sends the Telegram message when that channel is enabled (before the stop,
+  so the news never waits on teardown).  The latch is keyed by a signature of
+  the goal: it fires once per goal, and **editing the goal re-arms** the
+  project.  An unmeasured metric is simply not met — never an error.  Action
+  names are validated against a registry, so a typo (`"notify"`) fails the
+  spec loudly instead of silently disarming the stop.  Surfaced in
+  `GET /api/active` (each pool row carries `goal`) and in KAI `SPEC`
+  (`SUCCESS <metric> <op> <value> THEN <actions> [MET gen N]`), and
+  documented in §5/§8/§16/§20 of the manual plus `docs/KAI.md` (success
+  goals vs run budgets).
+
 ## [KAISEN 0.1.9-alpha (fork isolation + live view truth)] — 2026-09-17
 
 ### Fixed

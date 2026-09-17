@@ -48,7 +48,7 @@ deliberately tolerant, because LLMs decorate everything:
 |---|---|
 | `PROJECT <id>` | select the session project (must exist) |
 | `STATUS` | engine + pool overview, per-project; includes `LLM PIPELINES x/y (z in flight)` utilization line |
-| `SPEC [id]` | the project's spec: steps, metrics, goal |
+| `SPEC [id]` | the project's spec: steps, metrics, the prompt goal, and the SUCCESS goal (`SUCCESS <metric> <op> <value> THEN <actions> [MET gen N]` — the criterion that ends the project) |
 | `RUN [<n>] [FOR <secs>] [WITH <k>] [ON <pid>]` | start evolution (forever by default), background. `<n>` = stop after n SCORED generations; `FOR <secs>` = time budget (paused time excluded — only burns while the engine runs); both = whichever comes first |
 | `RUN ALL [FOR <secs>] [WITH <k>]` | start every pool member at once — same budget and `k` parallel generations each; everything about multi-engine mode is optional |
 | `BUDGET` | the in-flight run's budget: scored so far vs target + time remaining |
@@ -86,6 +86,34 @@ deliberately tolerant, because LLMs decorate everything:
 - `FACTORY`
   blocks while it generates + self-checks every project (a full 40-project
   run takes a few minutes).
+
+## Success goals vs run budgets
+
+Two different things end a run, and a client must not confuse them:
+
+- **Run budget** (`RUN <n>`, `RUN FOR <secs>`) — a LIMIT you set with the
+  command. `BUDGET` counts against it, `WAIT` blocks on it, it is persisted
+  in `kai_runs.json` so a daemon restart keeps the remaining budget, and it
+  is cleared when the run ends. Reaching it ends *the run*.
+- **Success goal** — the project's own criterion, declared once in
+  `project.json`: `"goal": {"when": {"metric": …, "op": …, "value": …},
+  "then": [...]}`, with `then` defaulting to `["stop", "ping"]` (manual §5).
+
+When the project's CHAMPION satisfies that goal the engine acts by itself,
+with no command in flight: it appends a `goal_met` row to the project
+history, pings (Telegram when configured), and by default **stops the
+project**. The latch lives in the project's `state.json`, so a restart
+neither resumes a finished project nor re-pings it; **editing the goal
+re-arms it**. `SPEC` shows the criterion and whether it already fired:
+
+```
+SUCCESS proved_open >= 2 THEN stop, ping [MET gen 147]
+```
+
+So a run can end because its budget ran out *or* because the project is
+done. `STATUS`/`BUDGET` describe the budget; a project stopped by its goal
+is the project saying it has nothing left to reach — check `SPEC`, and
+edit the goal if you want it to keep going.
 
 ## Routing
 

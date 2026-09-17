@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from . import skills as skills_mod
+from . import goals as goals_mod
 from .llm import GenerationCancelled, ModelOrchestrator, ServerError
 from .memory import ProjectMemory
 from .projects import Project, ProjectRegistry
@@ -1489,6 +1490,11 @@ class ProjectEngine:
             self.results.append({**{"generation": gen, "outcome": "valid", "fitness": fitness}, **metrics})
             self._log(f"gen {gen}: valid fitness={fitness:.5f} (best {best_f:.5f})")
 
+        # Only now is the champion known: a goal is a property of the
+        # project's BEST result, so a lucky non-champion candidate must not
+        # end the run.
+        self._check_goal(gen)
+
     def set_max_candidates(self, n: Optional[int] = None) -> int:
         """Effective candidate-fallback cap (KAI/API AUTOFIX candidates).
         None = keep current. 1 = single-block extraction (old behavior)."""
@@ -1645,6 +1651,64 @@ class ProjectEngine:
         tpl = (spec.get("github") or {}).get("readme_template") or "# Best result\n\n- **Generation:** {gen}\n- **Fitness:** {fitness}\n{metrics}"
         rows = "\n".join(f"- **{k}:** {v}" for k, v in metrics.items())
         return tpl.replace("{gen}", str(gen)).replace("{fitness}", f"{fitness:.5f}").replace("{metrics}", rows)
+
+    # -- goals -------------------------------------------------------------
+    def goal_status(self) -> Dict[str, Any]:
+        """Snapshot of the project's goal ({} when it has none)."""
+        return self.state.goal_snapshot()
+
+    def _check_goal(self, gen: int) -> None:
+        """Fire the project's goal actions once its champion meets the goal.
+
+        Called after every applied evaluation (baseline included), so a
+        project whose baseline already satisfies its goal stops instead of
+        burning generations to rediscover it.  The condition is latched by
+        goal SIGNATURE: it fires once (stop + one ping) and stays quiet
+        while the goal keeps holding; editing the goal re-arms it.
+        """
+        goal = (self.project.spec or {}).get("goal") or {}
+        if not goals_mod.when_of(goal):
+            return
+        sig = goals_mod.signature(goal)
+        if self.state.goal_met(sig):
+            return
+        best = self.state.best or {}
+        met = goals_mod.evaluate(goal, best.get("metrics") or {}, best.get("fitness"), gen)
+        if not met:
+            return
+        actions = goals_mod.actions_of(goal)
+        detail = goals_mod.describe(met)
+        self.state.set_goal_met(sig, met, detail)
+        self.state.append_history({
+            "generation": met["generation"],
+            "outcome": "goal_met",
+            "detail": f"goal met: {detail}" + (f" — actions: {', '.join(actions)}" if actions else ""),
+        })
+        self.state.save()
+        self._log(f"gen {met['generation']}: GOAL MET — {detail}"
+                  + (f" ({', '.join(actions)})" if actions else ""))
+        if goals_mod.PING in actions:
+            self._ping_goal(met, actions)
+        if goals_mod.STOP in actions:
+            self._log("goal reached — stopping the project (it does not resume on the next start)")
+            self.stop()
+
+    def _ping_goal(self, met: Dict[str, Any], actions: List[str]) -> None:
+        """Report a met goal on the notification channel (Telegram when it
+        is enabled — the engine log line already fired unconditionally)."""
+        lines = [f"🎯 GOAL MET — {self.project.name or self.project.id} (gen {met['generation']})",
+                 f"  {goals_mod.describe(met)}"]
+        best = self.state.best or {}
+        if best.get("fitness") is not None:
+            lines.append(f"  champion fitness {best['fitness']:.5f}")
+        if goals_mod.STOP in actions:
+            lines.append("  project stopped")
+        try:
+            resp = send_message("\n".join(lines))
+            if resp and resp.get("ok"):
+                pin_message(resp["result"]["message_id"])
+        except Exception as e:
+            self._log(f"goal ping failed: {e}")
 
     # ======================================================================
     # deepwork + lessons

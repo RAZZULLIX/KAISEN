@@ -701,6 +701,7 @@ function renderFleet(engines) {
       <span class="fleet-stat">gen <b>${escapeHtml(String(gen))}</b></span>
       <span class="fleet-stat fleet-pool" title="${escapeHtml(poolTitle(e))}">${poolBadges(e)}</span>
       <span class="fleet-stat">best <b>${escapeHtml(best)}</b>${metricBits ? ' <span class="fleet-metrics">' + metricBits + '</span>' : ''}</span>
+      ${goalBadge(e)}
       ${e.engine_error ? `<span class="fleet-error" title="${escapeHtml(e.engine_error)}">${escapeHtml(e.engine_error)}</span>` : ''}
       <span class="fleet-actions">
         <button class="btn btn-sm" onclick="switchProject('${id}')">Select</button>
@@ -723,6 +724,20 @@ function poolBadges(e) {
   bits.push(`⚙ ${run}${q ? '+' + q : ''}${e.max_workers ? '/' + e.max_workers : ''}`);
   if (e.reserve_workers) bits.push(`⚙🔒${e.reserve_workers}`);
   return bits.map(escapeHtml).join(' ');
+}
+
+// The project's success goal, when it declares one: the criterion, and a
+// clear marker once it has fired (the project is stopped by it and is not
+// resumed on the next start).
+function goalBadge(e) {
+  const g = e && e.goal;
+  if (!g || !g.when) return '';
+  const cond = `${g.when.metric} ${g.when.op} ${g.when.value}`;
+  const actions = (g.then || []).join(', ') || 'none';
+  const tip = g.met === true
+    ? `goal MET at gen ${g.met_generation}: ${g.detail || cond} — actions: ${actions}`
+    : `goal: ${cond} → ${actions}`;
+  return `<span class="fleet-stat fleet-goal${g.met === true ? ' met' : ''}" title="${escapeHtml(tip)}">🎯 ${escapeHtml(cond)}${g.met === true ? ' ✓' : ''}</span>`;
 }
 
 function poolTitle(e) {

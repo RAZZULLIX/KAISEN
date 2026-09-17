@@ -53,6 +53,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 
 from .util import load_json, save_json
+from . import goals as goals_mod
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 _RUNS_FILE = REPO_ROOT / "kai_runs.json"   # persistent run goals (gitignored)
@@ -468,6 +469,9 @@ class KaiSession:
         goal = (spec.get("prompts") or {}).get("goal", "")
         if goal:
             lines.append(f"GOAL {goal[:200]}")
+        # The SUCCESS goal (spec `goal.when`/`then`) is NOT the prompt goal
+        # above: it is the criterion that ends the project.
+        lines.extend(self._success_goal_lines(pid, spec))
         steps = spec.get("steps", {})
         for stage in ("build", "verify", "score"):
             s = steps.get(stage, [])
@@ -487,6 +491,29 @@ class KaiSession:
             + ")" for k, v in metrics.items()
         ) or "none"))
         return "\n".join(lines)
+
+    def _success_goal_lines(self, pid: str, spec: Dict[str, Any]) -> List[str]:
+        """The project's SUCCESS goal — the criterion that ends the project.
+        Deliberately NOT printed as `GOAL` above, which is the prompt's goal
+        text; saying both "GOAL" would be one word for two mechanisms."""
+        goal = spec.get("goal") or {}
+        when = goals_mod.when_of(goal)
+        if not when:
+            return []
+        actions = goals_mod.actions_of(goal) or ["none"]
+        line = (f"SUCCESS {when.get('metric')} {when.get('op')} {when.get('value')} "
+                f"THEN {', '.join(actions)}")
+        try:
+            act = self._active_state()
+            row = next((e for e in (act.get("engines") or [])
+                        if e.get("project_id") == pid), None)
+            fired = (row or {}).get("goal") or {}
+            if fired.get("met"):
+                line += f" [MET gen {fired.get('met_generation')}]"
+        except Exception:
+            pass
+        return [line]
+
     def cmd_run(self, arg: str) -> str:
         """Start the sidecar. KAISEN evolves FOREVER by default; goals are
         optional flags: RUN <n> = stop after n scored generations,

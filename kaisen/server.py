@@ -271,10 +271,15 @@ class DashboardServer:
                     worker_count=project.default_workers,
                     events=EngineEvent(),
                 )
+                # A project whose goal is met is DONE: restore it stopped
+                # rather than running it again (the latch survives restarts).
+                finished = eng.state.goal_done()
                 eng.start(parallel_gens=int(info.get("parallel_gens")
                                             or project.default_parallel_gens),
-                          paused=self._restore_paused)
+                          paused=self._restore_paused or finished)
                 self.engines[pid] = eng
+                if finished:
+                    print(f"[KAISEN] {pid}: goal already met — restored stopped, not running")
                 restored += 1
             except Exception:
                 continue
@@ -303,6 +308,12 @@ class DashboardServer:
                 depth = pool.queue_depth() if pool is not None else {}
             except Exception:
                 depth = {}
+            # A stubbed/older state object may not carry the goal accessor:
+            # read it defensively, like every other optional field here.
+            try:
+                goal_row: Dict[str, Any] = st.goal_snapshot() if st else {}
+            except Exception:
+                goal_row = {}
             row = {
                 "project_id": pid,
                 "name": eng.project.name if eng.project else pid,
@@ -311,6 +322,7 @@ class DashboardServer:
                 "paused": (st.paused if st else True),
                 "best_fitness": best.get("fitness"),
                 "best_metrics": dict(best.get("metrics") or {}),
+                "goal": goal_row,
                 "parallel_gens": getattr(eng, "_parallel_gens", 1),
                 "max_parallel": getattr(eng, "_max_parallel", None),
                 "reserve": bool(getattr(eng, "_reserve", False)),

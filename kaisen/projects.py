@@ -27,6 +27,7 @@ from typing import Any, Dict, List, Optional
 
 from .config import PROJECTS_DIR
 from .scores import validate_metric_schema
+from .goals import validate_goal
 from .util import load_json, save_json
 
 SPEC_FILE = "project.json"
@@ -57,6 +58,10 @@ DEFAULT_SPEC: Dict[str, Any] = {
         "score": [],
     },
     "metrics": {},
+    # Success criterion + what to do when it is met.  `when` absent/None ==
+    # the project has no goal; `then` empty/absent == the default actions
+    # (stop the project, ping).
+    "goal": {"when": None, "then": []},
     "telemetry": {"enabled": True, "progress_token": "KAISEN_PROGRESS", "live_fields": []},
     # Startup sizing: project > config defaults > built-in 1/1.
     "engine": {"workers": None, "parallel_gens": None,
@@ -97,6 +102,7 @@ def validate_spec(spec: Dict[str, Any]) -> List[str]:
     metrics = spec.get("metrics") or {}
     # validate_metric_schema reports the empty case — don't double it.
     errors.extend(validate_metric_schema(metrics))
+    errors.extend(validate_goal(spec.get("goal"), metrics))
     eng = spec.get("engine") or {}
     autofix = eng.get("autofix")
     if autofix is not None:
@@ -157,7 +163,7 @@ def _merge_defaults(spec: Dict[str, Any]) -> Dict[str, Any]:
     merged = copy.deepcopy(DEFAULT_SPEC)
     merged.update(copy.deepcopy(spec))
     # nested merges
-    for section in ("steps", "metrics", "telemetry", "engine", "select", "guardrails", "prompts", "skills", "data"):
+    for section in ("steps", "metrics", "goal", "telemetry", "engine", "select", "guardrails", "prompts", "skills", "data"):
         if isinstance(spec.get(section), dict):
             base = merged.get(section)
             if isinstance(base, dict):

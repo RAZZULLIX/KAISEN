@@ -203,6 +203,7 @@ projects/<id>/
 | `steps.verify` | list of verify commands (same shape); all must pass |
 | `steps.score` | list of score commands; must emit parseable metrics. A score step may declare `stage: "screen"|"confirm"` — the CONFIRM step's metric is what selects the champion (robust measurement); screen steps are cheap filters (§6) |
 | `metrics` | `{key: {direction: lower\|higher, weight: float, unit?: str, constraint?: float}}` — at least one required. A `constraint` is a HARD gate: violating it rejects the candidate outright (outcome `constraint_violated`) — no fitness weighting can compensate. Enforce "without changing the output" here, not in a prompt |
+| `goal` | the SUCCESS goal: `{when: {metric, op, value}, then: [...]}` — when the champion satisfies it, the project is STOPPED and reported, and it is not resumed on the next start (*Success goals* below) |
 | `telemetry` | `{enabled, progress_token, live_fields}` — harness progress protocol (§6) |
 | `engine` | `{workers, parallel_gens, max_parallel, reserve, autofix, retention, build_cache}` — startup sizing (project > config > 1/1). `parallel_gens` = how many generations of this project may stream at once; `max_parallel` = OPTIONAL ceiling on that (spend guard); `reserve` = OPTIONAL, hold this project's endpoints instead of sharing the pool (§9). `workers` is a MINIMUM for the SHARED pool (§8): the pool is process-wide, so N projects each asking 4 workers still yield 4 workers, not 4N; `autofix: {tries, repair}` sets per-project compile-loop caps (KAI override > spec > config); `retention: {enabled, keep_last, keep_best}` opt-in pruning of old `runs/gen_*` dirs (§8); `build_cache: true` routes the build through a per-project ccache masquerade (`CCACHE_DIR` = `projects/<id>/.kaisen_cache`) so unchanged translation units reuse across generations — off by default, needs ccache on PATH (§6) |
 | `select.hysteresis` | champion replacement threshold; 1 = any improvement, 1.1 = must beat the champion by 10% (values < 1 are clamped to 1) |
@@ -212,6 +213,78 @@ projects/<id>/
 | `data` | `{protected_files: [...]}` — files hashed before every stage; `edit_scope: ["fname", ...]` restricts which functions the LLM may change (§6); `max_changed_lines: N` — one-change diff guard: reject any candidate that touches more than N lines vs the champion (guardrail, not prompt; absent/0 = off) (§6) |
 | `scores` | optional multi-score-type support (`types` + `active`) |
 | `files` | (suggest-flow only) harness scripts + baseline bundled at CREATE time |
+
+### Success goals — the project stops when it is DONE
+
+A goal turns "run forever until it gets good" into "run until it gets good,
+then stop". It is declared in the spec:
+
+```json
+"goal": {
+  "when": {"metric": "proved_open", "op": ">=", "value": 2},
+  "then": ["stop", "ping"]
+}
+```
+
+| Key | Meaning |
+|---|---|
+| `goal.when.metric` | any metric declared in `metrics`, or the reserved `fitness` / `generation` |
+| `goal.when.op` | `>=`, `>`, `<=`, `<`, `==`, `!=` |
+| `goal.when.value` | the number to compare against (for a lower-is-better metric write `<=`) |
+| `goal.then` | ordered actions to fire. Default — and an empty list — is `["stop", "ping"]` |
+
+Semantics, precisely:
+
+- **Checked against the CHAMPION, after every applied evaluation**, the
+  baseline included. A candidate that satisfies the goal metric but loses on
+  fitness is not the project's result and does not end the run. A goal the
+  baseline already satisfies stops the project right away: there is nothing
+  to reach, and you get the ping instead of a wasted budget.
+- **An unmeasured metric is not met** — never an error. The early
+  generations of a project legitimately lack some measurements, and a goal
+  must not fire on a value that was never taken.
+- **`stop`** (the default) stops the project: in-flight LLM streams are
+  cancelled, workers are released, in-flight evaluations are recorded as
+  cancelled, and the goal is latched in `state.json`, so **the next start
+  does not resume it** — a finished project stays finished instead of
+  quietly coming back with the boot. Pressing play explicitly does run it
+  again; with the goal still latched it will not re-fire until the goal is
+  edited.
+- **`ping`** reports it: always an engine log line and a `goal_met` row in
+  the project history, plus a Telegram message when that channel is enabled
+  (§16) — sent before the stop, so the news never depends on the teardown.
+- **Fires once per goal.** The latch is keyed by a signature of the goal, so
+  while the same goal keeps holding you get exactly one ping and one history
+  row. **Editing the goal re-arms it** (raise `value`, change the metric):
+  the old latch no longer matches the spec, so the project is live again. A
+  stale "met" is never reported for a goal that changed.
+- **`then` is the extension point** (`IF GOAL MET THEN …`): `["ping"]` alone
+  reports a milestone and keeps working. Action names are validated against
+  the registry, so a typo like `"notify"` fails the spec loudly instead of
+  silently disarming your stop.
+
+Examples:
+
+```json
+"goal": {"when": {"metric": "proved_open", "op": ">=", "value": 2}}
+"goal": {"when": {"metric": "ms", "op": "<=", "value": 10}}
+"goal": {"when": {"metric": "generation", "op": ">=", "value": 500}}
+"goal": {"when": {"metric": "fitness", "op": "<=", "value": 300}, "then": ["ping"]}
+```
+
+The first three stop the project (and ping) when 2 targets are proved, when
+the benchmark drops under 10 ms, and after generation 500 respectively; the
+last one only reports and keeps evolving.
+
+See them live: the pool rows in `GET /api/active` carry
+`goal: {when, then, met, met_generation, detail}` (§20), and KAI `SPEC`
+prints `SUCCESS <metric> <op> <value> THEN <actions> [MET gen N]`
+(`docs/KAI.md`).
+
+**Not to be confused with** two other things called "goal": `prompts.goal`
+is the goal TEXT handed to the model (§11), and a KAI `RUN <n>` /
+`RUN FOR <secs>` budget (`docs/KAI.md`) is a run LIMIT. Those end a run by
+schedule; this one ends it by achievement.
 
 ### Command placeholders
 
@@ -574,6 +647,11 @@ One engine per running project; several engines form the pool.
   queues ONE re-evaluation through the real pipeline, and forces the
   result to become the champion (`baseline_reeval`), so selection never
   compares against a champion measured on the stale baseline.
+- **Goal check** — after every applied evaluation (baseline included) the
+  engine compares the champion against the project's success goal; a met
+  goal fires its actions, by default stopping the project and pinging
+  (§5). A stopped project is not auto-resumed on the next start, and the
+  goal fires once until it is edited.
 
 ---
 
@@ -670,7 +748,9 @@ STOP
 loop: a conversational multi-step flow that interviews you, writes the
 baseline, designs the harness (driver step for library-style code with
 no `main`), assembles the spec, and validates it for real before
-anything is created:
+anything is created. (The **success goal** of §5 is a different thing:
+this flow builds a project *from words*, that one ends a project
+*by achievement*.)
 
 - **structure validation** — every required field, step shapes,
   metric schema;
@@ -970,7 +1050,10 @@ Backed by `notes.json` (gitignored).
 ## 16. Telegram & GitHub
 
 - **Telegram** — new-best notifications (`🏆 NEW BEST`) with metric
-  details, pinned messages, optional file upload. Env-first secrets:
+  details, pinned messages, optional file upload — and `🎯 GOAL MET` when a
+  project reaches its success goal (§5): the criterion, the champion
+  fitness and the fact that the project was stopped, sent before the stop
+  so the news never waits on teardown. Env-first secrets:
   `KAISEN_TG_TOKEN`, `KAISEN_TG_CHAT_ID`.
 - **GitHub upload** — per project (`github` spec block): the champion
   is uploaded to a repo/branch/path with a README report when a new
@@ -1088,6 +1171,9 @@ The GUI itself is an HTTP client; everything is available over
   engine runs), `POST /api/projects/{pid}/smoke`
 - `POST /api/projects/suggest`, `POST /api/suggest/status` — the GOAL flow
 - `GET /api/active` — selected engine snapshot + `engines[]` pool
+  (every pool row carries its `goal`: `{when, then, met, met_generation,
+  detail}`; the selected engine's snapshot exposes the same under
+  `state.goal`)
 - `POST /api/engine/switch|start|stop|pause` — pool controls
   (all take `project_id`)
 - `POST /api/engine/parallel_gens` — parallel generations per project
@@ -1154,4 +1240,4 @@ measurement of the real workload, not by headline multipliers.
 
 ---
 
-*Manual is the complete reference as of KAISEN 0.1.9-alpha.*
+*Manual is the complete reference as of KAISEN 0.1.10-alpha.*

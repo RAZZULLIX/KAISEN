@@ -7,8 +7,10 @@ process (workers return results; the main process applies selection).
 
 from __future__ import annotations
 
+import time
 from typing import Any, Dict, List, Optional
 
+from . import goals
 from .projects import Project
 from .util import load_json, save_json
 
@@ -29,6 +31,10 @@ class ProjectState:
         self.data.setdefault("active", False)
         self.data.setdefault("baseline_code_path", None)
         self.data.setdefault("baseline_source_hash", None)  # drift guard
+        # Goal latch: {signature, met, met_at, met_generation, detail}.
+        # `signature` fingerprints the goal that fired, so EDITING the goal
+        # re-arms a project instead of leaving it marked done forever.
+        self.data.setdefault("goal", {})
 
     # -- accessors --------------------------------------------------------
 
@@ -64,6 +70,55 @@ class ProjectState:
         self.data["llm_paused"] = bool(paused)
         self.save()
 
+    # -- goal -------------------------------------------------------------
+
+    def goal_met(self, signature: str) -> bool:
+        """True when THIS goal already fired (latched by signature)."""
+        fired = self.data.get("goal") or {}
+        return bool(fired.get("met")) and fired.get("signature") == signature
+
+    def set_goal_met(self, signature: str, descriptor: Dict[str, Any], detail: str) -> None:
+        self.data["goal"] = {
+            "signature": signature,
+            "met": True,
+            "met_at": time.time(),
+            "met_generation": int(descriptor.get("generation") or self.generation),
+            "detail": detail,
+        }
+
+    def goal_done(self) -> bool:
+        """True when the goal in the CURRENT spec has already fired.
+
+        The restart paths consult this: a project whose goal is met is
+        finished, so it must not silently start running again.
+        """
+        goal = (self.project.spec or {}).get("goal") or {}
+        if not goals.when_of(goal):
+            return False
+        return self.goal_met(goals.signature(goal))
+
+    def goal_snapshot(self) -> Dict[str, Any]:
+        """The project's goal as the API/GUI sees it ({}, when it has none).
+
+        A latch from an older goal is never reported as met: the signature
+        must match the goal in the spec right now.
+        """
+        goal = (self.project.spec or {}).get("goal") or {}
+        when = goals.when_of(goal)
+        if not when:
+            return {}
+        sig = goals.signature(goal)
+        fired = self.data.get("goal") or {}
+        live = bool(fired.get("met")) and fired.get("signature") == sig
+        return {
+            "when": when,
+            "then": goals.actions_of(goal),
+            "met": live,
+            "met_at": fired.get("met_at") if live else None,
+            "met_generation": fired.get("met_generation") if live else None,
+            "detail": fired.get("detail") if live else None,
+        }
+
     def next_generation(self) -> int:
         self.data["generation"] = int(self.data.get("generation", 0)) + 1
         return int(self.data["generation"])
@@ -96,4 +151,5 @@ class ProjectState:
             "paused": self.paused,
             "active": bool(self.data.get("active")),
             "started_at": self.data.get("started_at"),
+            "goal": self.goal_snapshot(),
         }
