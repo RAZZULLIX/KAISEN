@@ -205,7 +205,7 @@ projects/<id>/
 | `metrics` | `{key: {direction: lower\|higher, weight: float, unit?: str, constraint?: float}}` — at least one required. A `constraint` is a HARD gate: violating it rejects the candidate outright (outcome `constraint_violated`) — no fitness weighting can compensate. Enforce "without changing the output" here, not in a prompt |
 | `goal` | the SUCCESS goal: `{when: {metric, op, value}, then: [...]}` — when the champion satisfies it, the project is STOPPED and reported, and it is not resumed on the next start (*Success goals* below) |
 | `telemetry` | `{enabled, progress_token, live_fields}` — harness progress protocol (§6) |
-| `engine` | `{workers, parallel_gens, max_parallel, reserve, autofix, retention, build_cache}` — startup sizing (project > config > 1/1). `parallel_gens` = how many generations of this project may stream at once; `max_parallel` = OPTIONAL ceiling on that (spend guard); `reserve` = OPTIONAL, hold this project's endpoints instead of sharing the pool (§9). `workers` is a MINIMUM for the SHARED pool (§8): the pool is process-wide, so N projects each asking 4 workers still yield 4 workers, not 4N; `autofix: {tries, repair}` sets per-project compile-loop caps (KAI override > spec > config); `retention: {enabled, keep_last, keep_best}` opt-in pruning of old `runs/gen_*` dirs (§8); `build_cache: true` routes the build through a per-project ccache masquerade (`CCACHE_DIR` = `projects/<id>/.kaisen_cache`) so unchanged translation units reuse across generations — off by default, needs ccache on PATH (§6) |
+| `engine` | `{workers, parallel_gens, max_parallel, reserve, autofix, retention, build_cache}` — startup sizing (project > config > 1/1). `parallel_gens`/`workers` here are the STARTUP defaults: a runtime change (KAI `RUN WITH k` / `WORKERS n`, the dashboard chips, `POST /api/engine/parallel_gens|workers`) is REMEMBERED across restarts for that project, and the API/GUI always report the running values. `parallel_gens` = how many generations of this project may stream at once; `max_parallel` = OPTIONAL ceiling on that (spend guard); `reserve` = OPTIONAL, hold this project's endpoints instead of sharing the pool (§9). `workers` is a MINIMUM for the SHARED pool (§8): the pool is process-wide, so N projects each asking 4 workers still yield 4 workers, not 4N; `autofix: {tries, repair}` sets per-project compile-loop caps (KAI override > spec > config); `retention: {enabled, keep_last, keep_best}` opt-in pruning of old `runs/gen_*` dirs (§8); `build_cache: true` routes the build through a per-project ccache masquerade (`CCACHE_DIR` = `projects/<id>/.kaisen_cache`) so unchanged translation units reuse across generations — off by default, needs ccache on PATH (§6) |
 | `select.hysteresis` | champion replacement threshold; 1 = any improvement, 1.1 = must beat the champion by 10% (values < 1 are clamped to 1) |
 | `guardrails` | `{enabled, allow_extra, deny_extra}` — extra command rules |
 | `prompts` | `{generation_dir, goal, study, lesson}` — prompt templates |
@@ -263,6 +263,45 @@ Semantics, precisely:
   the registry, so a typo like `"notify"` fails the spec loudly instead of
   silently disarming your stop.
 
+#### A custom Telegram message (`then: ["telegram"]`)
+
+Write the message in the spec — multi-line is fine — with `{variables}` the
+engine fills in from the generation that reached the goal:
+
+```json
+"goal": {
+  "when": {"metric": "proved_open", "op": ">=", "value": 2},
+  "then": ["telegram", "stop"],
+  "message": "🎯 {project} hit its goal at gen {generation} ({datetime})\n{detail}\nchampion {fitness} · {metrics}",
+  "attach": ["champion", "llm_output", "prompt"]
+}
+```
+
+| Variable | Value |
+|---|---|
+| `{project}` / `{project_id}` | project name / id |
+| `{metric}` `{op}` `{value}` `{seen}` | the comparison that fired (`seen` = the value that satisfied it) |
+| `{goal}` | the criterion, e.g. `proved_open >= 2` |
+| `{generation}` | the generation that reached the goal |
+| `{date}` `{time}` `{datetime}` | when it happened (local time) |
+| `{fitness}` | champion fitness at that moment |
+| `{metrics}` | every champion metric, `k=v` |
+| `{detail}` | the engine's summary, e.g. `proved_open >= 2 (seen 3)` |
+| `{actions}` | the actions this goal fired |
+
+| Attachment | File |
+|---|---|
+| `champion` | the winning file (`projects/<id>/best/`) |
+| `llm_output` | the winning generation's LLM reply, reasoning included (`runs/gen_NNNNNN/llm_raw.txt`) |
+| `prompt` | the prompt that produced it (`runs/gen_NNNNNN/prompt.txt`) |
+
+Numbers render the way you would type them (`{seen}` → `3`, not `3.00000`).
+A missing attachment file is skipped, never fatal; an unknown variable or
+attachment fails spec validation, so a typo cannot silently send blanks.  The
+message needs the Telegram channel configured (§16) — without it the engine
+logs that it skipped it.  `ping` remains the built-in one-line notice;
+`telegram` is *your* message, and the two can be used together.
+
 Examples:
 
 ```json
@@ -276,10 +315,24 @@ The first three stop the project (and ping) when 2 targets are proved, when
 the benchmark drops under 10 ms, and after generation 500 respectively; the
 last one only reports and keeps evolving.
 
-See them live: the pool rows in `GET /api/active` carry
-`goal: {when, then, met, met_generation, detail}` (§20), and KAI `SPEC`
-prints `SUCCESS <metric> <op> <value> THEN <actions> [MET gen N]`
-(`docs/KAI.md`).
+**Finding the finished ones.** The projects list carries a `🎯 GOAL` filter
+(click it to show only projects that reached their goal, with the count on
+the chip), a **Goal** column showing *when* it was reached — the date, the
+time and the generation (`Sep 17 05:08 PM gen 147`) — and a sort selector
+whose *goal date (newest / oldest)* orders the list by that moment.  The date
+is the wall-clock moment the generation that met the goal was evaluated, and
+it is persisted in the project's state, so it survives restarts and is what
+KAI prints too:
+
+```
+SUCCESS proved_open >= 2 THEN stop, ping [MET gen 147 @ 2026-09-17 17:08]
+```
+
+See them live: the pool rows in `GET /api/active` and every row of the
+projects list (`GET /api/projects`) carry
+`goal: {when, then, met, met_at, met_generation, detail}` (§20) — `met_at`
+is the epoch time the listed date is rendered from — and KAI `SPEC` prints
+the same criterion plus when it fired (`docs/KAI.md`).
 
 **Not to be confused with** two other things called "goal": `prompts.goal`
 is the goal TEXT handed to the model (§11), and a KAI `RUN <n>` /
@@ -1055,6 +1108,18 @@ Backed by `notes.json` (gitignored).
   fitness and the fact that the project was stopped, sent before the stop
   so the news never waits on teardown. Env-first secrets:
   `KAISEN_TG_TOKEN`, `KAISEN_TG_CHAT_ID`.
+- **Where the bot token lives** — the token is a SECRET, so the Settings
+  field writes it to `secrets.json` (0600, gitignored), **never** to
+  `config.json`, and `KAISEN_TG_TOKEN` wins over both.  A token an older
+  install left in `config.json` is moved into the secrets file at startup.
+  The API only ever returns `********` plus its source
+  (`env` / `secrets.json`), so the GUI cannot read the secret back.
+  **Check** next to the field asks Telegram's `getMe` ON DEMAND — once, when
+  you click it, not on every keystroke — and answers `✔ works — @your_bot`
+  or Telegram's own error (`✖ Unauthorized`).
+- **Goal messages** — a project can send a custom message when its goal is
+  reached, with the winning file, the LLM reply and the prompt attached
+  (§5, `then: ["telegram"]`).
 - **GitHub upload** — per project (`github` spec block): the champion
   is uploaded to a repo/branch/path with a README report when a new
   best is found. Token via `KAISEN_GITHUB_TOKEN`.
@@ -1084,13 +1149,13 @@ Complete reference — copy from `config.example.json`:
 | `llm.routing` | `"cost"` | `"cost"` (tier-first, default) or `"adaptive"` (best measured score-per-$ per skill, within allowlists) |
 | `llm.allowlists` | `{}` | per-skill model allowlists: `{"suggest": ["frontier-70b"], "llm_repair": ["tier:tiny"]}` — entries are server ids or `tier:<t>` |
 | `llm.servers[].budget` | `null` | per-server usage budget (optional): `{max_tokens, max_generations, reset}` — caps tokens/generations inside a reset window; an exhausted server drops out of routing until it rolls over (§12 usage budgets) |
-| `workers.default_count` | `4` | worker processes in the SHARED pool (process-wide — every project's jobs drain through the same queue) |
+| `workers.default_count` | `4` | worker processes in the SHARED pool (process-wide — every project's jobs drain through the same queue).  This is the STARTUP default: resizing the pool from the dashboard's worker chip or KAI (`WORKERS <n>`) is REMEMBERED across restarts (`engine_pool.json`), and Settings → General shows `now: N` when the running size differs from this one |
 | `workers.max_count` | `32` | hard global ceiling on worker processes AND the bound on jobs outstanding (queued + running) across every project |
 | `workers.affinity` | `""` | pin worker processes to cores (e.g. `"0,2"` or `"1-3"`) — empty = no pinning (§17 quiet benchmarking) |
 | `workers.quiet` | `false` | run workers at lower priority (nice +10) so scorers don't starve the dashboard/LLMs |
 | `engine.start_paused` | `true` | new engines boot paused |
 | `engine.default_parallel_gens` | `1` | parallel generations per project at start (project spec > config > 1) |
-| `telegram.*` | off | notifications (§16) |
+| `telegram.chat_id` | `""` | Telegram chat to notify (§16).  The bot TOKEN is a secret: it lives in `secrets.json` (0600, gitignored) or `KAISEN_TG_TOKEN`, never in `config.json`; Settings → Telegram has a **Check** button that asks Telegram whether it works |
 | `safety.global_off` | `false` | requires `KAISEN_SAFETY_OFF=1` too (§18) |
 | `autofix.build_enabled` | `true` | default for NEW projects |
 | `autofix.max_tries` | `5` | deterministic autofix turns before giving up on a build |

@@ -133,6 +133,15 @@ def test_set_workers_resizes_pool(tmp_path):
             self.shrinks += 1
             self.count = min(self.count, n)
 
+        def set_count(self, n):
+            # Same contract as the real pool: clamp to >= 1, shrink, then
+            # grow to exactly n.
+            n = max(1, int(n))
+            self.shrink_to(n)
+            while self.count < n:
+                self.add_worker()
+            return self.count
+
         def worker_count(self):
             return self.count
 

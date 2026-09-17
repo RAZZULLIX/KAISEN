@@ -31,6 +31,7 @@ from __future__ import annotations
 import hashlib
 import json
 import operator
+import re
 from typing import Any, Dict, List, Optional
 
 # Comparison operators a `when` clause may use.
@@ -49,12 +50,47 @@ GENERATION = "generation"
 RESERVED_METRICS = (FITNESS, GENERATION)
 
 # Actions a goal may fire.  `stop` ends the project (the default), `ping`
-# reports it.  Adding one means adding it here and handling it in
-# Engine._fire_goal().
+# reports it, `telegram` sends a CUSTOM message (with optional attachments)
+# written by the user.  Adding one means adding it here and handling it in
+# Engine._check_goal().
 STOP = "stop"
 PING = "ping"
-ACTIONS = (STOP, PING)
+TELEGRAM = "telegram"
+ACTIONS = (STOP, PING, TELEGRAM)
 DEFAULT_ACTIONS: List[str] = [STOP, PING]
+
+# Variables a telegram message may use.  {metric} etc. come from the
+# comparison that fired; {fitness}/{metrics} from the champion at that
+# moment; {generation}/{date} from the generation that reached the goal.
+PLACEHOLDERS: Dict[str, str] = {
+    "project": "project name",
+    "project_id": "project id",
+    "metric": "the metric the goal watches",
+    "op": "the comparison operator",
+    "value": "the target value",
+    "seen": "the value that satisfied it",
+    "goal": 'the criterion, e.g. "proved_open >= 2"',
+    "generation": "generation that reached the goal",
+    "date": "date it was reached (local)",
+    "time": "time it was reached (local)",
+    "datetime": "date and time it was reached (local)",
+    "fitness": "champion fitness at that moment",
+    "metrics": "every champion metric, k=v",
+    "detail": 'the engine\'s summary, e.g. "proved_open >= 2 (seen 3)"',
+    "actions": "the actions this goal fired",
+}
+
+# Files that may ride along with the message.
+ATTACHMENTS: Dict[str, str] = {
+    "champion": "the winning file (project best/)",
+    "llm_output": "the LLM reply of the winning generation (reasoning included)",
+    "prompt": "the prompt that produced it",
+}
+
+# What a `telegram` action sends when the spec gives no `message`.
+DEFAULT_MESSAGE = ("🎯 GOAL MET — {project} (gen {generation}, {datetime})\n"
+                   "  {detail}\n"
+                   "  champion fitness {fitness}")
 
 
 def when_of(goal: Any) -> Optional[Dict[str, Any]]:
@@ -83,6 +119,46 @@ def actions_of(goal: Any) -> List[str]:
     if isinstance(then, list):
         return [str(a) for a in then]
     return []
+
+
+def message_template(goal: Any) -> str:
+    """The custom message a `telegram` action sends (default when absent)."""
+    if isinstance(goal, dict):
+        msg = goal.get("message")
+        if isinstance(msg, str) and msg.strip():
+            return msg
+    return DEFAULT_MESSAGE
+
+
+def attachments_of(goal: Any) -> List[str]:
+    """Attachment names requested by a goal ([] when none / not a list)."""
+    if not isinstance(goal, dict):
+        return []
+    att = goal.get("attach")
+    if isinstance(att, str):
+        att = [att]
+    if not isinstance(att, list):
+        return []
+    return [str(a) for a in att]
+
+
+def render_message(template: str, context: Dict[str, Any]) -> str:
+    """Substitute {placeholders} in a goal message.
+
+    Unknown names render empty rather than raising: validation rejects them
+    at spec time, and a message must never take the engine down at fire
+    time (a goal that stops a project has to stay reliable).
+    """
+    def sub(match: "re.Match") -> str:
+        key = match.group(1)
+        if key not in PLACEHOLDERS:
+            return ""
+        value = context.get(key, "")
+        if isinstance(value, float):
+            value = f"{value:.5f}"
+        return str(value)
+
+    return re.sub(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}", sub, template or "")
 
 
 def signature(goal: Any) -> str:
@@ -185,15 +261,47 @@ def validate_goal(goal: Any, metrics: Dict[str, Any]) -> List[str]:
     value = when.get("value")
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         errors.append("goal.when.value: must be a number (the target to compare against)")
-    if then is not None:
-        if isinstance(then, str):
-            names = [then]
-        elif isinstance(then, list):
-            names = then
-        else:
+    # `then` first, so the message/attach checks below know whether the
+    # telegram action is even present.
+    if isinstance(then, str):
+        names: List[Any] = [then]
+    elif isinstance(then, list):
+        names = list(then)
+    else:
+        names = []
+        if then is not None:
             errors.append("goal.then: must be a list of action names")
-            names = []
-        for name in names:
-            if not isinstance(name, str) or name not in ACTIONS:
-                errors.append(f"goal.then: unknown action {name!r} (supported: {', '.join(ACTIONS)})")
+    for name in names:
+        if not isinstance(name, str) or name not in ACTIONS:
+            errors.append(f"goal.then: unknown action {name!r} (supported: {', '.join(ACTIONS)})")
+    has_tg = TELEGRAM in [n for n in names if isinstance(n, str)]
+
+    # The custom telegram message: only meaningful with the telegram action,
+    # and every {variable} must be one we can fill (a typo would silently
+    # send an empty spot).
+    msg = goal.get("message")
+    if msg is not None:
+        if not has_tg:
+            errors.append(f"goal.message: needs '{TELEGRAM}' in goal.then (nothing would send it)")
+        if not isinstance(msg, str):
+            errors.append("goal.message: must be text (multi-line is fine)")
+        else:
+            for var in re.findall(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}", msg):
+                if var not in PLACEHOLDERS:
+                    errors.append(
+                        f"goal.message: unknown variable {{{var}}} "
+                        f"(available: {', '.join(sorted(PLACEHOLDERS))})")
+    att = goal.get("attach")
+    if att is not None:
+        if not has_tg:
+            errors.append(f"goal.attach: needs '{TELEGRAM}' in goal.then (nothing would send it)")
+        att_list = [att] if isinstance(att, str) else att
+        if not isinstance(att_list, list):
+            errors.append("goal.attach: must be a list of attachment names")
+        else:
+            for a in att_list:
+                if not isinstance(a, str) or a not in ATTACHMENTS:
+                    errors.append(
+                        f"goal.attach: unknown attachment {a!r} "
+                        f"(available: {', '.join(ATTACHMENTS)})")
     return errors

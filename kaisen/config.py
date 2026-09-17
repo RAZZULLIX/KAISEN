@@ -164,6 +164,24 @@ def load_secrets() -> Dict[str, Any]:
     return load_json(SECRETS_FILE, {}) or {}
 
 
+def migrate_telegram_secret(cfg) -> bool:
+    """Move a Telegram bot token that predates secrets.json into it, and drop
+    it from config.json.
+
+    The token is a secret; config.json is a file the framework may publish
+    (config.example.json is shipped).  Returns True when a move happened, so
+    the caller can say so once at startup.
+    """
+    token = str((cfg.data.get("telegram") or {}).get("token") or "").strip()
+    if not token:
+        return False
+    if not str((load_secrets().get("telegram") or {}).get("token") or "").strip():
+        save_secret("telegram", "token", token)
+    cfg.data.setdefault("telegram", {})["token"] = ""
+    cfg.save()
+    return True
+
+
 def save_secret(section: str, key: str, value: str) -> None:
     """Upsert (or delete, when empty) one secret entry. The file is written
     with owner-only permissions (0600) — standard practice for local
@@ -254,7 +272,17 @@ class FrameworkConfig:
     # ---- secrets (env-first) ----
     @property
     def telegram_token(self) -> str:
-        return resolve_secret(["KAISEN_TG_TOKEN"], self.telegram.get("token", ""))
+        """Env → secrets.json (0600, gitignored) → legacy config.json value.
+
+        The bot token is a secret: it belongs in secrets.json, never in
+        config.json (which the framework may publish, and whose example is
+        shipped).  A token left in config.json from an older install is
+        migrated at startup by migrate_telegram_secret()."""
+        return resolve_secret(
+            ["KAISEN_TG_TOKEN"],
+            (load_secrets().get("telegram") or {}).get("token", "")
+            or self.telegram.get("token", ""),
+        )
 
     @property
     def telegram_chat_id(self) -> str:

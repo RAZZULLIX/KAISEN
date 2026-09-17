@@ -177,6 +177,13 @@
                 <div class="lang-filter-list" id="lang-filter-list"></div>
               </div>
             </div>
+            <button class="btn" id="goal-filter-btn" onclick="toggleGoalFilter()" title="Show only the projects that reached their goal">🎯 GOAL <span id="goal-filter-count">0</span></button>
+            <select id="projects-sort" class="btn" onchange="renderProjects()" title="Sort projects">
+              <option value="engine">Sort: engine state</option>
+              <option value="goal_desc">Sort: goal date (newest)</option>
+              <option value="goal_asc">Sort: goal date (oldest)</option>
+              <option value="name">Sort: name</option>
+            </select>
             <span class="projects-count" id="projects-count"></span>
             <button class="btn btn-primary" onclick="openNewProjectModal()">+ New Project</button>
           </div>
@@ -190,6 +197,7 @@
                   <th class="col-engine">Engine</th>
                   <th class="col-best">Best</th>
                   <th class="col-valid">Valid</th>
+                  <th class="col-goal">Goal</th>
                   <th class="col-actions">Actions</th>
                 </tr>
               </thead>
@@ -271,7 +279,7 @@
           </section>
           <section class="panel">
             <div class="panel-header"><div class="panel-title">Workers</div></div>
-            <div class="form-row"><label>Default count</label><input id="cfg-wcount" type="number"></div>
+            <div class="form-row"><label>Default count<span class="field-now" id="cfg-wcount-now"></span></label><input id="cfg-wcount" type="number"></div>
             <div class="form-row"><label>Max count (total jobs outstanding)</label><input id="cfg-wmax" type="number"></div>
           </section>
           <section class="panel">
@@ -295,7 +303,13 @@
           </section>
           <section class="panel">
             <div class="panel-header"><div class="panel-title">Telegram</div></div>
-            <div class="form-row"><label>Token</label><input id="cfg-tg-token" type="password" placeholder="env: KAISEN_TG_TOKEN"></div>
+            <div class="form-row"><label>Bot token<span class="field-now" id="cfg-tg-token-src"></span></label>
+              <div class="inline-check">
+                <input id="cfg-tg-token" type="password" placeholder="123456:ABC… (env KAISEN_TG_TOKEN wins)">
+                <button class="btn btn-sm" id="cfg-tg-check-btn" onclick="checkTelegramToken()" title="Ask Telegram whether this token works (once, on demand — not on every keystroke)">Check</button>
+                <span class="check-result" id="cfg-tg-check-result"></span>
+              </div>
+            </div>
             <div class="form-row"><label>Chat ID</label><input id="cfg-tg-chat"></div>
           </section>
           <section class="panel">
@@ -371,10 +385,10 @@
             <div class="form-row"><label>Lessons enabled</label><input id="pj-lessons" type="checkbox"></div>
             <div class="form-row"><label>Auto-fix build errors (default fixer)</label><input id="pj-autofix" type="checkbox"></div>
             <div class="form-row"><label>Custom fixer script (path, overrides default)</label><input id="pj-autofix-custom" placeholder="harness/autofix.py — optional"></div>
-            <div class="form-row"><label>Startup workers (blank = config default)</label><input id="pj-workers" type="number" min="1" placeholder="config default"></div>
+            <div class="form-row"><label>Startup workers (blank = config default)<span class="field-now" id="pj-workers-now"></span></label><input id="pj-workers" type="number" min="1" placeholder="config default"></div>
             <div class="form-row"><label>Max workers — jobs in flight, blank = no cap</label><input id="pj-max-workers" type="number" min="1" placeholder="no cap (shares the whole pool)"></div>
             <div class="form-row"><label>Reserved workers — guaranteed job slots, blank = none</label><input id="pj-reserve-workers" type="number" min="1" placeholder="none (shared pool)"></div>
-            <div class="form-row"><label>Startup parallel generations (blank = config default)</label><input id="pj-parallel-gens" type="number" min="1" placeholder="config default"></div>
+            <div class="form-row"><label>Startup parallel generations (blank = config default)<span class="field-now" id="pj-parallel-gens-now"></span></label><input id="pj-parallel-gens" type="number" min="1" placeholder="config default"></div>
             <div class="form-row"><label>Max parallel generations — blank = no cap</label><input id="pj-max-parallel" type="number" min="1" placeholder="no cap (shares the whole pool)"></div>
             <div class="form-row"><label>Reserve endpoints — hold this project's LLM slots</label><input id="pj-reserve" type="checkbox"></div>
           </section>

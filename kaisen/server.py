@@ -22,11 +22,13 @@ try:
 except ImportError:  # pragma: no cover
     web = None
 
-from .config import TEMP_ROOT, FrameworkConfig, PROJECTS_DIR, get_config, save_secret
+from .config import TEMP_ROOT, FrameworkConfig, PROJECTS_DIR, get_config, save_secret, load_secrets
+from . import telegram
 from .budget import Budget
 from .engine import STATE_PAUSED, STATE_STOPPED, STATE_STOPPING, ProjectEngine
 from .projects import ProjectRegistry
 from .state import ProjectState
+from .workers import get_worker_pool
 from .guardrails import check_command, guardrail_state
 from .util import load_json, save_json
 from .suggest import _safe_rel_path
@@ -105,6 +107,15 @@ class DashboardServer:
     ):
         self.registry = registry
         self.cfg = config
+        # A Telegram token from an older install lives in config.json; move it
+        # to secrets.json (0600, gitignored) so it is never in a file the
+        # framework may publish.  One-time, and only says so when it happens.
+        try:
+            from .config import migrate_telegram_secret
+            if migrate_telegram_secret(self.cfg):
+                print("[KAISEN] telegram token moved from config.json to secrets.json")
+        except Exception:
+            pass
         self.engines: Dict[str, ProjectEngine] = {}
         self._selected_project_id: Optional[str] = None
         # Crash-recovery file lives NEXT TO config.json (repo root in
@@ -228,14 +239,37 @@ class DashboardServer:
         return self.engine or self._fallback_engine()
 
     def _persist_engine_pool(self) -> None:
-        """Snapshot which projects are running (and how many pipelines each)
-        to engine_pool.json — crash recovery: the next daemon boot restores
-        the pool instead of silently losing every in-flight run."""
+        """Snapshot which projects are running — and HOW — to
+        engine_pool.json.  Crash recovery: the next daemon boot restores the
+        pool instead of silently losing every in-flight run, including the
+        RUNTIME sizing set from the GUI or KAI (parallel generations, the
+        pool share, the worker count).  A number you dial in has to survive
+        a restart; the project's spec keeps the STARTUP defaults, which is a
+        different thing and is only ever changed by editing the spec."""
         try:
+            pool = None
+            for eng in self.engines.values():
+                pool = getattr(eng, "pool", None)
+                if pool is not None:
+                    break
+            # A stub pool (tests) must never stop the engine list from being
+            # written: read the size defensively, like the snapshot does.
+            try:
+                pool_size = int(pool.worker_count()) if pool is not None else None
+            except Exception:
+                pool_size = None
             data = {
                 "selected": self._selected_project_id,
+                # The worker pool is process-wide: one number for the pool.
+                "workers": pool_size,
                 "engines": {
-                    pid: {"parallel_gens": getattr(eng, "_parallel_gens", 1)}
+                    pid: {
+                        "parallel_gens": getattr(eng, "_parallel_gens", 1),
+                        "max_parallel": getattr(eng, "_max_parallel", None),
+                        "reserve": bool(getattr(eng, "_reserve", False)),
+                        "max_workers": getattr(eng, "_max_workers", None),
+                        "reserve_workers": getattr(eng, "_reserve_workers", None),
+                    }
                     for pid, eng in self.engines.items()
                 },
             }
@@ -278,6 +312,19 @@ class DashboardServer:
                 eng.start(parallel_gens=int(info.get("parallel_gens")
                                             or project.default_parallel_gens),
                           paused=self._restore_paused or finished)
+                # start() re-reads the spec's STARTUP defaults; put back the
+                # RUNTIME sizing that was dialed in from the GUI or KAI (the
+                # pool file is the record of how this pool was running).  An
+                # older file simply has no keys here and keeps the defaults.
+                try:
+                    if "max_parallel" in info or "reserve" in info:
+                        eng.set_share(info.get("max_parallel") or 0,
+                                      bool(info.get("reserve")))
+                    if "max_workers" in info or "reserve_workers" in info:
+                        eng.set_worker_share(info.get("max_workers") or 0,
+                                             info.get("reserve_workers") or 0)
+                except Exception:
+                    pass
                 self.engines[pid] = eng
                 if finished:
                     print(f"[KAISEN] {pid}: goal already met — restored stopped, not running")
@@ -287,6 +334,14 @@ class DashboardServer:
         sel = data.get("selected")
         if sel and sel in self.engines:
             self._selected_project_id = sel
+        # The worker pool is process-wide, so it comes back at the size it
+        # was LEFT at — one number, not the first project's spec value.
+        want_workers = data.get("workers")
+        if isinstance(want_workers, int) and want_workers > 0 and self.engines:
+            try:
+                next(iter(self.engines.values())).set_workers(want_workers)
+            except Exception:
+                pass
         if restored:
             print(f"[KAISEN] restored {restored} engine(s) from engine_pool.json")
         elif engines:
@@ -447,6 +502,7 @@ class DashboardServer:
         r.add_post("/api/onboarding/demo", self._api_onboarding_demo)
         r.add_get("/api/config", self._api_config_get)
         r.add_put("/api/config", self._api_config_put)
+        r.add_post("/api/telegram/check", self._api_telegram_check)
         r.add_get("/api/guardrails", self._api_guardrails)
         r.add_get("/api/autofix", self._api_autofix_get)
         r.add_post("/api/autofix", self._api_autofix_set)
@@ -1453,10 +1509,26 @@ class DashboardServer:
         POST {"project_id"?, "count"?, "max_workers"?, "reserve_workers"?}"""
         data = await request.json() if request.can_read_body else {}
         pid = str(data.get("project_id") or "") if isinstance(data, dict) else ""
+        want_count = data.get("count") if isinstance(data, dict) else None
+        wants_limits = isinstance(data, dict) and (
+            data.get("max_workers") is not None or data.get("reserve_workers") is not None)
         eng = self._engine_for(pid or None)
+        if eng is None and want_count is not None and not wants_limits:
+            # The worker pool is PROCESS-WIDE, so its size needs no running
+            # project — resize (and remember) it even with an empty pool.
+            try:
+                count = int(want_count)
+            except (TypeError, ValueError):
+                return _json({"ok": False, "error": "count must be an integer"}, 400)
+            if count < 1:
+                return _json({"ok": False, "error": "count must be >= 1"}, 400)
+            eff = await asyncio.to_thread(get_worker_pool().set_count, count)
+            self._persist_engine_pool()
+            return _json({"ok": True, "workers": eff})
         if eng is None:
             return _json({"ok": False, "error": "no engine running"}, 400)
         out: Dict[str, Any] = {"ok": True, "project_id": eng.project.id}
+        changed = False
         if isinstance(data, dict) and data.get("count") is not None:
             try:
                 count = int(data.get("count") or 0)
@@ -1465,11 +1537,15 @@ class DashboardServer:
             if count < 1:
                 return _json({"ok": False, "error": "count must be >= 1"}, 400)
             out["workers"] = await asyncio.to_thread(eng.set_workers, count)
+            changed = True
         if isinstance(data, dict) and (data.get("max_workers") is not None
                                        or data.get("reserve_workers") is not None):
             out.update(await asyncio.to_thread(
                 eng.set_worker_share,
                 data.get("max_workers"), data.get("reserve_workers")))
+            changed = True
+        if changed:
+            # The size you dial in must survive a restart (engine_pool.json).
             self._persist_engine_pool()
         if len(out) == 2 and out["ok"]:      # nothing asked for: report state
             out["limits"] = eng.pool.limits(eng.project.id)
@@ -1726,16 +1802,19 @@ class DashboardServer:
         # Never expose secrets plainly to the GUI.
         public = json.loads(json.dumps(cfg))
         public["safety"] = guardrail_state(self.cfg)
-        # Telegram token: show masked + source, never the value.
-        if self.cfg.telegram.get("token"):
-            public["telegram"]["token"] = "********"
-            public["telegram"]["token_source"] = "config.json"
+        # Telegram bot token: masked value + WHERE it lives.  "********" or
+        # empty means "keep the stored one" on save.
+        tok_env = bool(os.environ.get("KAISEN_TG_TOKEN", "").strip())
+        tok_sec = bool((load_secrets().get("telegram") or {}).get("token"))
+        tok_cfg = bool(self.cfg.telegram.get("token"))
+        public["telegram"]["token"] = "********" if (tok_env or tok_sec or tok_cfg) else ""
+        public["telegram"]["token_source"] = ("env" if tok_env else "secrets.json" if tok_sec
+                                             else "config.json" if tok_cfg else "unset")
         for s in public.get("llm", {}).get("servers", []):
             source = self.cfg.api_key_source(s.get("id", ""))
             s["api_key"] = "********" if (s.get("api_key") or source != "unset") else ""
             s["api_key_source"] = source
         public["telegram"]["token_set"] = bool(self.cfg.telegram_token)
-
 
         return _json(public)
 
@@ -1744,10 +1823,15 @@ class DashboardServer:
         # The global safety switch cannot be changed via the GUI.
         if "safety" in data:
             data["safety"] = self.cfg.safety  # keep as-is
-        # Telegram token: "********" or empty means "keep what's configured".
+        # Telegram bot token is a SECRET: it is written to secrets.json
+        # (0600, gitignored) and never merged into config.json.  "********"
+        # (the masked value the GUI read) or "" means "keep the stored one",
+        # so saving unrelated settings can never wipe it.
         tg = data.get("telegram")
-        if isinstance(tg, dict) and tg.get("token") in ("", "********"):
-            tg["token"] = self.cfg.telegram.get("token", "")
+        if isinstance(tg, dict):
+            typed = tg.pop("token", None)
+            if isinstance(typed, str) and typed.strip() and typed != "********":
+                save_secret("telegram", "token", typed.strip())
         # Deep-merge: the GUI sends only the fields it shows (e.g. llm has
         # just read/connect/retry timeouts).  A shallow update would WIPE
         # every sibling key it doesn't know about — nodata_timeout,
@@ -1755,7 +1839,24 @@ class DashboardServer:
         # corrupting the config on each "Save".
         _deep_update(self.cfg.data, data)
         self.cfg.save()
-        return _json({"ok": True})
+        return _json({"ok": True, "telegram": {
+            "token_source": ("env" if os.environ.get("KAISEN_TG_TOKEN", "").strip()
+                             else "secrets.json" if (load_secrets().get("telegram") or {}).get("token")
+                             else "config.json" if self.cfg.telegram.get("token") else "unset"),
+            "token_set": bool(self.cfg.telegram_token)}})
+
+    async def _api_telegram_check(self, request):
+        """Verify a Telegram bot token (the typed one, or the stored one).
+
+        Body: {"token": "…"} — blank/absent checks the STORED token, so the
+        GUI can offer a Check button without ever knowing the secret.
+        """
+        data = await request.json() if request.can_read_body else {}
+        token = str((data or {}).get("token") or "").strip()
+        if not token or token == "********":
+            token = self.cfg.telegram_token
+        res = await asyncio.to_thread(telegram.check_token, token)
+        return _json(res)
 
     async def _api_guardrails(self, request):
         return _json(guardrail_state(self.cfg))
@@ -1928,7 +2029,25 @@ class DashboardServer:
             "stagnation": st.stagnation,
             "best_metrics": {"position_in_large_text_compression_benchmark": None, **{k: v for k, v in metrics.items()}},
             "history": st.history[-40:],
+            # The dashboard's parallel-gens chip is a POOL-WIDE knob, so it
+            # is fed the pool's spread — never one project's number, which
+            # is how "GUI says 2 while 6 are running" happens after an
+            # agent's KAI run left one project at 6.
+            "parallel_gens_pool": self._parallel_gens_pool(),
         })
+
+    def _parallel_gens_pool(self) -> Dict[str, Any]:
+        """{min, max, engines} of the pool's parallel generations ({} when
+        nothing is running)."""
+        vals: List[int] = []
+        for eng in self.engines.values():
+            try:
+                vals.append(max(1, int(getattr(eng, "_parallel_gens", 1))))
+            except Exception:
+                continue
+        if not vals:
+            return {}
+        return {"min": min(vals), "max": max(vals), "engines": len(vals)}
 
     async def _api_modelstats(self, request):
         """Per-(server, skill) scoreboard: attempts / one-shots / wins /

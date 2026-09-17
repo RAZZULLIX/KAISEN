@@ -34,7 +34,7 @@ from .projects import Project, ProjectRegistry
 from .scores import evaluate_score_type, metric_goodness
 from .languages import ext_from_lang, fence_from_lang
 from .state import ProjectState
-from .telegram import pin_message, send_message
+from .telegram import pin_message, send_file, send_message
 from .util import file_sha256, load_json, save_json
 
 # Engine states: the system's ACTUAL state (shown in the status pill).
@@ -1689,9 +1689,96 @@ class ProjectEngine:
                   + (f" ({', '.join(actions)})" if actions else ""))
         if goals_mod.PING in actions:
             self._ping_goal(met, actions)
+        if goals_mod.TELEGRAM in actions:
+            self._telegram_goal(goal, met, actions)
         if goals_mod.STOP in actions:
             self._log("goal reached — stopping the project (it does not resume on the next start)")
             self.stop()
+
+    def _goal_context(self, met: Dict[str, Any], actions: List[str]) -> Dict[str, Any]:
+        """Values a goal message can interpolate ({placeholders})."""
+        best = self.state.best or {}
+        g = met.get("generation")
+        # The recorded moment the goal fired (not "now"): a re-sent or
+        # delayed message must say the same date it did the first time.
+        try:
+            ts = float((self.state.data.get("goal") or {}).get("met_at") or 0) or time.time()
+        except (TypeError, ValueError):
+            ts = time.time()
+        metrics = best.get("metrics") or {}
+        fit = best.get("fitness")
+
+        def num(v: Any) -> str:
+            """3.0 → '3', 3.5 → '3.5' — what a human would have typed in the
+            message, not '3.00000'."""
+            try:
+                return f"{float(v):g}"
+            except (TypeError, ValueError):
+                return "" if v is None else str(v)
+
+        return {
+            "project": self.project.name or self.project.id,
+            "project_id": self.project.id,
+            "metric": met.get("metric", ""),
+            "op": met.get("op", ""),
+            "value": num(met.get("value")),
+            "seen": num(met.get("seen")),
+            "goal": f"{met.get('metric')} {met.get('op')} {num(met.get('value'))}",
+            "generation": g if g is not None else "",
+            "date": time.strftime("%Y-%m-%d", time.localtime(ts)),
+            "time": time.strftime("%H:%M", time.localtime(ts)),
+            "datetime": time.strftime("%Y-%m-%d %H:%M", time.localtime(ts)),
+            "fitness": f"{float(fit):.5f}" if fit is not None else "",
+            "metrics": " ".join(f"{k}={num(v)}" for k, v in metrics.items()),
+            "detail": goals_mod.describe(met),
+            "actions": ", ".join(actions),
+        }
+
+    def _goal_attachment_paths(self, goal: Any, gen: Any) -> List[Any]:
+        """Requested attachments that actually exist (missing ones are
+        skipped, never fatal — the message matters more than the files)."""
+        wanted = goals_mod.attachments_of(goal)
+        if not wanted:
+            return []
+        runs = getattr(self.project, "runs_dir", None)
+        gen_dir = (runs / f"gen_{int(gen):06d}") if (runs is not None and gen) else None
+        by_name = {
+            "champion": self._champion_path(),
+            "llm_output": (gen_dir / "llm_raw.txt") if gen_dir else None,
+            "prompt": (gen_dir / "prompt.txt") if gen_dir else None,
+        }
+        out = []
+        for name in wanted:
+            p = by_name.get(name)
+            try:
+                if p and Path(p).is_file():
+                    out.append((name, Path(p)))
+            except OSError:
+                continue
+        return out
+
+    def _telegram_goal(self, goal: Any, met: Dict[str, Any], actions: List[str]) -> None:
+        """Send the user's custom goal message (with optional attachments).
+
+        Deliberately quiet on failure: a goal that stops a project must never
+        be taken down by a notification problem — the log line and the
+        history row already recorded the truth.
+        """
+        try:
+            text = goals_mod.render_message(
+                goals_mod.message_template(goal), self._goal_context(met, actions))
+            resp = send_message(text)
+            if resp is None:
+                self._log("goal telegram message skipped (telegram not configured)")
+            elif not resp.get("ok"):
+                self._log(f"goal telegram message rejected: {str(resp.get('description'))[:120]}")
+            else:
+                self._log("goal telegram message sent")
+                for name, path in self._goal_attachment_paths(goal, met.get("generation")):
+                    ok = send_file(str(path), caption=f"{self.project.id} · {name}")
+                    self._log(f"  attachment {name}: {'sent' if ok else 'failed'} ({path.name})")
+        except Exception as e:
+            self._log(f"goal telegram message failed: {e}")
 
     def _ping_goal(self, met: Dict[str, Any], actions: List[str]) -> None:
         """Report a met goal on the notification channel (Telegram when it
@@ -2030,11 +2117,7 @@ class ProjectEngine:
         processes (adds idle workers, or removes workers — a busy worker's
         in-flight job is re-queued, never lost). Returns the effective
         count."""
-        n = max(1, int(n))
-        self.pool.shrink_to(n)
-        while self.pool.worker_count() < n:
-            self.pool.add_worker()
-        eff = self.pool.worker_count()
+        eff = self.pool.set_count(n)
         self._worker_count = eff
         self._log(f"worker count: {eff}")
         return eff

@@ -52,6 +52,7 @@ deliberately tolerant, because LLMs decorate everything:
 | `RUN [<n>] [FOR <secs>] [WITH <k>] [ON <pid>]` | start evolution (forever by default), background. `<n>` = stop after n SCORED generations; `FOR <secs>` = time budget (paused time excluded — only burns while the engine runs); both = whichever comes first |
 | `RUN ALL [FOR <secs>] [WITH <k>]` | start every pool member at once — same budget and `k` parallel generations each; everything about multi-engine mode is optional |
 | `BUDGET` | the in-flight run's budget: scored so far vs target + time remaining |
+| `WORKERS <n> [ON <pid>]` | resize the SHARED worker pool (the same knob as the dashboard's worker chip); the size is REMEMBERED across restarts. With no `<n>`: report the size + this project's job limits |
 | `BUDGET SERVER [<sid>] [SET max_tokens <n> reset <r> [max_generations <n>]]` | per-server usage budget (optional): caps tokens/generations inside a reset window; an exhausted server drops out of routing until it rolls over. `n` = `1000000` / `1M` / `2.5M`; `r` = `30s` / `5m` / `12h` / `3d` / `1w` / `12:00:00` (= 12h). Blank clears a limit |
 | `SCORE <path> [ON <pid>]` | score any file through the project's pipeline — no engine, no run (audit copy under `runs/score_*`) |
 | `FUZZY <n> [ON <pid>]` | opt-in prompt diversity: random top-N scored basis per generation; also feeds the prompt the last 10 scored outcomes. 0 = off (default). Runtime only |
@@ -81,6 +82,12 @@ deliberately tolerant, because LLMs decorate everything:
 - `RUN 20` = stop after 20 scored generations. `RUN FOR 600` = 10-minute
   budget. `RUN WITH 3` = three parallel LLM pipelines. Flags combine in
   any order; `ON <pid>` targets another pool member.
+- **Sizing is remembered.** `RUN WITH <k>` and `WORKERS <n>` are runtime
+  knobs that persist (`engine_pool.json`): the next boot restores what you
+  set instead of reverting to the project's STARTUP defaults, so KAI and
+  the dashboard always agree. `SPEC` and `STATUS` report the live values;
+  the project spec's `engine.workers` / `engine.parallel_gens` remain the
+  startup defaults they fall back to for a project that never ran.
 - Multi-line commands (`BASELINE`, `CANDIDATE`) end with a line that is
   exactly `END`.
 - `FACTORY`
@@ -107,8 +114,17 @@ neither resumes a finished project nor re-pings it; **editing the goal
 re-arms it**. `SPEC` shows the criterion and whether it already fired:
 
 ```
-SUCCESS proved_open >= 2 THEN stop, ping [MET gen 147]
+SUCCESS proved_open >= 2 THEN stop, ping [MET gen 147 @ 2026-09-17 17:08]
 ```
+
+The `MET` bracket carries the generation that reached the goal and the date
+it happened (`met_at` in the API payload, also shown in the GUI's Goal
+column, which the projects list can filter and sort on).
+
+A goal can also push a **custom Telegram message** — written in the spec with
+`{variables}` (`{project}`, `{goal}`, `{seen}`, `{generation}`, `{datetime}`,
+`{fitness}`, `{metrics}`, `{detail}`, …) and optionally the winning file, the
+LLM reply and the prompt as attachments (`then: ["telegram"]`, manual §5).
 
 So a run can end because its budget ran out *or* because the project is
 done. `STATUS`/`BUDGET` describe the budget; a project stopped by its goal

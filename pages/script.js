@@ -253,7 +253,10 @@ async function fetchState() {
     showWelcome(false);
     renderWorkers(wRes.workers || {}, wRes.schema || {}, wRes.telemetry || {}, sRes.best_metrics || {});
     document.getElementById('kpi-gen').textContent = sRes.generation ?? '--';
-    if (wRes.parallel_gens != null) syncParallelGens(Number(wRes.parallel_gens));
+    // The chip is a POOL-WIDE knob: feed it the pool's spread, never the
+    // selected project's number (an agent's KAI run can leave projects at
+    // different counts — that is exactly how the chip used to lie).
+    if (sRes.parallel_gens_pool) syncParallelGensPool(sRes.parallel_gens_pool);
   } catch (e) {
     // One failed poll tick is not "engine gone" — never flip the
     // dashboard to the welcome picker over a transient hiccup.
@@ -305,25 +308,40 @@ let gensValue = null;     // unknown until the first server sync — never fake 
 let gensServer = null;    // last server-confirmed value
 let gensSending = false;
 let gensProjects = 0;     // how many engines the last pool-wide set touched
+let gensSpread = null;    // {min,max} when the pool disagrees (mixed state)
 
 function renderParallelGens() {
   const el = document.getElementById('parallel-gens-count');
-  if (el) el.textContent = gensValue ?? '—';
+  const mixed = gensSpread && gensSpread.max !== gensSpread.min;
+  if (el) el.textContent = mixed ? `${gensSpread.min}–${gensSpread.max}` : (gensValue ?? '—');
   const chip = document.getElementById('parallel-gens-chip');
   if (chip) {
     chip.querySelectorAll('button').forEach(b => { b.disabled = gensValue === null; });
-    chip.title = gensProjects
-      ? `Parallel generations — pool-wide (${gensProjects} active projects)`
-      : 'Parallel generations — pool-wide';
+    chip.title = mixed
+      ? `Parallel generations — pool-wide. Projects disagree right now: ${gensSpread.min} to ${gensSpread.max} (a KAI run or a per-project change). +/- sets them all.`
+      : gensProjects
+        ? `Parallel generations — pool-wide (${gensProjects} active projects)`
+        : 'Parallel generations — pool-wide';
   }
 }
 
-function syncParallelGens(n) {
-  // Adopt the server value only when no local change is pending,
-  // so the 1s poll never clobbers an optimistic in-flight click.
-  if (gensSending || gensValue !== gensServer) return;
-  gensValue = gensServer = n;
-  renderParallelGens();
+// The pool's own spread, from /api/state. One number everywhere is the
+// normal case; a spread is shown as a range instead of picking one project
+// and pretending it is pool-wide.
+function syncParallelGensPool(pool) {
+  const mn = Number(pool && pool.min), mx = Number(pool && pool.max);
+  if (!Number.isFinite(mn) || !Number.isFinite(mx)) return;
+  gensProjects = Number(pool.engines || gensProjects || 0);
+  const spread = { min: mn, max: mx };
+  const changed = !gensSpread || gensSpread.min !== mn || gensSpread.max !== mx;
+  gensSpread = spread;
+  if (mn === mx) {
+    if (changed || gensValue === null) { gensValue = gensServer = mn; }
+  } else {
+    // Keep the stepper anchored on the highest value: +/- applies pool-wide.
+    if (changed || gensValue === null) { gensValue = gensServer = mx; }
+  }
+  if (!gensSending) renderParallelGens();
 }
 
 async function pushParallelGens() {
@@ -336,6 +354,8 @@ async function pushParallelGens() {
     const n = Number(r.parallel_gens);
     if (n !== target) { gensValue = n; renderParallelGens(); } // server clamped — reflect truth
     if (r.applied) { gensProjects = Object.keys(r.applied).length; }
+    // Every engine took the value (pool-wide set): the spread collapses.
+    gensSpread = { min: n, max: n };
     if (gensValue !== gensServer) {
       // Clicks arrived while this round-trip was in flight: send the latest.
       gensSending = false;
@@ -1372,6 +1392,8 @@ let projectsData = [];
 let projectsEngines = {};
 let langFilterValue = null;
 let langFilterVisible = false;
+let goalFilterOnly = false;        // show only projects whose goal is met
+let projectsSortKey = 'engine';    // engine | goal_desc | goal_asc | name
 
 async function loadProjects() {
   try {
@@ -1396,6 +1418,7 @@ function visibleProjects() {
   const q = (document.getElementById('projects-search')?.value || '').trim().toLowerCase();
   return projectsData.filter(p => {
     if (langFilterValue && (p.language || '') !== langFilterValue) return false;
+    if (goalFilterOnly && !(p.goal && p.goal.met === true)) return false;
     if (q && !(p.name + ' ' + p.id).toLowerCase().includes(q)) return false;
     return true;
   });
@@ -1403,7 +1426,32 @@ function visibleProjects() {
 
 const ENGINE_ORDER = { running: 0, paused: 1, stopping: 2, pausing: 2, stopped: 3 };
 
+// When a project's goal was reached (epoch seconds), or null.  The date is
+// the moment the generation that met the goal was evaluated — persisted in
+// the project's state, so it survives restarts and re-arming the goal.
+function goalTime(p) {
+  const g = p && p.goal;
+  if (!g || g.met !== true || g.met_at == null) return null;
+  const t = Number(g.met_at);
+  return Number.isFinite(t) && t > 0 ? t : null;
+}
+
 function sortProjects(list) {
+  if (projectsSortKey === 'goal_desc' || projectsSortKey === 'goal_asc') {
+    const dir = projectsSortKey === 'goal_desc' ? -1 : 1;
+    return [...list].sort((a, b) => {
+      const ta = goalTime(a);
+      const tb = goalTime(b);
+      if (ta === null && tb === null) return a.name.localeCompare(b.name);
+      if (ta === null) return 1;        // never reached: always last
+      if (tb === null) return -1;
+      if (ta !== tb) return (ta - tb) * dir;
+      return a.name.localeCompare(b.name);
+    });
+  }
+  if (projectsSortKey === 'name') {
+    return [...list].sort((a, b) => a.name.localeCompare(b.name));
+  }
   return [...list].sort((a, b) => {
     const ea = projectsEngines[a.id];
     const eb = projectsEngines[b.id];
@@ -1413,6 +1461,25 @@ function sortProjects(list) {
     if ((a.id === activeProjectId) !== (b.id === activeProjectId)) return a.id === activeProjectId ? -1 : 1;
     return a.name.localeCompare(b.name);
   });
+}
+
+// The date the goal was reached, in the projects list (sortable column).
+function goalWhen(p) {
+  const t = goalTime(p);
+  if (t === null) return '<span class="muted">—</span>';
+  const d = new Date(t * 1000);
+  const g = p.goal;
+  const day = d.toLocaleDateString(undefined, { day: '2-digit', month: 'short' });
+  const time = d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+  const gen = g.met_generation != null ? `gen ${g.met_generation}` : '';
+  const tip = `GOAL reached ${d.toLocaleString()}${gen ? ` — ${gen}` : ''}${g.detail ? ` — ${g.detail}` : ''}`;
+  return `<span class="goal-when" title="${escapeHtml(tip)}">${escapeHtml(day)} <span class="goal-time">${escapeHtml(time)}</span>`
+    + (gen ? ` <span class="goal-gen">${escapeHtml(gen)}</span>` : '') + '</span>';
+}
+
+function toggleGoalFilter() {
+  goalFilterOnly = !goalFilterOnly;
+  renderProjects();
 }
 
 function engineCell(eng, p) {
@@ -1461,6 +1528,18 @@ function goalChip(p) {
   return ` <span class="chip chip-goal" title="${escapeHtml(tip)}">GOAL!</span>`;
 }
 
+// "Startup" fields in the project settings are the SPEC; this shows what is
+// actually running when the two differ, so a KAI or GUI change can never
+// make the panel look like it disagrees with the dashboard.
+function showLiveSizing(elId, live, specVal, what) {
+  const el = document.getElementById(elId);
+  if (!el) return;
+  const n = Number(live), s = Number(specVal);
+  const differs = Number.isFinite(n) && n > 0 && (!Number.isFinite(s) || s !== n);
+  el.textContent = differs ? `now: ${n}` : '';
+  el.title = differs ? `${what}: ${n}` : '';
+}
+
 function stateDot(p) {
   const eng = projectsEngines[p.id];
   const st = eng && eng.engine_state;
@@ -1476,6 +1555,8 @@ function renderProjects() {
   const empty = document.getElementById('projects-empty');
   const count = document.getElementById('projects-count');
   if (!tbody) return;
+  const sortSel = document.getElementById('projects-sort');
+  if (sortSel && sortSel.value) projectsSortKey = sortSel.value;
   const list = sortProjects(visibleProjects());
   const langs = {};
   projectsData.forEach(p => { const l = p.language || '?'; langs[l] = (langs[l] || 0) + 1; });
@@ -1483,6 +1564,11 @@ function renderProjects() {
   if (langLabel) langLabel.textContent = langFilterValue ? langFilterValue : 'All languages';
   const langBtn = document.getElementById('lang-filter-btn');
   if (langBtn) langBtn.classList.toggle('active', !!langFilterValue);
+  // GOAL filter: toggle to the completed projects, with the count on the chip.
+  const goalBtn = document.getElementById('goal-filter-btn');
+  const goalCnt = document.getElementById('goal-filter-count');
+  if (goalCnt) goalCnt.textContent = projectsData.filter(p => p.goal && p.goal.met === true).length;
+  if (goalBtn) goalBtn.classList.toggle('active', goalFilterOnly);
   if (count) count.textContent = `${list.length} of ${projectsData.length} projects`;
   tbody.innerHTML = '';
   empty.style.display = list.length ? 'none' : '';
@@ -1508,6 +1594,7 @@ function renderProjects() {
       <td class="col-engine">${engineCell(eng, p)}</td>
       <td class="col-best">${bestCell(p)}</td>
       <td class="col-valid">${validHtml}</td>
+      <td class="col-goal">${goalWhen(p)}</td>
       <td class="col-actions" onclick="event.stopPropagation()">
         <button class="btn btn-sm btn-primary" title="Open project" onclick="switchProject('${p.id}')">Open</button>
         <button class="btn btn-sm" title="Edit spec" onclick="editProjectSpec('${p.id}')">Edit</button>
@@ -2239,6 +2326,11 @@ async function loadConfig() {
     document.getElementById('cfg-host').value = c.server.host;
     document.getElementById('cfg-port').value = c.server.port;
     document.getElementById('cfg-wcount').value = c.workers.default_count;
+    // "Default count" is the STARTUP default; the pool you are running right
+    // now may be a different size (remembered across restarts).  Show both
+    // so the panel can never look like it disagrees with the dashboard.
+    showLiveSizing('cfg-wcount-now', poolWorkerTarget, c.workers.default_count,
+                   'worker pool right now');
     document.getElementById('cfg-wmax').value = c.workers.max_count;
     document.getElementById('cfg-llm-timeout').value = c.llm.read_timeout;
     document.getElementById('cfg-llm-nodata').value = (c.llm.nodata_timeout !== undefined ? c.llm.nodata_timeout : 120);
@@ -2250,6 +2342,18 @@ async function loadConfig() {
     document.getElementById('cfg-factory-case').value = (f.case_timeout !== undefined && f.case_timeout !== null ? f.case_timeout : '');
     document.getElementById('cfg-autofix').checked = !!(c.autofix && c.autofix.build_enabled);
     document.getElementById('cfg-tg-token').value = c.telegram.token || '';
+    const tgSrc = document.getElementById('cfg-tg-token-src');
+    if (tgSrc) {
+      // One short yellow line beside the field: WHERE the token in effect
+      // comes from.  Env wins over the file, so when it says the env var is
+      // in charge, a saved token is being ignored — say that, not "from env".
+      const src = c.telegram.token_source;
+      tgSrc.textContent = src === 'env'
+        ? 'env KAISEN_TG_TOKEN is in charge — it overrides what you save'
+        : src === 'secrets.json' ? 'from secrets.json'
+        : src === 'config.json' ? 'from config.json (moved to secrets.json on the next start)'
+        : 'saved to secrets.json (0600, gitignored)';
+    }
     document.getElementById('cfg-tg-chat').value = c.telegram.chat_id || '';
     const s = c.safety;
     document.getElementById('cfg-safety').innerHTML = `
@@ -2354,6 +2458,35 @@ async function saveConfig() {  const body = {
 
 // One Apply Changes button, two targets: on the General tab it saves the
 // framework config; on the Active Project tab it saves the project spec.
+// Telegram token check — ON DEMAND (button), never per keystroke: users type
+// a long token, and hammering getMe on every character is both noisy and
+// rate-limited by Telegram.  An empty or masked field checks the STORED
+// token, which the browser never sees.
+async function checkTelegramToken() {
+  const btn = document.getElementById('cfg-tg-check-btn');
+  const out = document.getElementById('cfg-tg-check-result');
+  const field = document.getElementById('cfg-tg-token');
+  const typed = (field.value || '').trim();
+  const token = (typed === '********') ? '' : typed;
+  btn.disabled = true;
+  out.textContent = 'checking…';
+  out.className = 'check-result';
+  try {
+    const r = await api('/api/telegram/check', { method: 'POST', body: JSON.stringify({ token }) });
+    if (r && r.ok) {
+      out.textContent = `✔ works${r.username ? ' — @' + r.username : ''}${r.name ? ' (' + r.name + ')' : ''}`;
+      out.classList.add('ok');
+    } else {
+      out.textContent = `✖ ${(r && r.error) || 'not accepted'}`;
+      out.classList.add('err');
+    }
+  } catch (e) {
+    out.textContent = '✖ ' + e.message;
+    out.classList.add('err');
+  }
+  btn.disabled = false;
+}
+
 async function applyConfig() {
   const projectTabActive = document.getElementById('cfg-project').style.display !== 'none';
   if (projectTabActive) await saveProjectConfig();
@@ -2401,6 +2534,14 @@ function renderProjectConfig() {
   document.getElementById('pj-max-parallel').value = eng.max_parallel || '';
   document.getElementById('pj-reserve').checked = !!eng.reserve;
   document.getElementById('pj-parallel-gens').value = eng.parallel_gens || '';
+  // "Startup" fields are the SPEC.  Show what is actually running beside
+  // them when it differs — otherwise the panel looks like it disagrees with
+  // the dashboard after a KAI/GUI change (spec 2 while 6 stream).
+  const liveRow = projectsEngines[s.id] || null;
+  showLiveSizing('pj-parallel-gens-now', liveRow && liveRow.parallel_gens, eng.parallel_gens,
+                 'this project right now');
+  showLiveSizing('pj-workers-now', liveRow && liveRow.workers, eng.workers,
+                 'the shared pool right now');
   renderPipeCanvas(s);
   renderMetricsEditor(s);
 }

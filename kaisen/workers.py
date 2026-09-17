@@ -533,6 +533,18 @@ class WorkerPool:
             self._top_up()
             return len(self._procs)
 
+    def set_count(self, n: int) -> int:
+        """Resize the pool to exactly `n` processes: adds idle workers, or
+        removes workers without losing work (a busy worker's in-flight job is
+        re-queued).  The pool is process-wide, so this works with or without
+        a project running — the size is remembered across restarts
+        (engine_pool.json).  Returns the effective count."""
+        n = max(1, int(n))
+        self.shrink_to(n)
+        while self.worker_count() < n:
+            self.add_worker()
+        return self.worker_count()
+
     def shrink_to(self, n: int) -> int:
         """Remove workers until the pool holds at most `n` processes.
         A busy worker's in-flight job is re-queued (never lost) — the

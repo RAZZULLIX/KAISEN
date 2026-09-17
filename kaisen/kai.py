@@ -166,6 +166,11 @@ BARE command lines, never prefixed with OK. Commands (case-insensitive):
                              pipeline count each — optional: everything about
                              multi-engine mode is opt-in
   BUDGET                      in-flight run's budget: scored so far + time left
+  WORKERS <n> [ON <pid>]      resize the SHARED worker pool to n processes
+                             (same knob as the dashboard's worker chip) and
+                             REMEMBER it: the size survives a restart, so
+                             KAI and the GUI always agree. Without <n> it
+                             reports the size + this project's job limits.
   BUDGET SERVER [<sid>] [SET max_tokens <n> reset <r> max_generations <n>]
                              per-server usage budget (optional). Caps tokens /
                              generations inside a reset window so a frontier
@@ -256,6 +261,7 @@ ALIASES: Dict[str, List[str]] = {
     "PAUSE": ["PAUSE", "HALT", "FREEZE"],
     "WAIT": ["WAIT", "SYNC", "AWAIT", "JOIN"],
     "BUDGET": ["BUDGET", "TIME", "REMAINING", "LEFT"],
+    "WORKERS": ["WORKERS", "WORKER", "PROCS"],
     "LOGS": ["LOGS", "LOG", "TAIL"],
     "MODELCHECK": ["MODELCHECK", "CHECKMODEL", "MCHECK"],
     "SERVERS": ["SERVERS", "LLM", "BACKENDS"],
@@ -509,7 +515,14 @@ class KaiSession:
                         if e.get("project_id") == pid), None)
             fired = (row or {}).get("goal") or {}
             if fired.get("met"):
-                line += f" [MET gen {fired.get('met_generation')}]"
+                when = ""
+                try:
+                    when = " @ " + time.strftime(
+                        "%Y-%m-%d %H:%M",
+                        time.localtime(float(fired.get("met_at"))))
+                except (TypeError, ValueError):
+                    when = ""
+                line += f" [MET gen {fired.get('met_generation')}{when}]"
         except Exception:
             pass
         return [line]
@@ -790,6 +803,46 @@ class KaiSession:
                 return f"OK all {len(goals)} runs complete — {rows}"
             time.sleep(2.0)
         return f"OK {len(finished)}/{len(goals)} finished — WAIT again or STOP"
+
+    def cmd_workers(self, arg: str) -> str:
+        """WORKERS <n> [ON <pid>] — resize the SHARED worker pool.
+
+        The same knob as the dashboard's worker chip, and REMEMBERED across
+        restarts (engine_pool.json), so a size set from KAI and a size set
+        from the GUI cannot disagree after a restart.  With no <n>, report
+        the size and the project's job limits.
+        """
+        tokens = arg.split()
+        upper = [t.upper() for t in tokens]
+        pid = ""
+        if "ON" in upper:
+            i = upper.index("ON")
+            pid = tokens[i + 1] if i + 1 < len(tokens) else ""
+            tokens = tokens[:i]
+        count: Optional[int] = None
+        for t in tokens:
+            if t.isdigit():
+                count = int(t)
+                break
+        body: Dict[str, Any] = {}
+        if pid:
+            body["project_id"] = pid
+        if count is not None:
+            body["count"] = count
+        res = self.client.call("POST", "/api/engine/workers", body,
+                               read_timeout=60.0)
+        if res.get("error"):
+            raise KaiError(str(res["error"]))
+        size = res.get("workers")
+        parts = [f"OK worker pool {size if size is not None else '?'} process(es)"]
+        if count is not None:
+            parts.append("— remembered across restarts")
+        lim = res.get("limits") or {}
+        if lim:
+            parts.append(f"| {res.get('project_id') or 'project'}: max jobs "
+                         f"{lim.get('max_workers') or 'no cap'}, reserved "
+                         f"{lim.get('reserve_workers') or 'none'}")
+        return " ".join(parts)
 
     def cmd_budget(self, arg: str) -> str:
         """Two forms:
@@ -1629,6 +1682,8 @@ class KaiSession:
                 return self.cmd_wait(rest)
             if cmd == "BUDGET":
                 return self.cmd_budget(rest)
+            if cmd == "WORKERS":
+                return self.cmd_workers(rest)
             if cmd == "PAUSE":
                 return self.cmd_pause(rest)
             if cmd == "RESUME":

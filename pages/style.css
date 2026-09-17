@@ -140,6 +140,12 @@ body {
 .chip { padding: 4px 10px; border-radius: var(--radius-pill); border: 1px solid var(--border2); color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; }
 .chip-accent { border-color: rgba(0,232,124,0.7); color: var(--accent); background: rgba(0,232,124,0.06); }
 .chip-goal { border-color: rgba(255,190,61,0.75); color: var(--warning); background: rgba(255,190,61,0.08); font-weight: 600; }
+.field-now { color: var(--warning); font-size: 11px; margin-left: 6px; font-weight: 600; }
+.inline-check { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; }
+.inline-check input { flex: 1; min-width: 0; }
+.check-result { font-size: 12px; color: var(--muted); white-space: nowrap; }
+.check-result.ok { color: var(--accent); }
+.check-result.err { color: var(--danger); }
 .tabs { display: flex; gap: 6px; font-size: 12px; margin-bottom: 8px; overflow-x: auto; padding-bottom: 8px; }
 .tab { padding: 10px 18px; border-radius: var(--radius-pill); border: 1px solid transparent; color: var(--muted); cursor: pointer; white-space: nowrap; transition: all 0.15s; }
 .tab.active { border-color: rgba(0,232,124,0.7); background: rgba(0,232,124,0.08);}
@@ -606,6 +612,10 @@ img.footer-mark { height: 14px; width: 14px; object-fit: cover; border-radius: 3
 .col-engine { width: 118px; font-size: 12px; }
 .col-best { width: 118px; }
 .col-valid { width: 64px; text-align: right; }
+.col-goal { width: 96px; }
+.goal-when { color: var(--warning); font-family: monospace; font-size: 12px; white-space: nowrap; }
+.goal-time { color: var(--muted); }
+.goal-gen { color: var(--muted); font-size: 11px; }
 .valid-bar { height: 6px; border-radius: 3px; background: rgba(255,255,255,0.06); overflow: hidden; }
 .valid-fill { height: 100%; border-radius: 3px; }
 .valid-fill.low { background: var(--danger); }

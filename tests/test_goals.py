@@ -8,6 +8,8 @@ leaving it latched as done forever.
 """
 import pytest
 
+from pathlib import Path
+
 from kaisen import goals
 from kaisen.engine import STATE_RUNNING, STATE_STOPPED, ProjectEngine
 from kaisen.llm import ModelOrchestrator
@@ -214,6 +216,79 @@ def test_goal_fires_from_the_applied_evaluation(tmp_path, tmp_cfg, monkeypatch):
     assert eng.engine_state == STATE_STOPPED
     assert eng.state.goal_done() is True
     assert len(_goal_pings(pings)) == 1
+
+
+def _goal_met_engine(tmp_path, tmp_cfg, goal, pid="tg-proj"):
+    registry = ProjectRegistry(tmp_path / "projects")
+    (tmp_path / "projects").mkdir(exist_ok=True)
+    project = _mk_project(registry, pid, goal)
+    eng = _mk_engine(project, registry, tmp_cfg)
+    eng.state.set_best({"fitness": 3.0, "metrics": {"proved_open": 3}, "generation": 4})
+    return eng, project
+
+
+def test_telegram_action_renders_the_message_variables(tmp_path, tmp_cfg, monkeypatch):
+    """The custom message is the user's text with {variables} filled from the
+    generation that met the goal, plus the champion at that moment."""
+    sent = []
+    monkeypatch.setattr("kaisen.engine.send_message",
+                        lambda msg, **kw: sent.append(msg) or {"ok": True})
+    monkeypatch.setattr("kaisen.engine.send_file", lambda path, caption=None: False)
+    goal = {"when": GOAL["when"], "then": ["telegram"],
+            "message": "DONE {project} ({project_id}) at gen {generation} {date} {time}\n"
+                       "goal {goal} seen {seen}\nfitness {fitness} metrics {metrics}\n"
+                       "detail {detail}"}
+    eng, project = _goal_met_engine(tmp_path, tmp_cfg, goal)
+    eng._check_goal(4)
+
+    assert len(sent) == 1, sent
+    text = sent[0]
+    assert f"DONE {project.name} ({project.id}) at gen 4 " in text
+    assert "goal proved_open >= 2 seen 3" in text
+    assert "fitness 3.00000" in text and "metrics proved_open=3" in text
+    assert "detail proved_open >= 2 (seen 3)" in text
+    assert "{" not in text and "}" not in text          # nothing left unrendered
+
+
+def test_telegram_attachments_ride_along_when_the_files_exist(tmp_path, tmp_cfg, monkeypatch):
+    """champion / llm_output / prompt are attached from the winning
+    generation, and a missing file is skipped rather than fatal."""
+    sent, files = [], []
+    monkeypatch.setattr("kaisen.engine.send_message",
+                        lambda msg, **kw: sent.append(msg) or {"ok": True})
+    monkeypatch.setattr("kaisen.engine.send_file",
+                        lambda path, caption=None: files.append(path) or True)
+    goal = {"when": GOAL["when"], "then": ["telegram"],
+            "attach": ["champion", "llm_output", "prompt"]}
+    eng, project = _goal_met_engine(tmp_path, tmp_cfg, goal, pid="tg-attach")
+    gen_dir = project.runs_dir / "gen_000004"
+    gen_dir.mkdir(parents=True, exist_ok=True)
+    (gen_dir / "llm_raw.txt").write_text("raw reasoning", encoding="utf-8")
+    (gen_dir / "prompt.txt").write_text("the prompt", encoding="utf-8")
+    champ = Path(eng._champion_path())
+    champ.parent.mkdir(parents=True, exist_ok=True)
+    champ.write_text("print(1)\n", encoding="utf-8")
+
+    eng._check_goal(4)
+    assert len(sent) == 1
+    assert sorted(Path(p).name for p in files) == sorted(["llm_raw.txt", "prompt.txt", champ.name]), files
+
+
+def test_telegram_validation_catches_written_wrong_messages():
+    """A variable we cannot fill, or attachments without the telegram action,
+    must fail validation — never silently send blanks."""
+    bad_var = validate_spec(_spec("tg1", {"when": GOAL["when"], "then": ["telegram"],
+                                          "message": "hello {nope}"}))
+    assert any("unknown variable {nope}" in e for e in bad_var)
+    no_action = validate_spec(_spec("tg2", {"when": GOAL["when"], "then": ["stop"],
+                                            "message": "hi {project}"}))
+    assert any("needs 'telegram' in goal.then" in e for e in no_action)
+    bad_att = validate_spec(_spec("tg3", {"when": GOAL["when"], "then": ["telegram"],
+                                          "attach": ["everything"]}))
+    assert any("unknown attachment 'everything'" in e for e in bad_att)
+    ok = validate_spec(_spec("tg4", {"when": GOAL["when"], "then": ["telegram"],
+                                     "message": "x {project}", "attach": ["champion"]}))
+    assert ok == []
 
 
 def test_ping_only_action_does_not_stop(tmp_path, tmp_cfg, monkeypatch):

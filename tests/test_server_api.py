@@ -5,6 +5,7 @@ hits it over HTTP — this also exercises the /kai self-connect path.
 """
 import asyncio
 import base64
+import json
 import threading
 import time
 from types import SimpleNamespace
@@ -431,6 +432,119 @@ def test_engine_pool_persist_and_restore(tmp_cfg, registry):
     assert srv2.engines["pool-a"]._parallel_gens == 3
     assert srv2._selected_project_id == "pool-a"
     srv2.engines["pool-a"].stop()
+
+
+def test_runtime_sizing_survives_a_restart(tmp_cfg, registry):
+    """The numbers you dial in — parallel generations, the pool share, the
+    worker count — are REMEMBERED across a restart.  Otherwise a size set by
+    KAI (or the GUI chip) silently reverts to the spec's startup default and
+    the dashboard ends up disagreeing with what is actually running."""
+    from kaisen.engine import EngineEvent, ProjectEngine
+    from kaisen.llm import ModelOrchestrator
+    from kaisen.workers import get_worker_pool
+
+    registry.create("sized", _spec("sized"))
+    project = registry.require("sized")
+    temp_root = tmp_cfg.path.parent / "temp"
+    srv1 = DashboardServer(registry, tmp_cfg, engine=None, host="127.0.0.1",
+                           port=8080, temp_root=temp_root, restore_paused=True)
+    eng = ProjectEngine(project, ModelOrchestrator(tmp_cfg), registry,
+                        worker_count=1, events=EngineEvent())
+    # Exactly what the GUI chip / KAI set.  The engine was never started, so
+    # its producer threads stay parked: nothing generates, no LLM is called.
+    eng.set_parallel_gens(4)
+    eng.set_share(max_parallel=5, reserve=True)
+    eng.set_worker_share(max_workers=2, reserve_workers=1)
+    eng.set_workers(3)
+    srv1.engines["sized"] = eng
+    srv1._selected_project_id = "sized"
+    srv1._persist_engine_pool()
+
+    # A fresh boot starts the pool at the spec/config size...
+    get_worker_pool().set_count(1)
+
+    # ...and the remembered size and per-project knobs are applied on top.
+    srv2 = DashboardServer(registry, tmp_cfg, engine=None, host="127.0.0.1",
+                           port=8080, temp_root=temp_root, restore_paused=True)
+    row = {r["project_id"]: r for r in srv2._engines_summary()}["sized"]
+    assert row["parallel_gens"] == 4, "parallel generations are remembered"
+    assert row["max_parallel"] == 5 and row["reserve"] is True
+    assert row["max_workers"] == 2 and row["reserve_workers"] == 1
+    assert get_worker_pool().worker_count() == 3, \
+        "the pool came back at the size it was left at"
+
+    for e in srv2.engines.values():
+        e.stop()
+    eng.set_parallel_gens(1)          # retire srv1's parked producers
+
+
+def test_telegram_token_goes_to_secrets_not_config(api, tmp_cfg, tmp_path, monkeypatch):
+    """The bot token is a SECRET: it lands in secrets.json (0600, gitignored)
+    and never in config.json — the file the framework may publish.  The API
+    hands the GUI a mask and the source, never the value, and saving an
+    unrelated setting (or the masked value again) cannot wipe it."""
+    srv, base = api
+    monkeypatch.setattr("kaisen.config.SECRETS_FILE", tmp_path / "secrets.json")
+
+    r = requests.put(base + "/api/config",
+                     json={"telegram": {"token": "123456:ABC-DEF", "chat_id": "42"}}, timeout=5)
+    assert r.status_code == 200 and r.json()["ok"]
+    secrets = json.loads((tmp_path / "secrets.json").read_text())
+    assert secrets["telegram"]["token"] == "123456:ABC-DEF"
+    assert not (json.loads(tmp_cfg.path.read_text()).get("telegram") or {}).get("token"), \
+        "config.json must never hold the bot token"
+
+    # The masked value the GUI received means "keep it".
+    requests.put(base + "/api/config", json={"telegram": {"token": "********"}}, timeout=5)
+    assert json.loads((tmp_path / "secrets.json").read_text())["telegram"]["token"] == "123456:ABC-DEF"
+
+    got = requests.get(base + "/api/config", timeout=5).json()["telegram"]
+    assert got["token"] == "********" and got["token_set"] is True
+    assert got["token_source"] == "secrets.json"
+
+
+def test_telegram_check_reports_ok_and_rejection(api, monkeypatch):
+    """The Check button asks Telegram (getMe) once, on demand — and reports
+    what Telegram said, not a guess."""
+    srv, base = api
+    import kaisen.telegram as tg
+
+    class Resp:
+        content = b"x"
+
+        def __init__(self, payload):
+            self._p = payload
+
+        def json(self):
+            return self._p
+
+    monkeypatch.setattr(tg.requests, "get",
+                        lambda url, timeout=None: Resp({"ok": True, "result": {
+                            "username": "kaisen_bot", "first_name": "KAISEN"}}))
+    got = requests.post(base + "/api/telegram/check", json={"token": "123456:ABC"}, timeout=5).json()
+    assert got["ok"] is True and got["username"] == "kaisen_bot" and got["name"] == "KAISEN"
+
+    monkeypatch.setattr(tg.requests, "get",
+                        lambda url, timeout=None: Resp({"ok": False, "description": "Unauthorized"}))
+    got = requests.post(base + "/api/telegram/check", json={"token": "123456:BAD"}, timeout=5).json()
+    assert got["ok"] is False and "Unauthorized" in got["error"]
+
+
+def test_legacy_telegram_token_migrates_into_secrets(tmp_path, monkeypatch):
+    """An install whose token predates secrets.json gets it MOVED there (and
+    dropped from config.json) at startup — the setting keeps working, the
+    file stops carrying the secret."""
+    from kaisen.config import FrameworkConfig, load_secrets, migrate_telegram_secret
+    monkeypatch.setattr("kaisen.config.SECRETS_FILE", tmp_path / "secrets.json")
+    cfg = FrameworkConfig(tmp_path / "config.json")
+    cfg.data.setdefault("telegram", {})["token"] = "legacy:TOKEN"
+    cfg.save()
+
+    assert migrate_telegram_secret(cfg) is True
+    assert load_secrets()["telegram"]["token"] == "legacy:TOKEN"
+    assert not cfg.telegram.get("token")
+    assert cfg.telegram_token == "legacy:TOKEN"       # still the same bot after the move
+    assert migrate_telegram_secret(cfg) is False      # idempotent
 
 
 def test_engines_share_one_orchestrator(tmp_cfg, registry):

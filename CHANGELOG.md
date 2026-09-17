@@ -7,8 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Runtime sizing now survives a restart.** Parallel generations and the
+  worker-pool size were runtime-only: `engine_pool.json` recorded a project's
+  `parallel_gens` and nothing else, so a size set by KAI (`RUN WITH k`) or by
+  the dashboard chips reverted to the project's STARTUP defaults on the next
+  boot — and the GUI could report one number while a different one was
+  actually running (the pool-wide parallel-gens chip was fed the SELECTED
+  project's value, so an agent's `RUN WITH 6` elsewhere made the chip lie).
+  The pool file now records the whole running configuration — per project
+  `parallel_gens`, `max_parallel`, `reserve`, `max_workers`,
+  `reserve_workers`, plus the process-wide worker count — and the restore
+  path re-applies it after the engines boot.  Resizing the pool also no
+  longer requires a running project: `POST /api/engine/workers` with just
+  `count` resizes (and remembers) the process-wide pool.
+- **The Telegram bot token no longer lives in `config.json`.**  It was read
+  from — and written back to — config.json, the file the framework ships an
+  example of.  It now goes to `secrets.json` (0600, gitignored), env-first
+  (`KAISEN_TG_TOKEN`), a token an older install left behind is migrated out
+  of config.json at startup, and the API only ever returns a mask plus its
+  source, so the GUI can never read the secret back.
+
 ### Added
 
+- **A Check button for the Telegram token** (Settings → Telegram): it asks
+  Telegram's `getMe` ON DEMAND — once, when clicked, not on every keystroke
+  — and answers `✔ works — @your_bot` or Telegram's own error.  It can also
+  validate the *stored* token without the GUI ever knowing it.
+- **`telegram` goal action — your own message, with attachments.**  A goal
+  may carry a multi-line `message` with `{variables}`
+  (`{project}`, `{goal}`, `{seen}`, `{generation}`, `{datetime}`,
+  `{fitness}`, `{metrics}`, `{detail}`, `{actions}`, …) and an `attach` list
+  (`champion`, `llm_output`, `prompt`).  Unknown variables or attachments
+  fail spec validation; missing files are skipped; the message is sent
+  before any `stop` action, so the news never waits on teardown.
+- **Goal filter, goal date and goal sort in the projects list.**  A
+  `🎯 GOAL` chip filters the list down to the projects that reached their
+  goal (with the count on the chip), a **Goal** column shows *when* — the
+  date, the time and the generation that reached it (`Sep 17 05:08 PM gen
+  147`, full timestamp in the tooltip) — and the sort selector orders the
+  list by that moment (newest / oldest).  The date is when the evaluation
+  that met the goal was applied; it lives in the project's state, so it
+  survives restarts, and KAI `SPEC` prints it too
+  (`[MET gen 147 @ 2026-09-17 17:08]`).
+- **`WORKERS` in KAI** — `WORKERS <n> [ON <pid>]` resizes the shared worker
+  pool from an agent session (same knob as the dashboard's worker chip) and
+  the size is remembered; with no `<n>` it reports the size and the
+  project's job limits.
+- **The GUI shows startup vs running.**  The parallel-gens chip is fed the
+  pool's spread (`1–4` when projects disagree) instead of one project's
+  number, and the "startup" fields in project settings and Settings →
+  General show `now: N` when the running value differs from the startup one.
 - **A yellow `GOAL!` pill in the projects list.** A project whose champion
   reached its success goal is DONE — the engine stopped it and it is not
   resumed on the next start — and now says so at a glance, beside the green

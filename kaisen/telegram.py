@@ -25,6 +25,30 @@ def _api(method: str) -> str:
     return f"https://api.telegram.org/bot{cfg.telegram_token}/{method}"
 
 
+def check_token(token: str) -> Dict[str, Any]:
+    """Verify a Telegram bot token with getMe.
+
+    The token is never echoed or logged — only Telegram's own error
+    description ("Unauthorized", "Not Found"), which names the problem and
+    never contains the credential.  The dashboard calls this from an explicit
+    Check button, so a token is validated once instead of on every keystroke.
+    """
+    token = (token or "").strip()
+    if not token:
+        return {"ok": False, "error": "no token"}
+    try:
+        resp = requests.get(f"https://api.telegram.org/bot{token}/getMe", timeout=15)
+        data = resp.json() if resp.content else {}
+    except Exception as e:
+        return {"ok": False, "error": type(e).__name__}
+    if isinstance(data, dict) and data.get("ok"):
+        res = data.get("result") or {}
+        return {"ok": True, "username": str(res.get("username") or ""),
+                "name": str(res.get("first_name") or "")}
+    desc = data.get("description") if isinstance(data, dict) else None
+    return {"ok": False, "error": str(desc or "rejected by Telegram")}
+
+
 def send_message(message: str, max_len: Optional[int] = None) -> Optional[Dict[str, Any]]:
     cfg = get_config()
     if not cfg.telegram_enabled:
