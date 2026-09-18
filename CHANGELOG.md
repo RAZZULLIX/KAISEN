@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The live view drew un-dispatched generations as chats and called it
+  "WAITING FOR A FREE LLM SLOT".**  A chat is a STREAM: a generation the pool
+  has not dispatched has produced nothing, so a card with a "waiting for
+  first token" body claimed a state a chat cannot be in.  The modal now draws
+  only streaming chats and reports the rest as a count — "N generation(s) not
+  started — the pool is at capacity".
+
 - **The live view hides the model's thinking — thinking is a token too.**  A
   hybrid model streams its plan before the answer; the live window rendered
   the two as one undifferentiated blob (or, while the plan was all there

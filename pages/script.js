@@ -943,20 +943,27 @@ async function fetchLiveOutput() {
 function renderLiveSessions(container, data) {
   // ONE PILL PER CHAT: every active chat gets its own console block,
   // numbered after the server name when a server runs more than one.
-  const sessions = (data.sessions || []).filter(s => s.status === 'generating' || s.waiting);
+  //
+  // A CHAT IS A STREAM.  A generation the pool has not dispatched yet has
+  // produced nothing, so rendering it as a chat with a "waiting for first
+  // token" body invented a state a chat cannot be in.  It is reported as a
+  // count instead: how many generations are held back by pool capacity.
+  const parked = Number(data.waiting_for_slot || 0);
+  const sessions = (data.sessions || [])
+    .filter(s => s.status === 'generating' && !s.waiting);
   if (!sessions.length) {
-    container.innerHTML = `<div class="console-line status-line" style="color:var(--muted);">${liveServer ? `No active chat on ${escapeHtml(liveServer)}.` : 'No active generation — press play.'}</div>`;
+    const msg = parked
+      ? `${parked} generation(s) not started — the pool is at capacity; nothing is streaming.`
+      : (liveServer ? `No active chat on ${escapeHtml(liveServer)}.`
+                    : 'No active generation — press play.');
+    container.innerHTML = `<div class="console-line status-line" style="color:var(--muted);">${escapeHtml(msg)}</div>`;
     container._liveChats = new Map();
     return;
   }
   const perServer = {};
   sessions.forEach(s => { perServer[s.server_id] = (perServer[s.server_id] || 0) + 1; });
-  // The pool can be far deeper than the servers can serve (hundreds of
-  // producers for six slots): most cards below are WAITERS, and an
-  // all-waiting view is indistinguishable from a dead stream.  Say the
-  // number once, at the top, so the quiet is explained.
-  const parked = Number(data.waiting_for_slot || 0);
-  const bound = sessions.filter(s => !s.waiting).length;
+  // The pool may run deeper than the endpoints can serve (hundreds of
+  // generations for six slots).  Those are counted, never drawn as chats.
   let banner = container.querySelector('.live-parked-line');
   if (parked > 0) {
     if (!banner) {
@@ -965,8 +972,8 @@ function renderLiveSessions(container, data) {
       banner.style.color = 'var(--muted)';
       container.prepend(banner);
     }
-    banner.textContent = `${parked} producer(s) parked waiting for an LLM slot — `
-      + `${bound} chat(s) bound right now; the rest below are waiting, not stalled.`;
+    banner.textContent = `${parked} generation(s) not started — the pool is at `
+      + `capacity; ${sessions.length} streaming below.`;
   } else if (banner) {
     banner.remove();
   }
@@ -1000,9 +1007,7 @@ function renderLiveSessions(container, data) {
       chats.set(s.id, el);
     }
     const name = s.display || s.server_id || '';
-    const chatLabel = s.waiting
-      ? 'WAITING FOR FREE LLM'
-      : (perServer[s.server_id] > 1 ? `${name} ${s.slot}` : name);
+    const chatLabel = perServer[s.server_id] > 1 ? `${name} ${s.slot}` : name;
     const poolWide = (data.engines || []).length > 1;
     el.title.textContent = `> ${chatLabel}`
       + (poolWide && s.project_id ? ` · ${s.project_id}` : '')
@@ -1023,14 +1028,12 @@ function renderLiveSessions(container, data) {
       el.answer.textContent = outText.slice(rlen);
     }
     const noServer = (data.usable_servers === 0 && (data.configured_servers || 0) > 0);
-    el.status.textContent = s.waiting
-      ? (noServer
-          ? '[NO USABLE LLM SERVER — offline/banned; probing again automatically]'
-          : '[WAITING FOR A FREE LLM SLOT]')
+    el.status.textContent = noServer
+      ? '[NO USABLE LLM SERVER — offline/banned; probing again automatically]'
       : (s.tps > 0
           ? `[STREAMING ACTIVE] ${s.tps.toFixed(1)} TPS`
           : `[STREAMING — ${s.prefill ? 'PREFILL' : 'measuring rate'}]`);
-    el.status.style.color = s.waiting ? 'var(--muted)' : 'var(--warning)';
+    el.status.style.color = 'var(--warning)';
     container.appendChild(el.root);
   }
   for (const [id, el] of [...chats.entries()]) {
