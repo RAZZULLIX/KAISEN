@@ -686,7 +686,7 @@ class Server:
         t0 = time.time()
         first_token_at: Optional[float] = None
 
-        def on_token(token: str, n: int = 1) -> None:
+        def on_token(token: str, n: int = 1, reasoning: bool = False) -> None:
             nonlocal first_token_at
             if first_token_at is None:
                 first_token_at = time.time()
@@ -1151,7 +1151,7 @@ class Server:
     def _consume_stream(
         self,
         resp: Any,
-        on_token: Optional[Callable[[str, int], None]],
+        on_token: Optional[Callable[..., None]],
         cancel_event: Optional[threading.Event],
         llama: bool,
         prompt: str,
@@ -1276,8 +1276,9 @@ class Server:
                             rt = ""
                         if rt and on_token:
                             # reasoning stays out of the returned content —
-                            # it is only surfaced live / captured as raw.
-                            on_token(rt, 1)
+                            # it is only surfaced live / captured as raw, and
+                            # flagged so the live view renders it gray.
+                            on_token(rt, 1, True)
                         try:
                             token = obj["choices"][0]["delta"].get("content", "")
                         except (KeyError, IndexError, TypeError):

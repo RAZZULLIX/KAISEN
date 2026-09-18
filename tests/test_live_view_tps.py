@@ -16,7 +16,7 @@ import time
 import pytest
 
 from kaisen.llm import Server, ModelOrchestrator
-from kaisen.engine import ProjectEngine
+from kaisen.engine import ProjectEngine, Session
 
 
 def _server(orch, sid="one", **over):
@@ -111,3 +111,42 @@ def test_pool_probes_on_demand_when_nothing_is_usable(tmp_cfg, monkeypatch):
     monkeypatch.setattr(orch, "_kick_reprobe", lambda sids: kicks.append(sorted(sids)))
     assert orch._pick_server("tiny", pipeline_key="proj|0") is None
     assert kicks and kicks[0] == ["one"], kicks
+
+
+# --------------------------------------------------------------------------- #
+# thinking is a token too: the gray prefix
+# --------------------------------------------------------------------------- #
+
+def test_inline_thinking_is_marked_as_the_gray_prefix():
+    """llama.cpp with reasoning_format=none (the default, and what the local
+    Ternary-Bonsai boxes report) delivers the plan IN `content` and marks it
+    only at its end — so the close marker sets the split retroactively, and
+    the answer follows it."""
+    s = Session(0, "code", 1, "prove it")
+    plan = "<think>\nWe need to prove as many as possible."
+    s.push(plan)                       # plan first, no marker yet
+    s.push("</think>\n\ntheorem foo : True := by trivial")
+    snap = s.snapshot()
+    # the gray run ends AFTER the close marker: the marker is part of the plan
+    # and must never show up in the answer
+    assert snap["reasoning_len"] == len(plan) + len("</think>")
+    assert snap["text"].startswith(plan)
+    assert snap["text"][snap["reasoning_len"]:].lstrip().startswith("theorem")
+
+
+def test_separated_reasoning_channel_is_the_gray_prefix():
+    """When the server DOES separate the channel, every reasoning delta is
+    thinking and the answer starts at the first content delta."""
+    s = Session(1, "code", 2, "prove it")
+    s.push("plan A", 1, True)
+    s.push(" plan B", 1, True)
+    s.push("theorem bar : True := by trivial")
+    snap = s.snapshot()
+    assert snap["reasoning_len"] == len("plan A plan B")
+    assert snap["text"][snap["reasoning_len"]:].startswith("theorem")
+
+
+def test_a_plain_answer_has_no_gray_prefix():
+    s = Session(2, "code", 3, "prove it")
+    s.push("theorem baz : True := by trivial")
+    assert s.snapshot()["reasoning_len"] == 0

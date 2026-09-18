@@ -986,13 +986,15 @@ function renderLiveSessions(container, data) {
         <div class="console-line">&gt; PROMPT:</div>
         <div class="console-block prompt-block"></div>
         <div class="console-line" style="margin-top:10px;">&gt; OUTPUT:</div>
-        <div class="console-block output-block"></div>
+        <div class="console-block output-block"><span class="output-reasoning" style="color:var(--muted);" title="the model's thinking — gray, not the answer"></span><span class="output-answer"></span></div>
         <div class="console-line status-line"></div>`;
       el = {
         root,
         title: root.querySelector('.chat-title-line'),
         prompt: root.querySelector('.prompt-block'),
         output: root.querySelector('.output-block'),
+        reasoning: root.querySelector('.output-reasoning'),
+        answer: root.querySelector('.output-answer'),
         status: root.querySelector('.status-line'),
       };
       chats.set(s.id, el);
@@ -1006,7 +1008,20 @@ function renderLiveSessions(container, data) {
       + (poolWide && s.project_id ? ` · ${s.project_id}` : '')
       + ` · gen ${s.gen}`;
     el.prompt.textContent = s.prompt || 'Awaiting input...';
-    el.output.textContent = s.text || '… waiting for first token …';
+    // THINKING IS A TOKEN TOO: a hybrid model streams its plan first, and
+    // hiding it made a working chat look dead.  It is shown — gray — and the
+    // answer follows it.  `reasoning_len` is where the answer starts.
+    const outText = s.text || '';
+    const rlen = Math.max(0, Math.min(Number(s.reasoning_len || 0), outText.length));
+    if (!outText) {
+      el.reasoning.textContent = '';
+      el.reasoning.style.display = 'none';
+      el.answer.textContent = '… waiting for first token …';
+    } else {
+      el.reasoning.style.display = rlen ? '' : 'none';
+      el.reasoning.textContent = rlen ? outText.slice(0, rlen) : '';
+      el.answer.textContent = outText.slice(rlen);
+    }
     const noServer = (data.usable_servers === 0 && (data.configured_servers || 0) > 0);
     el.status.textContent = s.waiting
       ? (noServer

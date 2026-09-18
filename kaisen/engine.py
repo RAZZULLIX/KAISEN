@@ -90,6 +90,12 @@ class Session:
         self.gen = gen
         self.prompt = prompt
         self.text = ""
+        # Length of the LEADING run of thinking characters in `text` — the
+        # model's reasoning, which the live view renders gray.  A thinking
+        # model emits its plan first and closes it with a marker; everything
+        # before that marker is thinking, whatever channel it arrived on.
+        self.reasoning_len = 0
+        self._think_closed = False
         self.status = "generating"          # generating | done | error
         self.server_id: Optional[str] = None
         self.error = ""
@@ -125,11 +131,30 @@ class Session:
         """Started, but no token has arrived yet (still prefill/queued)."""
         return self.status == "generating" and self._tokens == 0
 
-    def push(self, token: str, count: int = 1) -> None:
+    def push(self, token: str, count: int = 1, reasoning: bool = False) -> None:
+        if reasoning:
+            # The server separated the channel (delta.reasoning_content):
+            # it belongs to the leading thinking run.
+            if self.reasoning_len == len(self.text):
+                self.reasoning_len += len(token)
+        elif not self._think_closed and "</think>" in token:
+            # Inline channel (llama.cpp reasoning_format=none, the default):
+            # the plan arrives in `content` and only its END marks it.  The
+            # marker closes the thinking run retroactively — the same rule
+            # strip_reasoning applies to the text the pipeline consumes, which
+            # also splits on the FIRST close marker.  The marker itself is
+            # part of the plan (it must not show up in the answer), so the
+            # gray run ends after it.
+            self.reasoning_len = (len(self.text) + token.index("</think>")
+                                  + len("</think>"))
+            self._think_closed = True
         self.text += token
         self._streaming = True
         if len(self.text) > _SESSION_MAX_TEXT:
+            trimmed = len(self.text) - _SESSION_MAX_TEXT
             self.text = self.text[-_SESSION_MAX_TEXT:]
+            self.reasoning_len = max(0, self.reasoning_len - trimmed)
+        self.reasoning_len = min(self.reasoning_len, len(self.text))
         self._tokens += int(count)
         now = time.time()
         if self._first_token_at is None:
@@ -167,6 +192,7 @@ class Session:
             self.status = "done"
 
     def snapshot(self, text_tail: int = 40_000, prompt_tail: int = 4000) -> Dict[str, Any]:
+        start = max(0, len(self.text) - text_tail)
         return {
             "id": self.id,
             "kind": self.kind,
@@ -174,7 +200,10 @@ class Session:
             "status": self.status,
             "server_id": self.server_id,
             "error": self.error[-400:],
-            "text": self.text[-text_tail:],
+            "text": self.text[start:],
+            # Where the thinking stops and the answer starts, in THIS payload
+            # (the text above is a tail, so the split is rebased).
+            "reasoning_len": max(0, min(self.reasoning_len, len(self.text)) - start),
             "prompt": self.prompt[-prompt_tail:],
             "tps": round(self.tps, 1),
             "waiting": self.waiting,
@@ -633,8 +662,8 @@ class ProjectEngine:
                         full_text: List[str] = []
                         raw = ""
 
-                        def _push_full(token, count=1):
-                            session.push(token, count)
+                        def _push_full(token, count=1, reasoning=False):
+                            session.push(token, count, reasoning)
                             full_text.append(token)
 
                         raw, sid = self.orchestrator.request_stream(

@@ -305,13 +305,16 @@ def test_openai_stream_separates_reasoning_from_content(tmp_cfg, monkeypatch):
     ])
     monkeypatch.setattr(L.Server, "_post_stream",
                         lambda self, target, headers, payload: stream)
-    out = s.request_stream("Write a program.", on_token=lambda t, n: seen.append(t))
+    out = s.request_stream("Write a program.",
+                           on_token=lambda t, n, r=False: seen.append((t, bool(r))))
     # returned content: answer only, no reasoning
     assert "print('ok')" in out
     assert "fast doubling" not in out and "matrix exponentiation" not in out
-    # live stream captured the reasoning (this is what feeds llm_raw.txt)
-    assert any("fast doubling" in t for t in seen)
-    assert any("matrix exponentiation" in t for t in seen)
+    # live stream captured the reasoning (this is what feeds llm_raw.txt) and
+    # FLAGGED it, so the live view can print it gray instead of as the answer
+    assert any("fast doubling" in t and r for t, r in seen)
+    assert any("matrix exponentiation" in t and r for t, r in seen)
+    assert any("print('ok')" in t and not r for t, r in seen), "the answer is not flagged"
 
 
 def test_model_check_reports_streaming_path(tmp_cfg, monkeypatch):

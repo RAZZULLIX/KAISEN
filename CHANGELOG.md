@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The live view hides the model's thinking — thinking is a token too.**  A
+  hybrid model streams its plan before the answer; the live window rendered
+  the two as one undifferentiated blob (or, while the plan was all there
+  was, looked like a stalled chat).  The session now records where the
+  thinking stops and the answer starts — from the separated
+  `delta.reasoning_content` channel when the server has one, and
+  retroactively from the close marker when the plan arrives inline (llama.cpp
+  `reasoning_format=none`, which is what the local Ternary-Bonsai boxes
+  report) — and the live view prints the thinking in gray, ahead of the
+  answer.
+
 - **The non-streaming OpenAI path did not strip inline reasoning.**  A
   llama.cpp server with no `reasoning_format` set (the default) delivers a
   hybrid model's thinking INSIDE `content` — `<think>…</think>answer` — and
