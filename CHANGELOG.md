@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The non-streaming OpenAI path did not strip inline reasoning.**  A
+  llama.cpp server with no `reasoning_format` set (the default) delivers a
+  hybrid model's thinking INSIDE `content` — `<think>…</think>answer` — and
+  the Qwen-family models now on the local boxes do exactly that.  The
+  streaming path (what generations use) already stripped it and live runs
+  are clean, but the non-stream path — which serves agent/lesson calls —
+  returned the thinking as part of the answer.  Both OpenAI and `remote`
+  replies go through `strip_reasoning` now, like every other path.
+
 - **The new-best message names its project.**  The channel is pool-wide
   (one bot, every project), so `🏆 NEW BEST (gen 262)` did not say which run
   had improved — it now leads with the project:

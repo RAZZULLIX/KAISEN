@@ -982,7 +982,13 @@ class Server:
                 resp.raise_for_status()
                 resp.encoding = "utf-8"  # charset-less JSON bodies — decode explicitly
                 data = resp.json()
-                content = data["choices"][0]["message"]["content"]
+                # Same rule as the llama branch and the stream path: an
+                # OpenAI-compatible llama.cpp server with no reasoning_format
+                # set (the default) delivers a hybrid model's thinking INLINE
+                # in content ("<think>…</think>answer"), so strip it here too
+                # — agent/lesson calls read this path, and a raw thinking
+                # block would be context for them, not an answer.
+                content = strip_reasoning(data["choices"][0]["message"]["content"] or "")
                 try:
                     tokens = int(data.get("usage", {}).get("completion_tokens") or 0) or max(1, len(content) // 4)
                 except (KeyError, TypeError):
@@ -1000,7 +1006,10 @@ class Server:
                 )
                 resp.raise_for_status()
                 resp.encoding = "utf-8"  # charset-less bodies — decode explicitly
-                content = resp.text
+                # A custom payload template may still front a hybrid model:
+                # strip inline reasoning like every other path (a reply with
+                # no marker is returned unchanged).
+                content = strip_reasoning(resp.text)
                 tokens = max(1, len(content) // 4)
             else:
                 raise ServerError(f"unknown server type {self.type!r}")

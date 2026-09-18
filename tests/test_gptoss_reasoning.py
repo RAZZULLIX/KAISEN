@@ -28,6 +28,11 @@ def _other(tmp_cfg, model="qwen3-8b", sid="t-other"):
                      "url": f"http://127.0.0.1:1/{sid}/completion"}, tmp_cfg), sid
 
 
+def _openai(tmp_cfg, model="Ternary-Bonsai-2-27B", sid="t-openai"):
+    return L.Server({"id": sid, "type": "openai", "model": model,
+                     "base_url": f"http://127.0.0.1:1/{sid}/v1"}, tmp_cfg), sid
+
+
 class FakeResponse:
     def __init__(self, body):
         self._body = body
@@ -50,6 +55,29 @@ def _fake_post(monkeypatch, body):
         return FakeResponse(body)
     monkeypatch.setattr(L.requests, "post", post)
     return captured
+
+
+def test_openai_nonstream_strips_inline_thinking(tmp_path, tmp_cfg, monkeypatch):
+    """A Qwen-family model (the local Ternary-Bonsai boxes) inlines its
+    thinking in `content` when the server has no reasoning_format set, and
+    the NON-stream path serves agent/lesson calls — it must strip exactly
+    like the stream path, or thinking arrives where an answer belongs."""
+    srv, sid = _openai(tmp_cfg)
+    body = {"choices": [{"message": {"content":
+            "The user wants one word.\n</think>\n\nPONG"}}],
+            "usage": {"completion_tokens": 9}}
+    _fake_post(monkeypatch, body)
+    out = srv.request("Reply with exactly the single word: PONG")
+    assert out.strip() == "PONG", repr(out)
+    assert "</think>" not in out
+    assert "<think" not in out
+
+
+def test_openai_nonstream_keeps_plain_answers_untouched(tmp_path, tmp_cfg, monkeypatch):
+    """No marker — no change: ordinary models must come back byte-identical."""
+    srv, sid = _openai(tmp_cfg)
+    _fake_post(monkeypatch, {"choices": [{"message": {"content": "PONG"}}]})
+    assert srv.request("say PONG") == "PONG"
 
 
 # --------------------------------------------------------------------------- #
