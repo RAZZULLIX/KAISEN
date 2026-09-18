@@ -951,6 +951,25 @@ function renderLiveSessions(container, data) {
   }
   const perServer = {};
   sessions.forEach(s => { perServer[s.server_id] = (perServer[s.server_id] || 0) + 1; });
+  // The pool can be far deeper than the servers can serve (hundreds of
+  // producers for six slots): most cards below are WAITERS, and an
+  // all-waiting view is indistinguishable from a dead stream.  Say the
+  // number once, at the top, so the quiet is explained.
+  const parked = Number(data.waiting_for_slot || 0);
+  const bound = sessions.filter(s => !s.waiting).length;
+  let banner = container.querySelector('.live-parked-line');
+  if (parked > 0) {
+    if (!banner) {
+      banner = document.createElement('div');
+      banner.className = 'console-line status-line live-parked-line';
+      banner.style.color = 'var(--muted)';
+      container.prepend(banner);
+    }
+    banner.textContent = `${parked} producer(s) parked waiting for an LLM slot — `
+      + `${bound} chat(s) bound right now; the rest below are waiting, not stalled.`;
+  } else if (banner) {
+    banner.remove();
+  }
   // Legacy autoscroll contract: DOM nodes REUSED and updated in place —
   // no rebuilds, no phantom scroll events.
   const chats = container._liveChats || (container._liveChats = new Map());
