@@ -72,6 +72,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Graphics rework — one type scale, quiet rows, honest topbar.**  The
+  dashboard now runs on a single spacing/typography token set (4px grid,
+  one `--fs-*` scale, one focus ring) instead of per-component one-offs.
+  Project rows dropped their five text buttons: the row reads as one
+  line, `✎` edit and the `⋮` menu (Export / Remove / Delete — destructive
+  actions last and red) appear on hover or keyboard focus, and the row's
+  ▶⏸⏹ trio is the only always-visible control.  The topbar is a real
+  three-zone flex (brand · centered nav · status pill) — zones can no
+  longer collide at narrow widths.  Long project and iteration tables
+  scroll inside their pane with a sticky header, and every truncated
+  label now carries its full text as a tooltip.
 - **System/confirm modals read as warnings, not decoration.**  The title
   ("System Message") carried no information, and the actual message —
   which engines will die — was small muted gray.  The title is now an

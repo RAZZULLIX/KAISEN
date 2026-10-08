@@ -1879,7 +1879,8 @@ function renderProjects() {
 }
 
 // One table row for a project.  inSet=true adds the Remove action used by the
-// set member table.  Row click opens the project; buttons stop propagation.
+// set member table.  Row click opens the project; the row actions stay quiet
+// until hover (Edit + kebab) so each row reads as one line.
 function projectRow(p, inSet) {
   const eng = projectsEngines[p.id];
   const tr = document.createElement('tr');
@@ -1891,7 +1892,6 @@ function projectRow(p, inSet) {
   const validHtml = v == null
     ? '<span class="muted">—</span>'
     : `<div class="valid-bar"><div class="valid-fill ${v <= 0.33 ? 'low' : v <= 0.66 ? 'mid' : 'high'}" style="width:${Math.round(v * 100)}%"></div></div><div class="valid-pct">${Math.round(v * 100)}%</div>`;
-  const busy = eng && (eng.engine_state === 'running' || eng.engine_state === 'paused' || eng.paused === true);
   tr.innerHTML = `
     <td class="col-state" onclick="event.stopPropagation()">${rowControls(p)}</td>
     <td class="col-project">
@@ -1905,14 +1905,51 @@ function projectRow(p, inSet) {
     <td class="col-valid">${validHtml}</td>
     <td class="col-goal">${goalWhen(p)}</td>
     <td class="col-actions" onclick="event.stopPropagation()">
-      <button class="btn btn-sm btn-primary" title="Open project" onclick="switchProject('${p.id}')">Open</button>
-      <button class="btn btn-sm" title="Edit spec" onclick="editProjectSpec('${p.id}')">Edit</button>
-      <button class="btn btn-sm" title="Choose what to include, then export as a .kaisen.zip" onclick="exportProject('${p.id}')">Export</button>
-      ${busy ? `<button class="btn btn-sm btn-danger-soft" title="Stop engine" onclick="stopEngine('${p.id}')">Stop</button>` : ''}
-      ${inSet ? `<button class="btn btn-sm btn-danger-soft" title="Remove from this set" onclick="removeSetMember('${p.id}')">Remove</button>` : ''}
-      <button class="btn btn-sm btn-danger-soft" title="Delete project" data-id="${p.id}" data-name="${escapeHtml(p.name)}" onclick="openDeleteProjectModal(this)">Delete</button>
+      <button class="btn-icon" title="Edit spec" aria-label="Edit spec" onclick="editProjectSpec('${p.id}')">✎</button>
+      <button class="btn-icon row-kebab" title="More actions" aria-haspopup="menu" aria-expanded="false" data-id="${p.id}" data-name="${escapeHtml(p.name)}" data-in-set="${inSet ? 1 : ''}" onclick="toggleRowMenu(event, this)">⋮</button>
     </td>`;
   return tr;
+}
+
+// ---- row action menu (kebab overflow) --------------------------------------
+// One floating menu at a time, anchored to the kebab that opened it. Destructive
+// actions never sit on the row itself: Export / Remove / Delete live here,
+// Delete last and red (destructive-action ladder).
+let rowMenuEl = null;
+let rowMenuBtn = null;
+
+function closeRowMenu() {
+  if (rowMenuEl) { rowMenuEl.remove(); rowMenuEl = null; }
+  if (rowMenuBtn) { rowMenuBtn.setAttribute('aria-expanded', 'false'); rowMenuBtn = null; }
+}
+
+function toggleRowMenu(event, btn) {
+  event.stopPropagation();
+  const reopened = rowMenuEl && rowMenuEl.dataset.for === btn.dataset.id;
+  closeRowMenu();
+  if (reopened) return;
+  const pid = btn.dataset.id;
+  const name = btn.dataset.name;
+  const menu = document.createElement('div');
+  menu.className = 'row-menu';
+  menu.dataset.for = pid;
+  const item = (label, fn, danger) => {
+    const b = document.createElement('button');
+    b.textContent = label;
+    if (danger) b.className = 'danger';
+    b.addEventListener('click', () => { closeRowMenu(); fn(); });
+    menu.appendChild(b);
+  };
+  item('Export (.kaisen.zip)', () => exportProject(pid));
+  if (btn.dataset.inSet) item('Remove from this set', () => removeSetMember(pid));
+  item('Delete project', () => openDeleteProjectModal(pid, name), true);
+  document.body.appendChild(menu);
+  const r = btn.getBoundingClientRect();
+  menu.style.left = `${Math.max(8, Math.min(r.right - menu.offsetWidth, window.innerWidth - menu.offsetWidth - 8))}px`;
+  menu.style.top = `${r.bottom + menu.offsetHeight + 8 > window.innerHeight ? r.top - menu.offsetHeight - 4 : r.bottom + 4}px`;
+  rowMenuEl = menu;
+  rowMenuBtn = btn;
+  btn.setAttribute('aria-expanded', 'true');
 }
 // ------------------------------------------------------------------ //
 // SETS — named project workspaces (docs/SETS.md §6)
@@ -2282,7 +2319,7 @@ function renderAddMembersList() {
     const tags = (p.tags || []).map(t => `<span class="chip tag-chip" title="${escapeHtml(setNameOf(t))}">${escapeHtml(t)}</span>`).join('');
     row.innerHTML = `
       <input type="checkbox" value="${p.id}" ${inSet ? 'checked disabled' : ''}>
-      <span class="mp-name">${escapeHtml(p.name)}</span>
+      <span class="mp-name" title="${escapeHtml(p.name)}">${escapeHtml(p.name)}</span>
       <span class="mp-id">${escapeHtml(p.id)}</span>
       <span class="mp-tags">${tags}</span>`;
     host.appendChild(row);
@@ -2414,12 +2451,12 @@ async function doStopEngine(id) {
 
 // ---- project deletion (type-the-name confirmation) ----
 let deleteProjectId = null;
-function openDeleteProjectModal(el) {
-  deleteProjectId = el.dataset.id;
-  document.getElementById('dp-target-name').textContent = `Delete "${el.dataset.name}"?`;
+function openDeleteProjectModal(id, name) {
+  deleteProjectId = id;
+  document.getElementById('dp-target-name').textContent = `Delete "${name}"?`;
   const input = document.getElementById('dp-confirm-input');
   input.value = '';
-  input.dataset.expected = el.dataset.name;
+  input.dataset.expected = name;
   document.getElementById('dp-confirm-btn').disabled = true;
   document.getElementById('delete-project-modal').style.display = 'flex';
   input.focus();
@@ -3619,7 +3656,7 @@ async function loadSnapshots() {
     el.innerHTML = snaps.length ? snaps.map(s => `
       <div class="snap-row">
         <span class="snap-time">${escapeHtml(new Date(s.created * 1000).toLocaleString())}</span>
-        <span class="snap-reason">${escapeHtml(s.reason || s.kind)}</span>
+        <span class="snap-reason" title="${escapeHtml(s.reason || s.kind)}">${escapeHtml(s.reason || s.kind)}</span>
         <button class="btn btn-sm" onclick="restoreSnapshot('${s.id}')">Restore</button>
       </div>`).join('') : '<div class="muted" style="font-size:12px;">No snapshots yet — they are taken automatically before agent/config changes.</div>';
   } catch (e) { el.innerHTML = '<div class="muted" style="font-size:12px;">Snapshot list unavailable.</div>'; }
@@ -3639,7 +3676,7 @@ async function loadToolchains() {
     const rows = r.rows || [];
     el.innerHTML = rows.map(x => `
       <div class="snap-row">
-        <span class="snap-reason" style="min-width:120px;">${escapeHtml(x.id)} <span class="muted">(${escapeHtml(x.kind)})</span></span>
+        <span class="snap-reason" style="min-width:120px;" title="${escapeHtml(x.id)}">${escapeHtml(x.id)} <span class="muted">(${escapeHtml(x.kind)})</span></span>
         ${x.installed
           ? `<span class="snap-time ok-badge">OK — ${escapeHtml(x.binary)}</span>`
           : `<span class="snap-time miss-badge">MISSING</span><span class="muted" style="font-size:12px;flex:1;">${escapeHtml(x.hint || 'no package available')}</span>`}
@@ -4319,6 +4356,7 @@ function dismissModal(m) {
 }
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
+    closeRowMenu();
     const m = topOpenModal();
     if (m) { dismissModal(m); return; }
     if (currentView === 'config') { closeSettingsBar(); return; }
@@ -4327,6 +4365,7 @@ document.addEventListener('keydown', (e) => {
   }
 });
 document.addEventListener('click', (e) => {
+  closeRowMenu();
   if (e.target && e.target.classList && e.target.classList.contains('modal-overlay')) {
     dismissModal(e.target);
   }
