@@ -61,7 +61,7 @@ class FakeEngine:
             self._max_parallel = int(max_parallel) or None
         if reserve is not None:
             self._reserve = bool(reserve)
-        return n
+        return {"max_parallel": self._max_parallel, "reserve": self._reserve}
 
     def set_fuzzy(self, n):
         self.fuzzy_top_n = n
@@ -372,6 +372,49 @@ def test_active_reports_pool(api):
     assert set(pool_ids) == {"a-proj", "b-proj"}
 
 
+
+def test_pool_counts_buckets_and_sums():
+    C = DashboardServer._pool_counts
+    rows = [
+        {"engine_state": "running", "jobs_queued": 2},
+        {"engine_state": "pausing", "jobs_queued": 0},
+        {"engine_state": "paused"},
+        {"engine_state": "stopping", "jobs_queued": 3},
+        {"engine_state": "stopped"},
+        {"engine_state": "teleporting"},   # unknown: never counted as running
+        {},                                 # missing: same
+    ]
+    assert C(rows) == {"n": 7, "running": 1, "pausing": 1, "paused": 1,
+                       "stopping": 1, "stopped": 3, "queued": 5}
+    assert C([]) == {"n": 0, "running": 0, "pausing": 0, "paused": 0,
+                     "stopping": 0, "stopped": 0, "queued": 0}
+
+
+def test_pool_counts_vocabulary_matches_engine_states():
+    """If engine.py grows a new STATE_*, _pool_counts must learn it before
+    the pill silently counts that state as stopped."""
+    from kaisen import engine as E
+    counts = DashboardServer._pool_counts([])
+    for st in (E.STATE_RUNNING, E.STATE_PAUSING, E.STATE_PAUSED,
+               E.STATE_STOPPING, E.STATE_STOPPED):
+        assert st in counts, f"engine state '{st}' would be counted as stopped"
+
+
+def test_active_reports_pool_counts(api):
+    """The pool counts describe the POOL, not the selected engine: the
+    selected project is deliberately the stopped one."""
+    srv, base = api
+    srv.engines["run-proj"] = FakeEngine("run-proj", engine_state="running")
+    srv.engines["pause-proj"] = FakeEngine("pause-proj", engine_state="paused",
+                                           paused=True)
+    srv.engines["stop-proj"] = FakeEngine("stop-proj", engine_state="stopped")
+    srv._selected_project_id = "stop-proj"
+    d = requests.get(base + "/api/active", timeout=5).json()
+    assert d["project_id"] == "stop-proj"          # selection unchanged…
+    assert d["pool"] == {"n": 3, "running": 1, "pausing": 0, "paused": 1,
+                         "stopping": 0, "stopped": 1, "queued": 0}  # …counts don't follow it
+
+
 def test_engine_pause_scoped_to_pid(api):
     srv, base = api
     _seed_engines(srv, ["a-proj", "b-proj"])
@@ -659,6 +702,54 @@ def test_engine_stop_removes_from_pool(api):
     assert r.json()["ok"] and r.json()["stopped"] == "b-proj"
     assert "b-proj" not in srv.engines
     assert srv.engines["a-proj"] is not None  # other engine untouched
+
+
+def test_engine_stop_is_idempotent_for_named_project(api):
+    srv, base = api
+    r = requests.post(base + "/api/engine/stop", json={"project_id": "ghost"}, timeout=5)
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "stopped": None}   # nothing was running: no-op
+    # ...while a stop with NO project and an empty pool stays an error.
+    r = requests.post(base + "/api/engine/stop", json={}, timeout=5)
+    assert r.status_code == 400
+
+
+def test_server_update_edits_fields_in_place(api):
+    srv, base = api
+    requests.post(base + "/api/servers/add", json={
+        "id": "ed", "type": "llama", "url": "http://127.0.0.1:1/completion",
+        "tier": "tiny", "priority": 2, "max_concurrent": 1}, timeout=5)
+    r = requests.post(base + "/api/servers/update", json={
+        "id": "ed", "label": "Renamed", "tier": "large", "priority": 7,
+        "max_concurrent": 3, "timeout": 60}, timeout=5)
+    assert r.status_code == 200 and r.json()["ok"]
+    spec = srv._orch()._server_spec("ed")
+    assert spec["label"] == "Renamed" and spec["tier"] == "large"
+    assert spec["priority"] == 7 and spec["max_concurrent"] == 3
+    assert spec["timeout"] == 60
+    assert spec["url"] == "http://127.0.0.1:1/completion"   # untouched field kept
+    assert "ed" in srv._orch()._active_ids                  # membership kept
+
+
+def test_server_update_type_switch_moves_url_and_locality(api):
+    srv, base = api
+    requests.post(base + "/api/servers/add", json={
+        "id": "ed2", "type": "llama", "url": "http://127.0.0.1:1/completion"},
+        timeout=5)
+    r = requests.post(base + "/api/servers/update", json={
+        "id": "ed2", "type": "openai", "base_url": "http://192.168.1.199:8502/v1",
+        "url": "", "model": "qwen"}, timeout=5)
+    assert r.status_code == 200
+    spec = srv._orch()._server_spec("ed2")
+    assert spec["base_url"] == "http://192.168.1.199:8502/v1" and spec["url"] == ""
+    assert spec["local"] is False        # openai is never probeable-local
+
+
+def test_server_update_unknown_id_404(api):
+    _, base = api
+    r = requests.post(base + "/api/servers/update",
+                      json={"id": "ghost", "label": "x"}, timeout=5)
+    assert r.status_code == 404
 
 
 def test_delete_409_while_running_then_ok_after_stop(api, registry):

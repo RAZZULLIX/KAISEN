@@ -21,6 +21,7 @@ Pipeline command placeholders (substituted per step):
 from __future__ import annotations
 
 import copy
+import re
 import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -45,6 +46,7 @@ DEFAULT_SPEC: Dict[str, Any] = {
     "id": "",
     "name": "",
     "description": "",
+    "tags": [],
     "language": "c",
     "artifact_name": "program",
     "steps": {
@@ -83,6 +85,14 @@ def validate_spec(spec: Dict[str, Any]) -> List[str]:
         errors.append("id: required")
     if not spec.get("name"):
         errors.append("name: required")
+    tags = spec.get("tags")
+    if tags is not None:
+        if not isinstance(tags, list):
+            errors.append("tags: must be a list of set ids")
+        else:
+            for t in tags:
+                if not isinstance(t, str) or not re.fullmatch(r"[a-z0-9_-]+", t):
+                    errors.append(f"tags: ids must match [a-z0-9_-]+ (got {t!r})")
     steps = spec.get("steps") or {}
     if "build" not in steps:
         errors.append("steps.build: required")
@@ -314,6 +324,7 @@ class ProjectRegistry:
                 "name": p.name,
                 "description": p.spec.get("description", ""),
                 "language": p.spec.get("language", ""),
+                "tags": list(p.spec.get("tags") or []),
                 "path": str(p.path),
                 "metrics": p.spec.get("metrics", {}),
             }
@@ -355,6 +366,10 @@ class ProjectRegistry:
         # be persisted — they are derived, not spec.
         spec = {k: v for k, v in spec.items() if k != "dir"}
         merged = _merge_defaults(spec)
+        # SET membership is managed ONLY through the sets API — a spec save
+        # from the GUI editor (which knows nothing about tags) must never
+        # silently evict the project from its sets.
+        merged["tags"] = list(p.spec.get("tags") or [])
         merged["id"] = project_id
         errors = validate_spec(merged)
         if errors:

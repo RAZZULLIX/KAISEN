@@ -1610,6 +1610,38 @@ class ModelOrchestrator:
         self.persist()
         return self._servers[sid].snapshot()
 
+    # Fields an /api/servers/update may change.  id is immutable (it keys
+    # secrets, health and budgets); enabled/active live in the checkbox;
+    # budget has its own modal; params/templates are spec-level, not row
+    # fields.
+    EDITABLE_FIELDS = ("label", "type", "url", "base_url", "model",
+                       "max_concurrent", "timeout", "tier", "priority",
+                       "context_window", "local")
+
+    def update_server(self, sid: str, patch: Dict[str, Any]) -> Dict[str, Any]:
+        """Apply a partial patch to one server: merge into its stored spec
+        and rebuild the Server in place (same id, same active membership).
+        api_key is NOT handled here — the caller saves the secret first so
+        the rebuilt Server resolves the new key by id."""
+        with self._lock:
+            if sid not in self._servers:
+                raise KeyError(sid)
+            merged = self._server_spec(sid)
+            for k, v in patch.items():
+                if k in self.EDITABLE_FIELDS:
+                    merged[k] = v
+            # A type change re-decides locality (llama.cpp is probeable,
+            # openai/remote is not) unless the patch sets it explicitly.
+            if "type" in patch and "local" not in patch:
+                merged["local"] = str(patch.get("type", "")).lower() == "llama"
+            merged["id"] = sid
+            self._servers[sid] = Server(merged, self.cfg)
+            self._rebuild_layout()
+            threading.Thread(target=self._learn_server_caps, args=(sid,),
+                             daemon=True).start()
+        self.persist()
+        return self._servers[sid].snapshot()
+
     def remove_server(self, sid: str) -> None:
         with self._lock:
             self._servers.pop(sid, None)

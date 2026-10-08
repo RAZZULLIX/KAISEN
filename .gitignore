@@ -7,8 +7,13 @@ secrets.json
 .env
 kai_runs.json
 engine_pool.json
+sets.json
+exports/
 campaign.json
 campaign_bugs.jsonl
+
+# speculative vision spec — lab notebook, never published
+docs/FUTURES.md
 
 
 # generated projects are runtime data, not framework code — never publish

@@ -233,7 +233,7 @@ function switchView(viewName) {
     const el = document.getElementById(`view-${v}`);
     if (el) el.style.display = v === viewName ? 'block' : 'none';
   });
-  if (viewName === 'projects') loadProjects();
+  if (viewName === 'projects') { loadProjects(); loadSets(); }
   if (viewName === 'notes') loadNotes();
   if (viewName === 'config') switchSettingsTab(settingsTab || 'general');
   if (viewName === 'dashboard') { startIterationPolling(); loadActive(); }
@@ -253,6 +253,14 @@ function closeSettingsBar() {
 }
 function switchSettingsTab(tab) {
   if (tab === 'project' && projectTabHidden()) tab = 'general';
+  // Leaving the servers tab mid-edit: the editor row would silently die.
+  if (editingServerId && tab !== settingsTab) {
+    systemConfirm('Leave the endpoint editor? Unsaved changes will be lost.', () => {
+      editingServerId = null;
+      switchSettingsTab(tab);
+    });
+    return;
+  }
   settingsTab = tab;
   document.querySelectorAll('#view-config .tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
   ['general', 'project', 'servers', 'toolchains'].forEach(k => {
@@ -678,10 +686,30 @@ async function updateStatusPill() {
     dot.className = 'status-dot';
     const engines = (activeData && activeData.engines) || [];
     const hasPool = !!(activeData && Array.isArray(activeData.engines));
+    // Pool counts from the server (one truth): the pill's mixed-state
+    // label and LED are built from these, never from the selected
+    // engine's state standing in for the whole fleet.
+    const pool = (activeData && activeData.pool) || null;
     renderFleet(engines);
+    // Keep the project rows' play/pause/stop cluster honest even when a
+    // KAI/curl change moved the pool behind the dashboard's back: the pill
+    // already polls the pool every second — mirror it into the rows.
+    // /api/active answers {"no_engine": true} when the pool is EMPTY, so
+    // the empty case must clear the rows too, not just a changed list.
+    if (currentView === 'projects' && activeData) {
+      const nextEng = {};
+      engines.forEach(e => { if (e && e.project_id != null) nextEng[e.project_id] = e; });
+      if (JSON.stringify(nextEng) !== JSON.stringify(projectsEngines)) {
+        projectsEngines = nextEng;
+        renderProjects();
+      }
+    }
     if ((statusData && statusData.no_engine) || (hasPool && engines.length === 0)) {
-      dot.classList.add('red');
-      text.textContent = 'SYSTEM DOWN';
+      // Nothing is broken — the dashboard answers, the servers are there,
+      // there is just no engine in the pool yet.  "DOWN" scared users out
+      // of a healthy, waiting system.
+      dot.classList.add('yellow');
+      text.textContent = 'SYSTEM READY';
       document.getElementById('detail-project').textContent = 'none';
       document.getElementById('detail-status').textContent = 'NO ENGINE';
       document.getElementById('detail-guardrails').textContent = '--';
@@ -694,7 +722,14 @@ async function updateStatusPill() {
     // Before the user presses anything, mirror the real state so a reload
     // while paused/stopped shows the right button lit.
     if (!llmPressTracked) {
-      if (es === 'paused' || es === 'pausing') llmControlState = 'pausing';
+      if (pool && pool.n > 1) {
+        // The trio drives the whole pool, so mirror the POOL: anything
+        // running keeps play lit; only an all-halted pool is stopped; a
+        // paused/draining mix lights pause.
+        if (pool.running > 0) llmControlState = 'running';
+        else if (pool.stopping + pool.stopped === pool.n) llmControlState = 'stopped';
+        else llmControlState = 'pausing';
+      } else if (es === 'paused' || es === 'pausing') llmControlState = 'pausing';
       else if (es === 'stopped' || es === 'stopping') llmControlState = 'stopped';
       else llmControlState = 'running';
     }
@@ -718,24 +753,31 @@ async function updateStatusPill() {
     } else {
       text.textContent = 'IDLE';
     }
-    // Engine pool: more than one engine → summarize the pool instead of a
-    // single engine's generation state (single engine keeps the label above).
+    // Engine pool: more than one engine → summarize the pool's STATE,
+    // not just its size: "SYSTEM — 2 RUNNING · 1 PAUSED" tells the truth
+    // when the engines disagree; the old "3 engines" hid two stopped
+    // ones behind a number.
+    let poolParts = null;
     if (hasPool && engines.length > 1) {
-      // Queued = generations whose LLM work is DONE and whose artifacts are
-      // waiting for a free worker.  (`waiting_for_slot` — producers parked
-      // for LLM capacity — is the normal state of a busy pool and is not
-      // shown here: it is not a queue.)
-      const queued = (statusData.engines || [])
-        .reduce((n, e) => n + Number(e.jobs_queued || 0), 0);
-      text.textContent = generating
-        ? `SYSTEM — ${engines.length} engines · ${aggTps.toFixed(1)} TPS${queued ? ` · ${queued} queued for a worker` : ''}`
-        : `SYSTEM — ${engines.length} engines${queued ? ` · ${queued} queued for a worker` : ''}`;
+      const p = pool || {};
+      poolParts = [
+        [p.running, 'RUNNING'], [p.pausing, 'DRAINING'], [p.paused, 'PAUSED'],
+        [p.stopping, 'STOPPING'], [p.stopped, 'STOPPED'],
+      ].filter(x => x[0] > 0).map(x => `${x[0]} ${x[1]}`);
+      const queued = p.queued || 0;
+      text.textContent = `SYSTEM — ${poolParts.join(' · ')}`
+        + (aggTps > 0 ? ` @ ${aggTps.toFixed(1)} TPS` : '')
+        + (queued ? ` · ${queued} queued for a worker` : '');
     }
-    // The pill LED reflects the selected servers: red when any is not
-    // answering, green when all are available, yellow when none selected.
-    if (statusData.status === 'stopped') {
-      dot.classList.add('red');
-    } else if (anyOffline) {
+    // The pill LED: single engine — the selected servers decide.
+    // Pool — red only on evidence of failure (a dead server, or the
+    // WHOLE pool halted); green while anything runs or drains; yellow
+    // when everything is merely paused (nothing runs, nothing is broken).
+    if (pool && pool.n > 1) {
+      if (anyOffline || pool.stopping + pool.stopped === pool.n) dot.classList.add('red');
+      else if (pool.running + pool.pausing > 0) dot.classList.add('green');
+      else dot.classList.add('yellow');
+    } else if (statusData.status === 'stopped' || anyOffline) {
       dot.classList.add('red');
     } else if (selectedIds.length === 0) {
       dot.classList.add('yellow');
@@ -744,9 +786,15 @@ async function updateStatusPill() {
     }
     document.getElementById('detail-project').textContent = activeData ? activeData.project_id : 'none';
     const statusEl = document.getElementById('detail-status');
-    const esLabel = es === 'pausing' ? 'PAUSING (DRAINING)' : es === 'paused' ? 'PAUSED' : es === 'stopped' ? 'STOPPED' : es === 'running' ? 'RUNNING' : es.toUpperCase();
-    statusEl.textContent = esLabel;
-    statusEl.style.color = generating ? 'var(--accent)' : statusData.status === 'paused' ? 'var(--warning)' : statusData.status === 'stopped' ? 'var(--danger)' : 'var(--muted)';
+    if (poolParts) {
+      statusEl.textContent = poolParts.join(' · ');
+      statusEl.style.color = aggTps > 0 ? 'var(--accent)'
+        : (pool.stopping + pool.stopped === pool.n) ? 'var(--danger)' : 'var(--warning)';
+    } else {
+      const esLabel = es === 'pausing' ? 'PAUSING (DRAINING)' : es === 'paused' ? 'PAUSED' : es === 'stopped' ? 'STOPPED' : es === 'running' ? 'RUNNING' : es.toUpperCase();
+      statusEl.textContent = esLabel;
+      statusEl.style.color = generating ? 'var(--accent)' : statusData.status === 'paused' ? 'var(--warning)' : statusData.status === 'stopped' ? 'var(--danger)' : 'var(--muted)';
+    }
     const gr = activeData && activeData.guardrails;
     const grEl = document.getElementById('detail-guardrails');
     grEl.textContent = gr && gr.global_off ? 'OFF' : (gr && !gr.project_enabled ? 'PROJECT OFF' : 'ON');
@@ -763,6 +811,8 @@ function renderFleet(engines) {
   const c = document.getElementById('fleet-rows');
   if (!c) return;
   const list = Array.isArray(engines) ? engines : [];
+  // Belt & braces: while a set is active, only its members may run.
+  if (activeSetId) list = list.filter(e => projectInTarget(e.project_id, activeSetId));
   if (!list.length) {
     c.innerHTML = '<div class="empty-state fleet-empty"><span>No engines running — pick a project and press Run.</span></div>';
     return;
@@ -1288,7 +1338,28 @@ async function loadActive() {
   }
 }
 
+// The servers table is schema-driven: SERVER_EDIT_FIELDS is the single
+// definition of what an endpoint row can edit — the editor grid, the
+// payload and the validation all come from it (no per-field prose twice).
+const SERVER_EDIT_FIELDS = [
+  { key: 'label',  label: 'Label', type: 'text', placeholder: 'empty = show the id' },
+  { key: 'type',   label: 'Type',  type: 'select',
+    options: [['llama', 'llama.cpp (/completion)'], ['openai', 'OpenAI-compatible'], ['remote', 'Remote template']] },
+  { key: 'url',    label: 'URL (llama/remote) or base URL (openai)', type: 'text' },
+  { key: 'model',  label: 'Model', type: 'text' },
+  { key: 'api_key', label: 'API key — blank keeps the stored one', type: 'password', placeholder: '••••••' },
+  { key: 'max_concurrent', label: 'Max concurrent', type: 'number', min: 1 },
+  { key: 'timeout', label: 'Timeout (s)', type: 'number', min: 1 },
+  { key: 'tier',   label: 'Tier', type: 'select',
+    options: [['tiny', 'tiny'], ['small', 'small'], ['large', 'large']] },
+  { key: 'priority', label: 'Priority', type: 'number', min: 0 },
+  { key: 'context_window', label: 'Context window (0 = unknown)', type: 'number', min: 0 },
+];
+let editingServerId = null;
+let serversLlmCache = null;
+
 function renderServers(llm) {
+  serversLlmCache = llm;
   const tbody = document.getElementById('servers-tbody');
   tbody.innerHTML = '';
   const servers = llm.servers || [];
@@ -1304,11 +1375,15 @@ function renderServers(llm) {
       : `Routing: ${mode.toUpperCase()} (tier/priority order) — this scoreboard is advisory; set config llm.routing = "adaptive" to let it pick per skill`;
   }
 
-  if (!servers.length) { tbody.innerHTML = '<tr><td colspan="12" style="text-align:center;color:var(--muted);">No servers.</td></tr>'; return; }
+  if (!servers.length) { tbody.innerHTML = '<tr><td colspan="13" style="text-align:center;color:var(--muted);">No servers.</td></tr>'; return; }
   servers.forEach(s => {
     const active = (llm.active_ids || []).includes(s.id);
+    const editing = editingServerId === s.id;
     const tr = document.createElement('tr');
     tr.id = `server-row-${s.id}`;
+    const actions = editing
+      ? `<button class="btn btn-sm" title="Apply changes" style="border-color:var(--accent);color:var(--accent);" onclick="applyEditServer('${s.id}')">✓</button><button class="btn btn-sm" title="Cancel — discard changes" onclick="cancelEditServer('${s.id}')">✕</button>`
+      : `<button class="btn btn-sm" title="Edit all fields of this endpoint" onclick="startEditServer('${s.id}')">✎</button><button class="btn btn-sm" title="Probe the endpoint (health check)" onclick="healthCheck('${s.id}')">⟳</button><button class="btn btn-sm" title="Set usage budget (max tokens / generations / reset)" onclick="openBudgetModal('${s.id}')">$</button><button class="btn btn-sm" title="Remove this endpoint" style="border-color:var(--danger);color:var(--danger);" onclick="removeServer('${s.id}')">✕</button>`;
     tr.innerHTML = `
       <td><input type="checkbox" ${active ? 'checked' : ''} onchange="toggleServerActive('${s.id}', this.checked)"></td>
       <td class="llm-label-cell" style="max-width:150px;overflow:hidden;" data-label="${escapeHtml(s.label || '')}"><b title="${escapeHtml(s.label || s.id)}" style="display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(s.label || s.id)}</b>${s.label && s.label !== s.id ? `<div class="iter-prompt" style="font-size:10px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(s.id)}</div>` : ''}</td><td>${escapeHtml(s.type)}</td><td class="iter-prompt" style="max-width:110px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(s.url || s.base_url)}">${escapeHtml(s.url || s.base_url)}</td>
@@ -1316,10 +1391,92 @@ function renderServers(llm) {
       <td class="${s.banned ? 'iter-err' : s.busy ? 'iter-warn' : s.online === false ? 'iter-err' : 'iter-ok'}">${s.banned ? 'BANNED' : s.busy ? 'busy' : s.online === false ? 'offline' : 'ok'}</td>
       <td>${(s.stats ? `${s.stats.requests || 0} req${s.stats.failures ? ' · ' + s.stats.failures + ' fail' : ''}${s.stats.avg_seconds ? ' · ' + Number(s.stats.avg_seconds).toFixed(0) + 's' : ''}` : '—')}</td>
       ${renderBudgetCell(s)}
-      <td class="llm-actions"><button class="btn btn-sm" title="Rename this endpoint" onclick="startRenameServer('${s.id}')">✎</button><button class="btn btn-sm" title="Probe the endpoint (health check)" onclick="healthCheck('${s.id}')">⟳</button><button class="btn btn-sm" title="Set usage budget (max tokens / generations / reset)" onclick="openBudgetModal('${s.id}')">$</button><button class="btn btn-sm" title="Remove this endpoint" style="border-color:var(--danger);color:var(--danger);" onclick="removeServer('${s.id}')">✕</button></td>`;
+      <td class="llm-actions">${actions}</td>`;
     tbody.appendChild(tr);
+    if (editing) tbody.appendChild(serverEditRow(s));
   });
   markSettingsClean();   // servers tab loaded — same baseline rule
+}
+
+function serverEditRow(s) {
+  const tr = document.createElement('tr');
+  tr.className = 'server-edit-row';
+  const vals = {
+    label: s.label || '', type: s.type || 'llama',
+    url: s.base_url || s.url || '', model: s.model || '',
+    api_key: '',   // never prefilled — secrets stay in secrets.json
+    max_concurrent: s.max_concurrent ?? 1, timeout: Math.round(s.timeout ?? 1200),
+    tier: s.tier || 'small', priority: s.priority ?? 1,
+    context_window: s.context_window ?? 0,
+  };
+  const cells = SERVER_EDIT_FIELDS.map(f => {
+    const v = escapeHtml(String(vals[f.key] ?? ''));
+    const id = `se-${f.key}`;
+    let input;
+    if (f.type === 'select') {
+      input = `<select id="${id}">${f.options.map(([ov, ol]) =>
+        `<option value="${ov}"${ov === vals[f.key] ? ' selected' : ''}>${ol}</option>`).join('')}</select>`;
+    } else {
+      input = `<input id="${id}" type="${f.type}" value="${v}"${f.min != null ? ` min="${f.min}"` : ''} placeholder="${escapeHtml(f.placeholder || '')}">`;
+    }
+    return `<label>${escapeHtml(f.label)}${input}</label>`;
+  }).join('');
+  tr.innerHTML = `<td colspan="13"><div class="server-edit-grid">${cells}
+    <div class="server-edit-note">id <b>${escapeHtml(s.id)}</b> is fixed — it keys the stored key, health and budget.</div>
+  </div></td>`;
+  return tr;
+}
+
+function startEditServer(id) {
+  editingServerId = id;
+  renderServers(serversLlmCache);
+  const first = document.getElementById('se-label');
+  if (first) first.focus();
+}
+
+function collectServerEdit() {
+  const payload = { id: editingServerId };
+  for (const f of SERVER_EDIT_FIELDS) {
+    const el = document.getElementById(`se-${f.key}`);
+    if (!el) return null;
+    let v = el.value;
+    if (f.type === 'number') {
+      v = Number(v);
+      if (!Number.isFinite(v) || (f.min != null && v < f.min)) {
+        systemAlert(`${f.label}: need a number ≥ ${f.min}.`); return null;
+      }
+    } else {
+      v = v.trim();
+    }
+    if (f.key === 'url' && !v) { systemAlert('A URL is required.'); return null; }
+    payload[f.key] = v;
+  }
+  // One URL field serves both shapes; the type decides where it lands.
+  if (payload.type === 'openai') { payload.base_url = payload.url; payload.url = ''; }
+  else { payload.url = payload.url; payload.base_url = ''; }
+  return payload;
+}
+
+function applyEditServer(id) {
+  const payload = collectServerEdit();
+  if (!payload) return;
+  systemConfirm(`Apply these changes to endpoint "${id}"? The new settings take effect from the next request.`, async () => {
+    try {
+      await api('/api/servers/update', { method: 'POST', body: JSON.stringify(payload) });
+      editingServerId = null;
+      toast('Endpoint updated.');
+      loadActive();
+    } catch (e) { systemAlert('Update failed: ' + e.message); }
+  });
+}
+
+function cancelEditServer(id) {
+  const close = () => { editingServerId = null; renderServers(serversLlmCache); };
+  if (settingsDirty()) {
+    systemConfirm(`Discard the changes to endpoint "${id}"?`, close);
+  } else {
+    close();
+  }
 }
 async function loadModelStats() {
   const tbody = document.getElementById('modelstats-tbody');
@@ -1357,33 +1514,6 @@ async function loadModelStats() {
     console.warn('modelstats failed', e);
     tbody.innerHTML = `<tr><td colspan="9" class="iter-err" style="text-align:center;">Scoreboard failed: ${escapeHtml(String(e && e.message || e))}</td></tr>`;
   }
-}
-function startRenameServer(id) {
-  // Inline edit in the table — no browser prompt() dialog.
-  const row = document.getElementById(`server-row-${id}`);
-  const cell = row && row.querySelector('.llm-label-cell');
-  if (!cell) return;
-  const cur = cell.dataset.label || '';
-  cell.innerHTML = `<input type="text" class="inline-rename" value="${escapeHtml(cur)}" placeholder="label or empty for address">`;
-  const input = cell.querySelector('input');
-  input.focus();
-  input.select();
-  let done = false;
-  const finish = async (save) => {
-    if (done) return;
-    done = true;
-    const label = save ? input.value.trim() : cur;
-    try {
-      await api('/api/servers/label', { method: 'POST', body: JSON.stringify({ id, label }) });
-      toast(save ? 'Server renamed.' : 'Rename cancelled.');
-      loadActive();
-    } catch (e) { systemAlert('Rename failed: ' + e.message); }
-  };
-  input.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') { e.preventDefault(); finish(true); }
-    if (e.key === 'Escape') { e.preventDefault(); finish(false); }
-  });
-  input.addEventListener('blur', () => finish(true));
 }
 async function toggleServerActive(id, on) {
   try {
@@ -1499,6 +1629,10 @@ let langFilterValue = null;
 let langFilterVisible = false;
 let goalFilterOnly = false;        // show only projects whose goal is met
 let projectsSortKey = 'engine';    // engine | goal_desc | goal_asc | name
+// SETS workspaces (docs/SETS.md): activeSetId null = the default workspace
+// (untagged projects + temp).  Membership is by `tags` in each project row.
+let setsData = [];
+let activeSetId = null;
 
 async function loadProjects() {
   try {
@@ -1516,12 +1650,21 @@ async function loadProjects() {
       langFilterValue = null;    // the filtered language no longer exists
     }
     renderProjects();
+    if (activeSetId) renderSetCard();   // keep the set header counts fresh too
+    renderSetsBar();   // keep the Default chip's orphan count fresh
   } catch (e) { console.error(e); }
+}
+
+function inWorkspace(p) {
+  const tags = (p && p.tags) || [];
+  if (p.temp) return !activeSetId;      // temp projects live in default only
+  return activeSetId === null ? tags.length === 0 : tags.includes(activeSetId);
 }
 
 function visibleProjects() {
   const q = (document.getElementById('projects-search')?.value || '').trim().toLowerCase();
   return projectsData.filter(p => {
+    if (!inWorkspace(p)) return false;
     if (langFilterValue && (p.language || '') !== langFilterValue) return false;
     if (goalFilterOnly && !(p.goal && p.goal.met === true)) return false;
     if (q && !(p.name + ' ' + p.id).toLowerCase().includes(q)) return false;
@@ -1645,23 +1788,78 @@ function showLiveSizing(elId, live, specVal, what) {
   el.title = differs ? `${what}: ${n}` : '';
 }
 
-function stateDot(p) {
+// The row's left cluster REPLACES the old state LED and is the status
+// pill's LLM-control trio, scaled to the row: ▶ play, ⏸ pause, ⏹ stop —
+// same icons, same lit-language (play glows while the engine runs, pause
+// glows while it drains, stop glows when it is stopped).  ⏹ is
+// IDEMPOTENT: pressing it when nothing runs is a harmless no-op.
+const ROW_ICONS = {
+  play:  '<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M8 5v14l11-7z" fill="currentColor"/></svg>',
+  pause: '<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z" fill="currentColor"/></svg>',
+  stop:  '<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M6 6h12v12H6z" fill="currentColor"/></svg>',
+};
+function rowControls(p) {
   const eng = projectsEngines[p.id];
   const st = eng && eng.engine_state;
-  if (st === 'running') return '<span class="proj-dot running" title="running"></span>';
-  if (st === 'paused' || st === 'pausing' || (eng && eng.paused === true)) return '<span class="proj-dot paused" title="paused"></span>';
-  if (eng && eng.engine_error) return '<span class="proj-dot error" title="error"></span>';
-  if (eng) return '<span class="proj-dot stopped" title="stopped"></span>';
-  return '<span class="proj-dot idle" title="not started"></span>';
+  const paused = st === 'paused' || (eng && eng.paused === true);
+  // Lit-language copied from updateLlmButtons(): running -> play; paused /
+  // pausing -> pause (play stays lit while a pause drains); stopped or no
+  // engine at all -> stop.  So ⏹ glows on a CLOSED row and on an opened-
+  // but-stopped one, exactly like the pill on SYSTEM READY.
+  const playLit = st === 'running' || st === 'pausing';
+  const pauseLit = paused || st === 'pausing';
+  const stopLit = !eng || st === 'stopped' || st === 'stopping';
+  const playTitle = paused ? 'Resume engine'
+    : playLit ? 'Engine is running'
+    : 'Start engine (adds it to the current runs)';
+  const pauseTitle = st === 'pausing' ? 'Pausing — click to cancel'
+    : paused ? 'Engine is paused'
+    : 'Pause engine';
+  const play = `<button class="row-ctl${playLit ? ' active-play' : ''}" title="${playTitle}" onclick="rowPlay('${p.id}')">${ROW_ICONS.play}</button>`;
+  const pause = `<button class="row-ctl${pauseLit ? ' active-pause' : ''}" title="${pauseTitle}" onclick="rowPause('${p.id}')">${ROW_ICONS.pause}</button>`;
+  const stop = `<button class="row-ctl${stopLit ? ' active-stop' : ''}" title="Stop engine" onclick="rowStop('${p.id}')">${ROW_ICONS.stop}</button>`;
+  return play + pause + stop;
+}
+
+async function rowPlay(id) {
+  const eng = projectsEngines[id];
+  try {
+    const st = eng && eng.engine_state;
+    if (eng && (st === 'paused' || st === 'pausing' || eng.paused === true)) {
+      await api('/api/engine/pause', { method: 'POST', body: JSON.stringify({ project_id: id, paused: false }) });
+    } else {     // not in the pool (or dead with an error): boot/reboot it
+                 // into the current runs, no open
+      await api('/api/engine/start', { method: 'POST', body: JSON.stringify({ project_id: id }) });
+    }
+  } catch (e) { systemAlert('Start failed: ' + e.message); }
+  loadProjects();
+}
+async function rowPause(id) {
+  try { await api('/api/engine/pause', { method: 'POST', body: JSON.stringify({ project_id: id, paused: true }) }); }
+  catch (e) { systemAlert('Pause failed: ' + e.message); }
+  loadProjects();
+}
+function rowStop(id) {
+  const eng = projectsEngines[id];
+  const busy = eng && (eng.engine_state === 'running' || eng.engine_state === 'paused'
+                       || eng.engine_state === 'pausing' || eng.paused === true);
+  if (!busy) { idempotentStop(id); return; }   // nothing to kill — no confirm
+  stopEngine(id);                              // existing confirm flow
+}
+async function idempotentStop(id) {
+  try { await api('/api/engine/stop', { method: 'POST', body: JSON.stringify({ project_id: id }) }); } catch (e) {}
+  loadProjects();
 }
 
 function renderProjects() {
   const tbody = document.getElementById('projects-tbody');
-  const empty = document.getElementById('projects-empty');
-  const count = document.getElementById('projects-count');
   if (!tbody) return;
+  renderWorkspaceView();
   const sortSel = document.getElementById('projects-sort');
   if (sortSel && sortSel.value) projectsSortKey = sortSel.value;
+  if (activeSetId) { renderSetMembers(); return; }   // set workspace renders its own table
+  const empty = document.getElementById('projects-empty');
+  const count = document.getElementById('projects-count');
   const list = sortProjects(visibleProjects());
   const langs = {};
   projectsData.forEach(p => { const l = p.language || '?'; langs[l] = (langs[l] || 0) + 1; });
@@ -1677,37 +1875,458 @@ function renderProjects() {
   if (count) count.textContent = `${list.length} of ${projectsData.length} projects`;
   tbody.innerHTML = '';
   empty.style.display = list.length ? 'none' : '';
-  list.forEach(p => {
-    const eng = projectsEngines[p.id];
-    const tr = document.createElement('tr');
-    tr.className = p.id === activeProjectId ? 'row-active' : '';
-    tr.title = `Open ${p.name}`;
-    tr.addEventListener('click', () => switchProject(p.id));
-    const vr = eng && eng.valid_rate ? eng.valid_rate.valid_rate : null;
-    const v = Number.isFinite(Number(vr)) ? Number(vr) : null;
-    const validHtml = v == null
-      ? '<span class="muted">—</span>'
-      : `<div class="valid-bar"><div class="valid-fill ${v <= 0.33 ? 'low' : v <= 0.66 ? 'mid' : 'high'}" style="width:${Math.round(v * 100)}%"></div></div><div class="valid-pct">${Math.round(v * 100)}%</div>`;
-    tr.innerHTML = `
-      <td class="col-state">${stateDot(p)}</td>
-      <td class="col-project">
-        <div class="proj-name">${escapeHtml(p.name)}${p.id === activeProjectId ? ' <span class="chip chip-accent">ACTIVE</span>' : ''}${goalChip(p)}</div>
-        <div class="proj-sub"><span class="proj-id">${escapeHtml(p.id)}</span></div>
-        ${p.description ? `<div class="proj-desc">${escapeHtml(p.description)}</div>` : ''}
-      </td>
-      <td class="col-lang"><span class="lang-chip" title="${escapeHtml(p.language || '')}">${escapeHtml(p.language || '?')}</span></td>
-      <td class="col-engine">${engineCell(eng, p)}</td>
-      <td class="col-best">${bestCell(p)}</td>
-      <td class="col-valid">${validHtml}</td>
-      <td class="col-goal">${goalWhen(p)}</td>
-      <td class="col-actions" onclick="event.stopPropagation()">
-        <button class="btn btn-sm btn-primary" title="Open project" onclick="switchProject('${p.id}')">Open</button>
-        <button class="btn btn-sm" title="Edit spec" onclick="editProjectSpec('${p.id}')">Edit</button>
-        ${(eng && (eng.engine_state === 'running' || eng.engine_state === 'paused' || eng.paused === true)) ? `<button class="btn btn-sm btn-danger-soft" title="Stop engine" onclick="stopEngine('${p.id}')">Stop</button>` : ''}
-        <button class="btn btn-sm btn-danger-soft" title="Delete project" data-id="${p.id}" data-name="${escapeHtml(p.name)}" onclick="openDeleteProjectModal(this)">Delete</button>
-      </td>`;
-    tbody.appendChild(tr);
+  list.forEach(p => tbody.appendChild(projectRow(p, false)));
+}
+
+// One table row for a project.  inSet=true adds the Remove action used by the
+// set member table.  Row click opens the project; buttons stop propagation.
+function projectRow(p, inSet) {
+  const eng = projectsEngines[p.id];
+  const tr = document.createElement('tr');
+  tr.className = p.id === activeProjectId ? 'row-active' : '';
+  tr.title = `Open ${p.name}`;
+  tr.addEventListener('click', () => switchProject(p.id));
+  const vr = eng && eng.valid_rate ? eng.valid_rate.valid_rate : null;
+  const v = Number.isFinite(Number(vr)) ? Number(vr) : null;
+  const validHtml = v == null
+    ? '<span class="muted">—</span>'
+    : `<div class="valid-bar"><div class="valid-fill ${v <= 0.33 ? 'low' : v <= 0.66 ? 'mid' : 'high'}" style="width:${Math.round(v * 100)}%"></div></div><div class="valid-pct">${Math.round(v * 100)}%</div>`;
+  const busy = eng && (eng.engine_state === 'running' || eng.engine_state === 'paused' || eng.paused === true);
+  tr.innerHTML = `
+    <td class="col-state" onclick="event.stopPropagation()">${rowControls(p)}</td>
+    <td class="col-project">
+      <div class="proj-name">${escapeHtml(p.name)}${p.id === activeProjectId ? ' <span class="chip chip-accent" title="The project open in the dashboard right now — engine state is the trio on the left">OPEN</span>' : ''}${goalChip(p)}</div>
+      <div class="proj-sub"><span class="proj-id">${escapeHtml(p.id)}</span></div>
+      ${p.description ? `<div class="proj-desc">${escapeHtml(p.description)}</div>` : ''}
+    </td>
+    <td class="col-lang"><span class="lang-chip" title="${escapeHtml(p.language || '')}">${escapeHtml(p.language || '?')}</span></td>
+    <td class="col-engine">${engineCell(eng, p)}</td>
+    <td class="col-best">${bestCell(p)}</td>
+    <td class="col-valid">${validHtml}</td>
+    <td class="col-goal">${goalWhen(p)}</td>
+    <td class="col-actions" onclick="event.stopPropagation()">
+      <button class="btn btn-sm btn-primary" title="Open project" onclick="switchProject('${p.id}')">Open</button>
+      <button class="btn btn-sm" title="Edit spec" onclick="editProjectSpec('${p.id}')">Edit</button>
+      <button class="btn btn-sm" title="Choose what to include, then export as a .kaisen.zip" onclick="exportProject('${p.id}')">Export</button>
+      ${busy ? `<button class="btn btn-sm btn-danger-soft" title="Stop engine" onclick="stopEngine('${p.id}')">Stop</button>` : ''}
+      ${inSet ? `<button class="btn btn-sm btn-danger-soft" title="Remove from this set" onclick="removeSetMember('${p.id}')">Remove</button>` : ''}
+      <button class="btn btn-sm btn-danger-soft" title="Delete project" data-id="${p.id}" data-name="${escapeHtml(p.name)}" onclick="openDeleteProjectModal(this)">Delete</button>
+    </td>`;
+  return tr;
+}
+// ------------------------------------------------------------------ //
+// SETS — named project workspaces (docs/SETS.md §6)
+// ------------------------------------------------------------------ //
+function setMemberProjects() {
+  if (!activeSetId) return [];
+  return projectsData.filter(p => !p.temp && (p.tags || []).includes(activeSetId));
+}
+
+function activeSetRow() {
+  return setsData.find(s => s.id === activeSetId) || null;
+}
+
+// The server-side workspace rule: target null ⇒ only untagged (orphan)
+// projects may run; otherwise only the set's tagged members.
+function projectInTarget(pid, targetId) {
+  const p = projectsData.find(x => x.id === pid);
+  if (!p) return false;               // unknown engine → treat as outside
+  const tags = p.tags || [];
+  return targetId === null ? (!p.temp && tags.length === 0) : tags.includes(targetId);
+}
+
+function engineBusy(p) {
+  const e = projectsEngines[p.id];
+  return !!(e && (e.engine_state === 'running' || e.engine_state === 'paused' || e.paused === true));
+}
+
+// Engines that would be stopped if the workspace moved to targetId.
+function enginesOutsideWorkspace(targetId) {
+  const out = [];
+  for (const [pid, eng] of Object.entries(projectsEngines)) {
+    if (!eng || projectInTarget(pid, targetId)) continue;
+    if (eng.engine_state === 'running' || eng.engine_state === 'paused' || eng.paused === true) out.push({ pid, eng });
+  }
+  return out;
+}
+
+function renderWorkspaceView() {
+  const def = document.getElementById('default-workspace');
+  const sw = document.getElementById('set-workspace');
+  if (def) def.style.display = activeSetId ? 'none' : '';
+  if (sw) sw.style.display = activeSetId ? '' : 'none';
+}
+
+function renderSetsBar() {
+  const host = document.getElementById('sets-chips');
+  if (!host) return;
+  host.innerHTML = '';
+  host.appendChild(setChipEl(null, 'Default'));
+  setsData.forEach(s => host.appendChild(setChipEl(s.id, s.name)));
+}
+
+function setChipEl(id, name) {
+  const el = document.createElement('button');
+  el.className = 'set-chip' + (activeSetId === id ? ' active' : '');
+  const members = id === null
+    ? projectsData.filter(p => !p.temp && !(p.tags || []).length).length
+    : Number((setsData.find(s => s.id === id) || {}).members || 0);
+  el.textContent = name;
+  el.title = `${name} — ${members} project${members === 1 ? '' : 's'}`;
+  el.onclick = () => enterWorkspace(id);
+  return el;
+}
+
+// Enter a workspace (null = default).  First confirm any running engines the
+// switch would stop — only then call the API.
+function enterWorkspace(targetId) {
+  if (targetId === activeSetId) return;
+  const outside = enginesOutsideWorkspace(targetId);
+  const go = () => doEnterWorkspace(targetId);
+  if (!outside.length) { go(); return; }
+  const lines = outside.map(({ pid, eng }) => {
+    const p = projectsData.find(x => x.id === pid);
+    const st = (eng.engine_state === 'paused' || eng.paused === true) ? 'paused' : 'running';
+    const gen = eng.generation != null ? ` gen ${eng.generation}` : '';
+    return `• ${p ? p.name : pid} — ${st}${gen}`;
+  }).join('\n');
+  const cur = activeSetRow();
+  const targetName = setsData.find(s => s.id === targetId)?.name || targetId;
+  const head = targetId === null
+    ? `Exiting "${cur ? cur.name : 'set'}"? The set will stop.`
+    : (cur
+        ? `Switching from "${cur.name}" to "${targetName}"?`
+        : `Entering "${targetName}"?`);
+  systemConfirm(`${head}\nThese engines will be stopped (in-flight generations lost):\n${lines}`, go);
+}
+
+async function doEnterWorkspace(targetId) {
+  try {
+    const r = await api('/api/sets/active', { method: 'POST', body: JSON.stringify({ id: targetId }) });
+    activeSetId = (r.active === undefined) ? targetId : r.active;
+    if (r.stopped && r.stopped.length) toast(`Stopped ${r.stopped.length} engine${r.stopped.length === 1 ? '' : 's'}.`);
+    await Promise.all([loadSets(), loadProjects()]);
+  } catch (e) {
+    systemAlert('Workspace switch failed: ' + e.message);
+    loadSets();   // resync chips/state (e.g. the set was deleted out-of-band)
+  }
+}
+
+async function loadSets() {
+  try {
+    const r = await api('/api/sets');
+    setsData = r.sets || [];
+    // The server persists the active workspace — adopt it (restore after a
+    // reload, and return to default when the active set was deleted).
+    activeSetId = (r.active && setsData.some(s => s.id === r.active)) ? r.active : null;
+    renderSetsBar();
+    renderWorkspaceView();
+    if (activeSetId) { renderProjects(); renderSetCard(); }
+  } catch (e) { console.error('loadSets', e); }
+}
+
+function renderSetMembers() {
+  const tbody = document.getElementById('set-members-tbody');
+  const empty = document.getElementById('set-members-empty');
+  const count = document.getElementById('set-members-count');
+  if (!tbody) return;
+  const list = sortProjects(setMemberProjects());
+  if (count) count.textContent = `${list.length} project${list.length === 1 ? '' : 's'}`;
+  tbody.innerHTML = '';
+  empty.style.display = list.length ? 'none' : '';
+  list.forEach(p => tbody.appendChild(projectRow(p, true)));
+}
+
+function renderSetCard() {
+  const s = activeSetRow();
+  const disp = document.getElementById('set-name-display');
+  const btn = document.getElementById('set-rename-btn');
+  const input = document.getElementById('set-name-input');
+  const desc = document.getElementById('set-description');
+  const counts = document.getElementById('set-counts');
+  if (!s || !activeSetId) return;
+  if (disp && input.style.display === 'none') disp.textContent = s.name;
+  if (btn) btn.style.display = input.style.display === 'none' ? '' : 'none';
+  if (desc && document.activeElement !== desc) desc.value = s.description || '';
+  const members = setMemberProjects();
+  const running = members.filter(engineBusy).length;
+  if (counts) counts.textContent = `${members.length} project${members.length === 1 ? '' : 's'} · ${running} running`;
+}
+
+// ---- inline rename (save on Enter/blur, cancel on Escape) ---------------
+let setRenameCancelled = false;
+function toggleSetRename() {
+  const s = activeSetRow();
+  const input = document.getElementById('set-name-input');
+  const btn = document.getElementById('set-rename-btn');
+  const disp = document.getElementById('set-name-display');
+  if (!s || !input || !btn || !disp) return;
+  if (input.style.display === 'none') {
+    setRenameCancelled = false;
+    input.value = s.name;
+    input.style.display = '';
+    btn.style.display = 'none';
+    disp.style.display = 'none';
+    input.focus();
+    input.select();
+  } else {
+    commitSetRename();
+  }
+}
+function setRenameKeydown(e) {
+  const input = document.getElementById('set-name-input');
+  if (e.key === 'Enter') { e.preventDefault(); input.blur(); }        // blur commits
+  else if (e.key === 'Escape') { setRenameCancelled = true; input.blur(); }
+}
+function commitSetRename() {
+  const input = document.getElementById('set-name-input');
+  if (!input || input.style.display === 'none' || !activeSetId) return;
+  const sid = activeSetId;
+  const s = setsData.find(x => x.id === sid);
+  const name = input.value.trim();
+  input.style.display = 'none';
+  renderSetCard();                     // restore display state from saved data
+  if (setRenameCancelled || !s) return;
+  if (!name || name === s.name) return;
+  api(`/api/sets/${sid}`, { method: 'PATCH', body: JSON.stringify({ name }) })
+    .then(() => loadSets())
+    .catch(e => systemAlert('Rename failed: ' + e.message));
+}
+
+// ---- description (save on blur) ------------------------------------------
+function saveSetDescription() {
+  const s = activeSetRow();
+  const desc = document.getElementById('set-description');
+  if (!s || !desc || !activeSetId) return;
+  const sid = activeSetId;
+  const val = desc.value.trim();
+  if (val === (s.description || '').trim()) return;
+  api(`/api/sets/${sid}`, { method: 'PATCH', body: JSON.stringify({ description: val }) })
+    .then(() => loadSets())
+    .catch(e => systemAlert('Save failed: ' + e.message));
+}
+
+// ---- set start / stop / exit / delete -------------------------------------
+async function startSet() {
+  if (!activeSetId) return;
+  const sid = activeSetId;
+  try {
+    const r = await api(`/api/sets/${sid}/start`, { method: 'POST' });
+    const n = (r.started || []).length, k = (r.skipped_goal_met || []).length;
+    toast(n ? `Started ${n} engine${n === 1 ? '' : 's'}${k ? `, skipped ${k} goal-met` : ''}.`
+            : k ? `Nothing to start — all ${k} member${k === 1 ? '' : 's'} already met their goal.`
+               : 'No projects in this set to start.');
+  } catch (e) { systemAlert('Start set failed: ' + e.message); }
+  loadProjects(); loadSets();
+}
+
+function stopSet() {
+  if (!activeSetId) return;
+  const s = activeSetRow();
+  const running = setMemberProjects().filter(engineBusy);
+  if (!running.length) { toast('No running engines in this set.'); return; }
+  systemConfirm(`Stop "${s.name}"? Its ${running.length} running engine${running.length === 1 ? '' : 's'} will be killed (in-flight generations lost).`, () => doStopSet(s.id));
+}
+
+async function doStopSet(sid) {
+  try {
+    const r = await api(`/api/sets/${sid}/stop`, { method: 'POST' });
+    toast(r.stopped && r.stopped.length ? `Stopped ${r.stopped.length} engine${r.stopped.length === 1 ? '' : 's'}.` : 'No engines to stop.');
+  } catch (e) { systemAlert('Stop set failed: ' + e.message); }
+  loadProjects(); loadSets();
+}
+
+function exitSet() { enterWorkspace(null); }
+
+function deleteSet() {
+  const s = activeSetRow();
+  if (!s) return;
+  const sid = s.id;
+  const n = setMemberProjects().length;
+  systemConfirm(`Delete set "${s.name}"? Projects are NOT deleted — the tag is stripped from its ${n} member${n === 1 ? '' : 's'}.`, async () => {
+    try {
+      await api(`/api/sets/${sid}`, { method: 'DELETE' });
+      toast('Set deleted.');
+    } catch (e) {
+      toast('Delete set failed: ' + e.message);   // 409 "set is running — stop it first"
+    }
+    loadSets(); loadProjects();
   });
+}
+
+// ---- members ---------------------------------------------------------------
+function removeSetMember(pid) {
+  const s = activeSetRow();
+  if (!s || !activeSetId) return;
+  const sid = activeSetId;
+  const p = projectsData.find(x => x.id === pid);
+  const busy = engineBusy(p);
+  const msg = `Remove "${p ? p.name : pid}" from "${s.name}"?` + (busy ? ' Its engine is running and will be stopped.' : '');
+  if (!busy) { doRemoveMember(sid, pid); return; }
+  systemConfirm(msg, () => doRemoveMember(sid, pid));
+}
+
+async function doRemoveMember(sid, pid) {
+  try {
+    await api(`/api/sets/${sid}/members/${pid}`, { method: 'DELETE' });
+  } catch (e) { systemAlert('Remove failed: ' + e.message); return; }
+  loadProjects(); loadSets();
+}
+
+// ---- export / import (.kaisen.zip bundles) ---------------------------------
+// One portable file for a project OR a set; the server detects the kind on
+// import and NEVER overwrites (colliding ids are renamed -2, -3, …).
+function downloadBundle(url) {
+  const a = document.createElement('a');
+  a.href = url; a.download = '';
+  document.body.appendChild(a); a.click(); a.remove();
+}
+
+// The row / set-page Export buttons open the options modal (default = full
+// export: best data + baseline incl. its measured score when it exists).
+// Server options: include_best=1|0, include_baseline=1|0,
+// baseline_measured=auto|yes|no (see DashboardServer._parse_export_options).
+let exportTarget = null;
+
+function openExportModal(kind, id) {
+  const list = kind === 'set' ? setsData : projectsData;
+  const t = list.find(x => x.id === id);
+  if (!t && kind !== 'set') return;
+  exportTarget = { kind: kind, id: id };
+  document.getElementById('ex-target-name').textContent = (t ? t.name : id);
+  document.getElementById('ex-target-desc').textContent = kind === 'set'
+    ? 'Pack this set with ALL of its projects into one portable .kaisen.zip. Runtime runs/ never travels; choose what else is included — the same options apply to every member.'
+    : 'Pack the pipeline definition, harness and prompts into a portable .kaisen.zip. Runtime runs/ never travels; choose what else is included.';
+  document.getElementById('ex-best').checked = true;                 // defaults: full export
+  document.getElementById('ex-baseline').checked = true;
+  document.getElementById('ex-baseline-measured').checked = true;
+  exBaselineToggled(document.getElementById('ex-baseline'));
+  document.getElementById('export-modal').style.display = 'flex';
+}
+
+function exportProject(pid) { openExportModal('project', pid); }
+
+function exportSet() { if (activeSetId) openExportModal('set', activeSetId); }
+
+function exBaselineToggled(inc) {
+  document.getElementById('ex-baseline-measured').disabled = !inc.checked;
+}
+
+function confirmExport() {
+  const t = exportTarget;
+  if (!t) return;
+  const best = document.getElementById('ex-best').checked ? '1' : '0';
+  const inc = document.getElementById('ex-baseline').checked ? '1' : '0';
+  // UI maps "measured score" to auto (travel when it exists); 'yes' is a
+  // strict API-only mode — the modal never promises a measurement that may be absent.
+  const meas = (inc === '1' && document.getElementById('ex-baseline-measured').checked) ? 'auto' : 'no';
+  const base = t.kind === 'set'
+    ? '/api/sets/' + encodeURIComponent(t.id) + '/export'
+    : '/api/projects/' + encodeURIComponent(t.id) + '/export';
+  closeModal('export-modal');
+  downloadBundle(base + '?include_best=' + best + '&include_baseline=' + inc + '&baseline_measured=' + meas);
+}
+
+function pickImportFile() {
+  document.getElementById('import-file').click();
+}
+
+async function importBundleFile(input) {
+  const f = input.files && input.files[0];
+  input.value = '';                       // re-picking the same file must fire again
+  if (!f) return;
+  try {
+    const res = await fetch('/api/import', {
+      method: 'POST', headers: { 'Content-Type': 'application/zip' }, body: f });
+    const data = await res.json().catch(() => null);
+    if (!res.ok || !data || !data.ok) throw new Error((data && data.error) || ('HTTP ' + res.status));
+    const mapping = data.projects || {};
+    const n = Object.keys(mapping).length;
+    let msg = data.set
+      ? `Imported set "${data.name}" — ${n} project${n === 1 ? '' : 's'}`
+      : `Imported project ${Object.values(mapping)[0]}`;
+    const renamed = Object.entries(mapping).filter(([o, nw]) => o !== nw).map(([o, nw]) => `${o} → ${nw}`);
+    if (renamed.length) msg += ` (renamed: ${renamed.join(', ')})`;
+    toast(msg);
+    await Promise.all([loadSets(), loadProjects()]);
+  } catch (e) { systemAlert('Import failed: ' + e.message); }
+}
+
+// ---- add-existing-project modal --------------------------------------------
+function openAddMembersModal() {
+  if (!activeSetId) return;
+  document.getElementById('add-members-modal').style.display = 'flex';
+  document.getElementById('am-search').value = '';
+  renderAddMembersList();
+}
+
+function setNameOf(tag) {
+  const s = setsData.find(x => x.id === tag);
+  return s ? s.name : tag;
+}
+
+function renderAddMembersList() {
+  const host = document.getElementById('am-list');
+  if (!host) return;
+  const q = (document.getElementById('am-search').value || '').trim().toLowerCase();
+  const sid = activeSetId;
+  const list = projectsData
+    .filter(p => !p.temp)      // temp projects are never taggable
+    .filter(p => !q || (p.name + ' ' + p.id).toLowerCase().includes(q));
+  host.innerHTML = '';
+  if (!list.length) { host.innerHTML = '<div class="lang-item muted">No projects match.</div>'; return; }
+  list.forEach(p => {
+    const inSet = (p.tags || []).includes(sid);
+    const row = document.createElement('label');
+    row.className = 'member-pick' + (inSet ? ' disabled' : '');
+    const tags = (p.tags || []).map(t => `<span class="chip tag-chip" title="${escapeHtml(setNameOf(t))}">${escapeHtml(t)}</span>`).join('');
+    row.innerHTML = `
+      <input type="checkbox" value="${p.id}" ${inSet ? 'checked disabled' : ''}>
+      <span class="mp-name">${escapeHtml(p.name)}</span>
+      <span class="mp-id">${escapeHtml(p.id)}</span>
+      <span class="mp-tags">${tags}</span>`;
+    host.appendChild(row);
+  });
+}
+
+async function addSetMembers() {
+  if (!activeSetId) return;
+  const sid = activeSetId;
+  const boxes = [...document.querySelectorAll('#am-list input[type=checkbox]:checked:not(:disabled)')];
+  if (!boxes.length) { toast('Select at least one project.'); return; }
+  try {
+    const r = await api(`/api/sets/${sid}/members`, { method: 'POST', body: JSON.stringify({ project_ids: boxes.map(b => b.value) }) });
+    closeModal('add-members-modal');
+    toast(`Added ${r.added.length} project${r.added.length === 1 ? '' : 's'}.`);
+  } catch (e) {
+    // 400 when some ids are unknown — the server still tagged the known ones.
+    closeModal('add-members-modal');
+    toast('Add failed: ' + e.message);
+  }
+  loadProjects(); loadSets();
+}
+
+// ---- new-set modal ------------------------------------------------------------
+function openNewSetModal() {
+  document.getElementById('new-set-modal').style.display = 'flex';
+  const name = document.getElementById('ns-name');
+  name.value = '';
+  document.getElementById('ns-description').value = '';
+  name.focus();
+}
+
+async function createSet() {
+  const name = document.getElementById('ns-name').value.trim();
+  const description = document.getElementById('ns-description').value.trim();
+  if (!name) { toast('Set name is required.'); return; }
+  let sid;
+  try {
+    const r = await api('/api/sets', { method: 'POST', body: JSON.stringify({ name, description }) });
+    sid = r.set.id;
+    closeModal('new-set-modal');
+    toast(`Set "${name}" created.`);
+  } catch (e) { systemAlert('Create set failed: ' + e.message); return; }
+  doEnterWorkspace(sid);      // normal enter flow — confirms if engines would stop
 }
 
 // ---- language filter (combobox with its own search) --------------------
@@ -1777,7 +2396,12 @@ async function switchProject(id) {
     } else systemAlert('Switch failed: ' + r.error);
   } catch (e) { systemAlert('Switch failed: ' + e.message); }
 }
-async function stopEngine(id) {
+// Every stop confirms — generations can be slow and costly (docs/SETS.md §6).
+function stopEngine(id) {
+  const p = projectsData.find(x => x.id === id);
+  systemConfirm(`Stop the engine of "${p ? p.name : id}"? This kills in-flight generations.`, () => doStopEngine(id));
+}
+async function doStopEngine(id) {
   try {
     await api('/api/engine/stop', { method: 'POST', body: JSON.stringify({ project_id: id }) });
     toast('Engine stopped');
@@ -3780,6 +4404,7 @@ setInterval(updateStatusPill, 1000);
 setInterval(loadActive, 3000);
 
 loadProjects();
+loadSets();      // restore the persisted workspace (docs/SETS.md)
 loadActive();
 startIterationPolling();
 updateStatusPill();

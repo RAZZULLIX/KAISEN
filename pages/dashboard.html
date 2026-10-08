@@ -164,46 +164,99 @@
 
       <div id="view-projects" style="display: none;">
         <div class="projects-panel">
-          <div class="view-toolbar">
-            <span class="view-title">Projects</span>
-            <input type="search" id="projects-search" class="view-search" placeholder="Search projects…" oninput="renderProjects()">
-            <div class="lang-filter" id="lang-filter">
-              <button class="btn lang-filter-btn" id="lang-filter-btn" onclick="toggleLangFilter(event)" aria-haspopup="listbox" aria-expanded="false">
-                <span id="lang-filter-label">All languages</span>
-                <span class="lang-filter-caret">▾</span>
-              </button>
-              <div class="lang-filter-pop" id="lang-filter-pop" style="display:none;">
-                <input type="search" id="lang-filter-search" class="lang-filter-search" placeholder="Type a language…" oninput="filterLangList(this.value)">
-                <div class="lang-filter-list" id="lang-filter-list"></div>
+          <div class="sets-bar">
+            <span class="toolbar-label">Workspace</span>
+            <div class="sets-chips" id="sets-chips"></div>
+            <button class="btn btn-sm" onclick="openNewSetModal()">+ New set</button>
+            <button class="btn btn-sm" onclick="pickImportFile()" title="Import a .kaisen.zip — a project or a whole set; the kind is detected automatically">⬆ Import</button>
+            <input type="file" id="import-file" accept=".zip,application/zip" style="display: none;" onchange="importBundleFile(this)">
+          </div>
+          <div id="default-workspace">
+            <div class="view-toolbar">
+              <span class="view-title">Projects</span>
+              <input type="search" id="projects-search" class="view-search" placeholder="Search projects…" oninput="renderProjects()">
+              <div class="lang-filter" id="lang-filter">
+                <button class="btn lang-filter-btn" id="lang-filter-btn" onclick="toggleLangFilter(event)" aria-haspopup="listbox" aria-expanded="false">
+                  <span id="lang-filter-label">All languages</span>
+                  <span class="lang-filter-caret">▾</span>
+                </button>
+                <div class="lang-filter-pop" id="lang-filter-pop" style="display:none;">
+                  <input type="search" id="lang-filter-search" class="lang-filter-search" placeholder="Type a language…" oninput="filterLangList(this.value)">
+                  <div class="lang-filter-list" id="lang-filter-list"></div>
+                </div>
+              </div>
+              <button class="btn" id="goal-filter-btn" onclick="toggleGoalFilter()" title="Show only the projects that reached their goal">🎯 GOAL <span id="goal-filter-count">0</span></button>
+              <select id="projects-sort" class="btn" onchange="renderProjects()" title="Sort projects">
+                <option value="engine">Sort: engine state</option>
+                <option value="goal_desc">Sort: goal date (newest)</option>
+                <option value="goal_asc">Sort: goal date (oldest)</option>
+                <option value="name">Sort: name</option>
+              </select>
+              <span class="projects-count" id="projects-count"></span>
+              <button class="btn btn-primary" onclick="openNewProjectModal()">+ New Project</button>
+            </div>
+            <div class="projects-table-wrap">
+              <table class="projects-table">
+                <thead>
+                  <tr>
+                    <th class="col-state" title="Start / pause / stop the engine — no need to open the project"></th>
+                    <th>Project</th>
+                    <th class="col-lang">Language</th>
+                    <th class="col-engine">Engine</th>
+                    <th class="col-best">Best</th>
+                    <th class="col-valid">Valid</th>
+                    <th class="col-goal">Goal</th>
+                    <th class="col-actions">Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="projects-tbody"></tbody>
+              </table>
+              <div id="projects-empty" class="empty-state" style="display:none;">No projects match.</div>
+            </div>
+          </div>
+          <div id="set-workspace" style="display: none;">
+            <div class="set-card">
+              <div class="set-name-row">
+                <span class="set-name-display" id="set-name-display">—</span>
+                <input type="text" id="set-name-input" class="inline-rename" style="display: none;" maxlength="80" onkeydown="setRenameKeydown(event)" onblur="commitSetRename()">
+                <button class="btn btn-sm" id="set-rename-btn" onclick="toggleSetRename()" title="Rename this set">✎ Rename</button>
+              </div>
+              <textarea id="set-description" placeholder="What is this set for? (saved on blur)" onblur="saveSetDescription()"></textarea>
+              <div class="set-meta-row">
+                <span class="set-counts" id="set-counts"></span>
+                <div class="set-actions">
+                  <button class="btn btn-primary btn-sm" onclick="startSet()" title="Start every member engine (goal-met projects stay stopped)">▶ Start set</button>
+                  <button class="btn btn-danger-soft btn-sm" onclick="stopSet()" title="Stop every member engine">■ Stop set</button>
+                  <button class="btn btn-sm" onclick="exitSet()" title="Leave this workspace and return to the default list">← Exit set</button>
+                  <button class="btn btn-sm" onclick="exportSet()" title="Download this set with all its projects as a .kaisen.zip">⬇ Export set</button>
+                  <button class="btn btn-danger-soft btn-sm" onclick="deleteSet()" title="Delete this set — projects are NOT deleted">🗑 Delete set</button>
+                </div>
               </div>
             </div>
-            <button class="btn" id="goal-filter-btn" onclick="toggleGoalFilter()" title="Show only the projects that reached their goal">🎯 GOAL <span id="goal-filter-count">0</span></button>
-            <select id="projects-sort" class="btn" onchange="renderProjects()" title="Sort projects">
-              <option value="engine">Sort: engine state</option>
-              <option value="goal_desc">Sort: goal date (newest)</option>
-              <option value="goal_asc">Sort: goal date (oldest)</option>
-              <option value="name">Sort: name</option>
-            </select>
-            <span class="projects-count" id="projects-count"></span>
-            <button class="btn btn-primary" onclick="openNewProjectModal()">+ New Project</button>
-          </div>
-          <div class="projects-table-wrap">
-            <table class="projects-table">
-              <thead>
-                <tr>
-                  <th class="col-state" title="Engine state"></th>
-                  <th>Project</th>
-                  <th class="col-lang">Language</th>
-                  <th class="col-engine">Engine</th>
-                  <th class="col-best">Best</th>
-                  <th class="col-valid">Valid</th>
-                  <th class="col-goal">Goal</th>
-                  <th class="col-actions">Actions</th>
-                </tr>
-              </thead>
-              <tbody id="projects-tbody"></tbody>
-            </table>
-            <div id="projects-empty" class="empty-state" style="display:none;">No projects match.</div>
+            <div class="view-toolbar">
+              <span class="view-title">Members</span>
+              <span class="projects-count" id="set-members-count"></span>
+              <button class="btn btn-sm" onclick="openAddMembersModal()">+ Add existing project</button>
+              <button class="btn btn-primary btn-sm" onclick="openNewProjectModal()" title="Projects created here join this set automatically">+ New project in set</button>
+            </div>
+            <div class="projects-table-wrap">
+              <table class="projects-table">
+                <thead>
+                  <tr>
+                    <th class="col-state" title="Start / pause / stop the engine — no need to open the project"></th>
+                    <th>Project</th>
+                    <th class="col-lang">Language</th>
+                    <th class="col-engine">Engine</th>
+                    <th class="col-best">Best</th>
+                    <th class="col-valid">Valid</th>
+                    <th class="col-goal">Goal</th>
+                    <th class="col-actions col-wide-actions">Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="set-members-tbody"></tbody>
+              </table>
+              <div id="set-members-empty" class="empty-state" style="display:none;">No projects in this set yet — add one or create it.</div>
+            </div>
           </div>
         </div>
       </div>
@@ -532,6 +585,56 @@
       </div>
     </div>
   </div>
+  <!-- new set (docs/SETS.md) -->
+  <div id="new-set-modal" class="modal-overlay" role="dialog" aria-modal="true" style="display: none;">
+    <div class="modal-content">
+      <h3>New Set</h3>
+      <p class="modal-desc">A named bundle of projects. Its members run together as one workspace; the id is derived from the name automatically.</p>
+      <input type="text" id="ns-name" class="modal-input" placeholder="Set name (e.g. LLM Decode Speedups)" maxlength="80">
+      <textarea id="ns-description" placeholder="What is this set for? (optional)"></textarea>
+      <div class="modal-actions">
+        <button class="btn" onclick="closeModal('new-set-modal')">Cancel</button>
+        <button class="btn btn-primary" onclick="createSet()">Create &amp; enter</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- add existing projects to a set (docs/SETS.md) -->
+  <div id="add-members-modal" class="modal-overlay" role="dialog" aria-modal="true" style="display: none;">
+    <div class="modal-content">
+      <h3>Add existing projects</h3>
+      <p class="modal-desc">Tag the selected projects with this set — projects can belong to several sets. Already-members are disabled.</p>
+      <input type="search" id="am-search" class="view-search" placeholder="Search projects…" oninput="renderAddMembersList()">
+      <div id="am-list"></div>
+      <div class="modal-actions">
+        <button class="btn" onclick="closeModal('add-members-modal')">Cancel</button>
+        <button class="btn btn-primary" onclick="addSetMembers()">Add to set</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- export options for a project or set (.kaisen.zip bundles) -->
+  <div id="export-modal" class="modal-overlay" role="dialog" aria-modal="true" style="display: none;">
+    <div class="modal-content">
+      <h3>Export — <span id="ex-target-name"></span></h3>
+      <p class="modal-desc" id="ex-target-desc">Pack the pipeline definition, harness and prompts into a portable .kaisen.zip. Runtime runs/ never travels; choose what else is included.</p>
+      <div style="display:flex;flex-direction:column;gap:8px;margin-top:10px;">
+        <label class="member-pick"><input type="checkbox" id="ex-best" checked>
+          <span class="mp-name">Include current best</span>
+          <span style="font-size:12px;color:var(--muted);margin-left:auto;">champion program from best/ with its score, metrics and generation</span></label>
+        <label class="member-pick"><input type="checkbox" id="ex-baseline" checked onchange="exBaselineToggled(this)">
+          <span class="mp-name">Include baseline</span>
+          <span style="font-size:12px;color:var(--muted);margin-left:auto;">the starting program (data.baseline_source)</span></label>
+        <label class="member-pick" style="margin-left:18px;"><input type="checkbox" id="ex-baseline-measured" checked>
+          <span class="mp-name">its measured score</span>
+          <span style="font-size:12px;color:var(--muted);margin-left:auto;">when the engine has scored the baseline — otherwise the bundle carries the definition only</span></label>
+      </div>
+      <div class="modal-actions">
+        <button class="btn" onclick="closeModal('export-modal')">Cancel</button>
+        <button class="btn btn-primary" onclick="confirmExport()">Export .kaisen.zip</button>
+      </div>
+    </div>
+  </div>
 
   <div id="create-project-modal" class="modal-overlay" role="dialog" aria-modal="true" style="display: none;">
     <div class="modal-content">
@@ -656,7 +759,7 @@
 
   <div id="system-modal" class="modal-overlay" role="dialog" aria-modal="true" style="display: none;">
     <div class="modal-content">
-      <h3>System Message</h3>
+      <h3>⚠ Warning</h3>
       <p id="system-modal-text" class="modal-desc"></p>
       <div class="modal-actions">
         <button class="btn" id="system-modal-cancel" style="display: none;">Cancel</button>

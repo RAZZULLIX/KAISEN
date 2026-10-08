@@ -99,6 +99,38 @@ Four views:
   generation (from the GUI or `CANDIDATE` in KAI).
 - **Agent** — start a multi-turn AI agent over the project (see §13).
 
+**SETS — project workspaces.**  A set is a named, loadable bundle of
+projects for one research goal (e.g. "speed up 25 LLM-decoding
+features").  Projects carry set TAGS (`tags: [...]` in the spec) and can
+belong to several sets at once; untagged projects live in the default
+view.  Entering a set scopes the dashboard to its projects and STOPS
+everything outside it; **Start** launches the whole set's fleet at once,
+**Exit** stops it again.  New projects created while a set is active
+join it automatically.  Every step that could kill in-flight
+generations asks for confirmation first.  Deleting a set only strips
+its tag — projects are never deleted by it.  Definitions live in
+`sets.json` (gitignored); the active workspace survives restarts and
+the engine pool restores only inside it.  Design: `docs/SETS.md`.
+
+**EXPORT / IMPORT — `.kaisen.zip` bundles.**  One portable file for a
+project OR a whole set.  By default the export is FULL: definition +
+harness + prompts + baseline, plus the CURRENT BEST (everything `best/`
+holds and its score/metrics/provenance) and the MEASURED baseline when the
+engine has scored it.  `runs/` and `state.json` are machine-local and never
+travel.  GUI: **Export** on every project row and **⬇ Export set** on the
+set page open a small options modal first — uncheck "Include current best"
+to ship project + baseline only, or "Include baseline" for the bare
+pipeline definition; its measured score travels with it when available.
+curl: `GET /api/projects/<id>/export` and `GET /api/sets/<sid>/export`
+download the zip; `curl -T bundle.kaisen.zip http://host:port/api/import`
+imports it (POST works too).  KAI: `EXPORT <id>` / `EXPORT SET <sid>
+[to <path>]` and `IMPORT <path>`.  An import NEVER overwrites: colliding
+ids are renamed `-2`, `-3`, … and every old → new mapping is reported;
+a bundle with a guardrail-blocked pipeline is rejected whole, nothing
+half-imported.  A set bundle carries its membership: imported members are
+tagged with the (possibly renamed) set id; a plain project import lands
+as an orphan in the default workspace.
+
 ### Notes
 - Free-form notes with colors, archive, reorder, comments, and
   similarity checks (the LLM warns when you write something very
@@ -197,6 +229,7 @@ projects/<id>/
 | `id` | `[a-z0-9_-]+`, unique |
 | `name` | display name |
 | `description` | free text |
+| `tags` | set membership: `[set-id, ...]` — the project belongs to every set it is tagged with; `[]` = default view (§4, `docs/SETS.md`). Managed by the sets API, never by spec saves |
 | `language` | any of the 23 languages (§19) |
 | `artifact_name` | output file name of the build step |
 | `steps.build` | one build command: `program`, `args`, `timeout`, `memory_limit_mb` |

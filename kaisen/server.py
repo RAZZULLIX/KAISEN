@@ -26,7 +26,11 @@ from .config import TEMP_ROOT, FrameworkConfig, PROJECTS_DIR, get_config, save_s
 from . import telegram
 from .budget import Budget
 from .engine import STATE_PAUSED, STATE_STOPPED, STATE_STOPPING, ProjectEngine
+from .bundle import (BundleError, build_project_bundle, build_set_bundle,
+                     read_bundle)
 from .projects import ProjectRegistry
+from .sets import (SetRegistry, project_tags, set_members, add_tag,
+                   remove_tag, strip_tag)
 from .state import ProjectState
 from .workers import get_worker_pool
 from .guardrails import check_command, guardrail_state
@@ -121,11 +125,18 @@ class DashboardServer:
         # Crash-recovery file lives NEXT TO config.json (repo root in
         # production, temp dir in tests).
         self._pool_file = Path(config.path).parent / "engine_pool.json"
+        # SETS: set definitions + the active workspace live NEXT TO
+        # config.json (repo root in production, temp dir in tests) — same
+        # convention as engine_pool.json.  Must exist before the engine
+        # pool restores, which filters by workspace.
+        self.sets = SetRegistry(Path(config.path).parent / "sets.json")
         if engine is not None:
             self.set_engine(engine)
         self.host = host
         self.port = port
-        self.app = web.Application()
+        # 512 MiB: /api/import receives whole .kaisen.zip bundles as the raw
+        # body (curl -T); the aiohttp 1 MiB default would reject real exports.
+        self.app = web.Application(client_max_size=512 * 1024 * 1024)
         # Optional server password. Default: no auth (loopback-only bind).
         # "server": {"api_key": "..."} in config.json; env KAISEN_API_KEY
         # wins. When set, EVERY route (pages, /api, /kai) requires it.
@@ -238,6 +249,15 @@ class DashboardServer:
             return self.engines.get(pid)
         return self.engine or self._fallback_engine()
 
+    def _in_active_workspace(self, project) -> bool:
+        """Workspace isolation: inside a set only its members run; in the
+        default workspace only untagged (orphan) projects run."""
+        active = self.sets.active()
+        tags = project_tags(project)
+        if active is None:
+            return not tags
+        return active in tags
+
     def _persist_engine_pool(self) -> None:
         """Snapshot which projects are running — and HOW — to
         engine_pool.json.  Crash recovery: the next daemon boot restores the
@@ -293,6 +313,10 @@ class DashboardServer:
                 if project is None:
                     continue
                 from .engine import EngineEvent, ProjectEngine
+                if not self._in_active_workspace(project):
+                    # The pool comes back INSIDE the active workspace:
+                    # engines of other sets stay stopped until you enter.
+                    continue
                 eng = ProjectEngine(
                     project,
                     # ONE process-wide orchestrator: every engine's acquire
@@ -397,6 +421,21 @@ class DashboardServer:
             out.append(row)
         return out
 
+    @staticmethod
+    def _pool_counts(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Mixed-state counts for the status pill: the pool's truth is the
+        COUNT of engine states, never the selected engine's state — a pool
+        with one running and two stopped engines is RUNNING, not STOPPED.
+        An unknown/missing state counts as stopped (never as running: the
+        pill may only light green on evidence)."""
+        c = {"n": len(rows), "running": 0, "pausing": 0, "paused": 0,
+             "stopping": 0, "stopped": 0, "queued": 0}
+        for r in rows:
+            st = r.get("engine_state") or "stopped"
+            c[st if st in c else "stopped"] += 1
+            c["queued"] += int(r.get("jobs_queued") or 0)
+        return c
+
     def _shared_orchestrator(self):
         """ONE orchestrator for every engine in this process: the acquire
         gate, cap-fill reservation pool and Server objects are SHARED.
@@ -433,6 +472,23 @@ class DashboardServer:
         r.add_post("/api/engine/workers", self._api_engine_workers)
         r.add_post("/api/projects", self._api_projects_create)
         r.add_post("/api/projects/suggest", self._api_projects_suggest)
+        # SETS — named project workspaces (docs/SETS.md)
+        r.add_get("/api/sets", self._api_sets_list)
+        r.add_post("/api/sets", self._api_sets_create)
+        r.add_post("/api/sets/active", self._api_sets_active)
+        r.add_patch("/api/sets/{sid}", self._api_sets_update)
+        r.add_delete("/api/sets/{sid}", self._api_sets_delete)
+        r.add_post("/api/sets/{sid}/start", self._api_sets_start)
+        r.add_post("/api/sets/{sid}/stop", self._api_sets_stop)
+        r.add_post("/api/sets/{sid}/members", self._api_sets_members_add)
+        r.add_delete("/api/sets/{sid}/members/{pid}", self._api_sets_member_remove)
+        # BUNDLES — export/import of projects and sets (.kaisen.zip)
+        r.add_get("/api/projects/{pid}/export", self._api_project_export)
+        r.add_get("/api/sets/{sid}/export", self._api_sets_export)
+        # POST and PUT both take the raw zip bytes: `curl -T file.zip
+        # http://host/api/import` sends PUT, `curl --data-binary @file` POSTs.
+        r.add_post("/api/import", self._api_import)
+        r.add_put("/api/import", self._api_import)
         r.add_post("/kai", self._api_kai)
         r.add_get("/api/projects/{pid}/spec", self._api_project_spec)
         r.add_put("/api/projects/{pid}/spec", self._api_project_spec_update)
@@ -498,6 +554,7 @@ class DashboardServer:
         r.add_get("/api/servers/budget/{sid}", self._api_server_budget_get)
         r.add_post("/api/servers/budget/{sid}", self._api_server_budget_set)
         r.add_post("/api/servers/label", self._api_server_label)
+        r.add_post("/api/servers/update", self._api_server_update)
         r.add_post("/api/onboarding/complete", self._api_onboarding_complete)
         r.add_post("/api/onboarding/demo", self._api_onboarding_demo)
         r.add_get("/api/config", self._api_config_get)
@@ -619,6 +676,12 @@ class DashboardServer:
             p = reg.create(pid, spec)
         except ValueError as e:
             return {"ok": False, "error": str(e)}
+        if not temp:
+            # A project created inside a set's workspace belongs to that
+            # set — GUI, suggest, onboarding demo and KAI all land here.
+            active_set = self.sets.active()
+            if active_set:
+                add_tag(p, active_set)
 
         warnings: List[str] = self._write_spec_files(p, files, spec)
         # The user's data file (original, immutable): written from the
@@ -1092,6 +1155,347 @@ class DashboardServer:
             return _json({"error": "project not found"}, 404)
         return _json({"ok": True, "active_id": p.id})
 
+    # ------------------------------------------------------------------ #
+    # SETS — named project workspaces (docs/SETS.md)
+    # ------------------------------------------------------------------ #
+
+    def _set_rows(self) -> List[Dict[str, Any]]:
+        rows = []
+        for s in self.sets.list():
+            members = set_members(s["id"], self.registry)
+            rows.append({**s, "members": len(members),
+                         "running": sum(1 for pid in members if pid in self.engines)})
+        return rows
+
+    async def _api_sets_list(self, request):
+        return _json({"sets": self._set_rows(), "active": self.sets.active()})
+
+    async def _api_sets_create(self, request):
+        data = await request.json()
+        try:
+            s = self.sets.create(str(data.get("name", "")),
+                                 str(data.get("description", "") or ""))
+        except ValueError as e:
+            return _json({"ok": False, "error": str(e)}, 400)
+        return _json({"ok": True, "set": s})
+
+    async def _api_sets_update(self, request):
+        sid = request.match_info["sid"]
+        data = await request.json()
+        try:
+            s = self.sets.update(sid, name=data.get("name"),
+                                 description=data.get("description"))
+        except KeyError:
+            return _json({"ok": False, "error": "set not found"}, 404)
+        return _json({"ok": True, "set": s})
+
+    async def _api_sets_delete(self, request):
+        sid = request.match_info["sid"]
+        if not self.sets.exists(sid):
+            return _json({"ok": False, "error": "set not found"}, 404)
+        running = [pid for pid in set_members(sid, self.registry) if pid in self.engines]
+        if running:
+            return _json({"ok": False, "error": "set is running — stop it first",
+                          "running": running}, 409)
+        self.sets.delete(sid)
+        stripped = strip_tag(sid, self.registry)
+        return _json({"ok": True, "stripped": stripped})
+
+    def _stop_engines_outside(self, allowed) -> List[str]:
+        """Workspace isolation: stop + drop every pool engine outside the
+        target workspace.  The GUI confirms first — this kills in-flight
+        generations."""
+        stopped = []
+        for pid in list(self.engines):
+            if pid in allowed:
+                continue
+            eng = self.engines.pop(pid)
+            try:
+                eng.stop()
+            except Exception:
+                pass
+            stopped.append(pid)
+        if stopped:
+            if self._selected_project_id in stopped:
+                nxt = self._fallback_engine()
+                self._selected_project_id = nxt.project.id if nxt else None
+            self._persist_engine_pool()
+        return stopped
+
+    async def _api_sets_active(self, request):
+        data = await request.json()
+        sid = data.get("id") or None
+        try:
+            self.sets.set_active(sid)
+        except KeyError:
+            return _json({"ok": False, "error": "set not found"}, 404)
+        if sid:
+            allowed = set(set_members(sid, self.registry))
+        else:
+            # Default workspace: the untagged (orphan) projects.
+            allowed = {row["id"] for row in self.registry.list()
+                       if not (row.get("tags") or [])}
+        stopped = self._stop_engines_outside(allowed)
+        return _json({"ok": True, "active": sid, "stopped": stopped})
+
+    def _start_set(self, sid: str) -> Dict[str, Any]:
+        """Start every member engine.  Goal-met projects are DONE — they
+        stay stopped (same latch semantics as the pool restore).  Runs OFF
+        the event loop: engine boot spawns worker subprocesses."""
+        started, skipped = [], []
+        for pid in set_members(sid, self.registry):
+            if pid in self.engines:
+                continue    # already in the pool (running or paused)
+            try:
+                project, reg = self._registry_for(pid)
+            except KeyError:
+                continue
+            from .engine import EngineEvent, ProjectEngine
+            eng = ProjectEngine(project, self._shared_orchestrator(), reg,
+                                worker_count=project.default_workers,
+                                events=EngineEvent())
+            if eng.state.goal_done():
+                skipped.append(pid)
+                continue
+            eng.start(project.default_parallel_gens, paused=False)
+            self.engines[pid] = eng
+            started.append(pid)
+        if started and self._selected_project_id not in self.engines:
+            self._selected_project_id = started[0]
+        if started:
+            self._persist_engine_pool()
+        return {"ok": True, "started": started, "skipped_goal_met": skipped}
+
+    async def _api_sets_start(self, request):
+        sid = request.match_info["sid"]
+        if not self.sets.exists(sid):
+            return _json({"ok": False, "error": "set not found"}, 404)
+        if self.sets.active() != sid:
+            return _json({"ok": False,
+                          "error": "only the active set can be started — enter it first"}, 400)
+        out = await asyncio.to_thread(self._start_set, sid)
+        return _json(out)
+
+    async def _api_sets_stop(self, request):
+        sid = request.match_info["sid"]
+        if not self.sets.exists(sid):
+            return _json({"ok": False, "error": "set not found"}, 404)
+        stopped = []
+        for pid in set_members(sid, self.registry):
+            eng = self.engines.pop(pid, None)
+            if eng is None:
+                continue
+            try:
+                eng.stop()
+            except Exception:
+                pass
+            stopped.append(pid)
+        if stopped:
+            if self._selected_project_id in stopped:
+                nxt = self._fallback_engine()
+                self._selected_project_id = nxt.project.id if nxt else None
+            self._persist_engine_pool()
+        return _json({"ok": True, "stopped": stopped})
+
+    async def _api_sets_members_add(self, request):
+        sid = request.match_info["sid"]
+        if not self.sets.exists(sid):
+            return _json({"ok": False, "error": "set not found"}, 404)
+        data = await request.json()
+        pids = data.get("project_ids")
+        if not isinstance(pids, list):
+            return _json({"ok": False, "error": "project_ids must be a list"}, 400)
+        added, missing = [], []
+        for pid in [str(x) for x in pids]:
+            # real projects only: temp projects are never taggable
+            p = self.registry.get(pid)
+            if p is None:
+                missing.append(pid)
+                continue
+            add_tag(p, sid)
+            added.append(pid)
+        if missing:
+            return _json({"ok": False, "added": added,
+                          "error": "unknown projects: " + ", ".join(missing)}, 400)
+        return _json({"ok": True, "added": added})
+
+    async def _api_sets_member_remove(self, request):
+        sid = request.match_info["sid"]
+        pid = request.match_info["pid"]
+        if not self.sets.exists(sid):
+            return _json({"ok": False, "error": "set not found"}, 404)
+        p = self.registry.get(pid)
+        if p is None:
+            return _json({"ok": False, "error": "project not found"}, 404)
+        tags = remove_tag(p, sid)
+        # The engine stops only when the project LEAVES the active
+        # workspace — a project still tagged with the active set keeps
+        # running (multi-set membership).
+        active = self.sets.active()
+        still_in = (active in tags) if active else (not tags)
+        stopped = []
+        if not still_in:
+            eng = self.engines.pop(pid, None)
+            if eng is not None:
+                try:
+                    eng.stop()
+                except Exception:
+                    pass
+                stopped.append(pid)
+                if self._selected_project_id == pid:
+                    nxt = self._fallback_engine()
+                    self._selected_project_id = nxt.project.id if nxt else None
+                self._persist_engine_pool()
+        return _json({"ok": True, "removed": pid, "tags": tags, "stopped": stopped})
+
+    # ------------------------------------------------------------------ #
+    # BUNDLES — export/import of projects and sets (.kaisen.zip)
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _zip_response(data: bytes, filename: str):
+        return web.Response(
+            body=data, content_type="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+    @staticmethod
+    def _parse_export_options(request) -> tuple:
+        """Parse the optional export query params (all default to the FULL
+        export, so bare GETs behave exactly as before):
+
+            include_best=1|0           ship best/ + its score/provenance (default 1)
+            include_baseline=1|0       ship the baseline source file and, when
+                                       one exists, its measured score
+                                       (baseline.json) (default 1)
+            baseline_measured=auto|yes|no
+                                       auto: measured baseline travels when it
+                                            exists (default); yes: error when a
+                                            project has none; no: never ship the
+                                            measured score — definition only.
+        """
+        def _flag(name: str) -> bool:
+            raw = request.query.get(name)
+            if raw is None:
+                return True
+            r = raw.strip().lower()
+            if r in ("1", "true", "yes"):
+                return True
+            if r in ("0", "false", "no"):
+                return False
+            raise ValueError(f"{name} must be 1 or 0 (got {raw!r})")
+        bm = request.query.get("baseline_measured")
+        bm = "auto" if bm is None else bm.strip().lower()
+        if bm not in ("auto", "yes", "no"):
+            raise ValueError(f"baseline_measured must be auto|yes|no (got {bm!r})")
+        return _flag("include_best"), _flag("include_baseline"), bm
+
+    async def _api_project_export(self, request):
+        pid = request.match_info["pid"]
+        try:
+            project, _reg = self._registry_for(pid)
+        except KeyError:
+            return _json({"ok": False, "error": "project not found"}, 404)
+        try:
+            opts = self._parse_export_options(request)
+            data = await asyncio.to_thread(build_project_bundle, project, *opts)
+        except (BundleError, ValueError) as e:
+            return _json({"ok": False, "error": str(e)}, 400)
+        return self._zip_response(data, f"{pid}.kaisen.zip")
+
+    async def _api_sets_export(self, request):
+        sid = request.match_info["sid"]
+        s = self.sets.get(sid)
+        if s is None:
+            return _json({"ok": False, "error": "set not found"}, 404)
+        members = [p for p in (self.registry.get(pid)
+                               for pid in set_members(sid, self.registry))
+                   if p is not None]
+        try:
+            opts = self._parse_export_options(request)
+            data = await asyncio.to_thread(build_set_bundle, s, members, *opts)
+        except (BundleError, ValueError) as e:
+            return _json({"ok": False, "error": str(e)}, 400)
+        return self._zip_response(data, f"{sid}.kaisen-set.zip")
+
+    async def _api_import(self, request):
+        data = await request.read()
+        if not data:
+            return _json({"ok": False, "error":
+                          "empty body — send the .kaisen.zip bytes: "
+                          "curl -T bundle.kaisen.zip http://host/api/import"}, 400)
+        try:
+            out = await asyncio.to_thread(self._import_bundle, data)
+        except (BundleError, ValueError) as e:
+            return _json({"ok": False, "error": str(e)}, 400)
+        return _json(out)
+
+    def _import_bundle(self, data: bytes) -> Dict[str, Any]:
+        """Import a bundle atomically: validate everything BEFORE touching
+        the disk, roll back on any mid-way failure.  Ids that collide are
+        renamed (-2, -3, …) — an import NEVER overwrites, and the response
+        reports every old → new mapping."""
+        b = read_bundle(data)
+        for pid, entry in b["projects"].items():
+            spec = dict(entry["spec"])
+            spec["id"] = pid
+            bad = self._scan_spec_commands(spec)
+            if bad:
+                raise BundleError(f"guardrail blocked '{pid}': {bad}")
+        created: List[str] = []
+        try:
+            mapping: Dict[str, str] = {}
+            for pid, entry in sorted(b["projects"].items()):
+                new_id, n = pid, 2
+                while self.registry.get(new_id) or new_id in mapping.values():
+                    new_id = f"{pid}-{n}"
+                    n += 1
+                spec = dict(entry["spec"])
+                spec["id"] = new_id
+                spec["tags"] = []      # membership is re-applied below
+                try:
+                    p = self.registry.create(new_id, spec)
+                except ValueError as e:
+                    raise BundleError(f"project '{pid}': {e}") from e
+                created.append(new_id)
+                mapping[pid] = new_id
+                self._write_bundle_files(p, entry["files"])
+            set_map = None
+            if b["set"]:
+                s = self.sets.create(b["set"].get("name") or b["id"],
+                                     str(b["set"].get("description", "") or ""))
+                set_map = {b["id"]: s["id"]}
+                for new_id in mapping.values():
+                    add_tag(self.registry.require(new_id), s["id"])
+            self.registry.scan()
+            return {"ok": True, "kind": b["kind"], "name": b["name"],
+                    "projects": mapping, "set": set_map}
+        except Exception:
+            for new_id in created:      # all-or-nothing
+                try:
+                    self.registry.delete(new_id)
+                except Exception:
+                    pass
+            self.registry.scan()
+            raise
+
+    @staticmethod
+    def _write_bundle_files(p, files: Dict[str, bytes]) -> None:
+        """Write the bundle's definition files (harness, prompts, baseline,
+        data) under the same path guardrails as spec-file writes."""
+        from .suggest import _safe_rel_path, _scan_script_content
+        for rel, blob in files.items():
+            safe, _why = _safe_rel_path(rel)
+            if not safe:
+                continue    # read_bundle already rejected unsafe paths
+            if rel.endswith(".py"):
+                try:
+                    _scan_script_content(rel, blob.decode("utf-8"))
+                except UnicodeDecodeError:
+                    pass
+            target = p.path / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(blob)
+
     def _scan_spec_commands(self, spec: Dict[str, Any]) -> str:
         """Check every pipeline command in a spec against guardrails,
         resolving relative program paths against the project directory
@@ -1462,12 +1866,46 @@ class DashboardServer:
         return self.engine
 
     async def _api_engine_start(self, request):
-        eng = self._require_engine()
         data = await request.json() if request.can_read_body else {}
+        pid = str(data.get("project_id") or "") if isinstance(data, dict) else ""
         parallel_gens = (int(data.get("parallel_gens", 1))
                          if isinstance(data, dict) else 1)
+        if pid and pid not in self.engines:
+            # Start straight from the project list: boot the engine into the
+            # pool WITHOUT stealing the dashboard's selection — pressing ▶
+            # on a row adds it to the current runs, it does not open it.
+            try:
+                project, reg = self._registry_for(pid)
+            except KeyError:
+                return _json({"ok": False, "error": f"project '{pid}' not found"}, 404)
+            if not self._in_active_workspace(project):
+                return _json({"ok": False,
+                              "error": f"project '{pid}' is not in the active workspace"}, 409)
+            from .engine import EngineEvent, ProjectEngine
+            eng = ProjectEngine(project, self._shared_orchestrator(), reg,
+                                worker_count=project.default_workers,
+                                events=EngineEvent())
+            # A goal-met project is DONE: it joins the pool paused, exactly
+            # like the pool restore and Start-set semantics.
+            finished = eng.state.goal_done()
+            await asyncio.to_thread(eng.start, project.default_parallel_gens,
+                                    paused=finished)
+            self.engines[pid] = eng
+            self._persist_engine_pool()
+            if self._selected_project_id is None:
+                self._selected_project_id = pid
+            return _json({"ok": True, "started": pid, "state": eng.engine_state})
+        eng = self.engines.get(pid) if pid else self._require_engine()
+        if eng is None:
+            return _json({"ok": False, "error": "no engine running"}, 400)
         # eng.start() boots the worker pool + producers — off the event loop
-        # so a heavy boot can't freeze the dashboard.
+        # so a heavy boot can't freeze the dashboard. A restart with no
+        # explicit size KEEPS the engine's current sizing (a row's ▶ after
+        # an engine error must not silently shrink a 4-wide engine to 1).
+        if isinstance(data, dict) and data.get("parallel_gens") is not None:
+            parallel_gens = int(data["parallel_gens"])
+        else:
+            parallel_gens = getattr(eng, "_parallel_gens", 1) or 1
         await asyncio.to_thread(eng.start, parallel_gens)
         err = getattr(eng, "_startup_error", "")
         if err and eng.engine_state == "stopped":
@@ -1578,6 +2016,9 @@ class DashboardServer:
             project, reg = self._registry_for(pid)
         except KeyError:
             return _json({"ok": False, "error": f"project '{pid}' not found"}, 404)
+        if not self._in_active_workspace(project):
+            return _json({"ok": False,
+                          "error": f"project '{pid}' is not in the active workspace"}, 409)
         started = False
         eng = self.engines.get(pid)
         if eng is None:
@@ -1638,6 +2079,10 @@ class DashboardServer:
     async def _api_engine_stop(self, request):
         data = await request.json() if request.can_read_body else {}
         pid = str(data.get("project_id") or "") if isinstance(data, dict) else ""
+        if pid and pid not in self.engines:
+            # Idempotent: stopping a project that is not in the pool is a
+            # no-op, not an error — the row's ⏹ may be pressed any time.
+            return _json({"ok": True, "stopped": None})
         eng = self._engine_for(pid or None)
         if eng is None:
             return _json({"ok": False, "error": "no engine running"}, 400)
@@ -1677,6 +2122,10 @@ class DashboardServer:
         eng = self._require_engine()
         snap = eng.snapshot()
         snap["engines"] = self._engines_summary()
+        # The pill's mixed-state truth: counts of engine states across the
+        # pool, computed here (one place) — never the selected engine's
+        # state standing in for the whole fleet.
+        snap["pool"] = self._pool_counts(snap["engines"])
         return _json(snap)
 
 
@@ -1794,6 +2243,27 @@ class DashboardServer:
             return _json({"ok": True, "server": out})
         except ValueError as e:
             return _json({"ok": False, "error": str(e)}, 400)
+
+    async def _api_server_update(self, request):
+        """Edit one endpoint's row fields in place (GUI ✎ -> ✓).  The id is
+        immutable; a non-empty api_key is saved to the secrets store FIRST
+        so the rebuilt Server resolves it by id, an empty/absent key keeps
+        the stored one."""
+        data = await request.json()
+        sid = str(data.get("id", ""))
+        api_key = str(data.get("api_key", "") or "").strip()
+        patch = {k: v for k, v in data.items() if k not in ("id", "api_key")}
+        if api_key:
+            save_secret("llm", sid, api_key)
+        try:
+            out = self._orch().update_server(sid, patch)
+        except KeyError:
+            return _json({"ok": False, "error": f"server '{sid}' not found"}, 404)
+        except ValueError as e:
+            if api_key:
+                save_secret("llm", sid, "")   # don't keep a key for a failed edit
+            return _json({"ok": False, "error": str(e)}, 400)
+        return _json({"ok": True, "server": out})
 
     # ------------------------------------------------------------------ #
     # config

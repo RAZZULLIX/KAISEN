@@ -7,7 +7,110 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **SETS — named project workspaces.**  A set is a loadable bundle of
+  projects: tag the 25 engine-speedup projects once, and from then on
+  *entering* the set shows only them and stops everything outside it,
+  **Start** launches the whole fleet at once, **Exit** stops it again —
+  no more opening and starting projects one row at a time.  Membership
+  is by TAGS (`project.json` gains `tags: [...]`): a project can belong
+  to several sets, and untagged projects live in the default view,
+  exactly as before.  New projects created while a set is active join it
+  automatically (GUI, suggest, onboarding demo and KAI alike).  Every
+  destructive step — entering a set that kills engines, exiting a
+  running set, stopping a set, deleting a set — asks first: generations
+  are slow and costly and are never killed without a warning.  Set
+  definitions live in `sets.json` (gitignored, next to
+  `engine_pool.json`); the active workspace survives restarts and the
+  engine pool restores only inside it.  Full design: `docs/SETS.md`.
+
+- **EXPORT / IMPORT — `.kaisen.zip` bundles for projects and sets.**  One
+  portable file, one import path: the manifest carries the kind, so the
+  same button/endpoint/command handles a single project and a whole set.
+  `runs/` and `state.json` never travel; what else does is now an export
+  OPTION (defaults below).  GUI: **Export** per project row and **⬇ Export
+  set** on the set page both open a small options modal first; **⬆ Import** in the workspace bar.
+  curl: `GET /api/projects/<id>/export`, `GET /api/sets/<sid>/export`,
+  and `curl -T bundle.kaisen.zip http://host:port/api/import` (POST and
+  PUT both take the raw bytes).  KAI: `EXPORT <id>` / `EXPORT SET <sid>
+  [to <path>]` / `IMPORT <path>`.  Import NEVER overwrites — colliding
+  ids are renamed `-2`, `-3`, … and every old → new mapping is reported;
+  unsafe paths, oversized bundles and guardrail-blocked pipelines are
+  rejected whole with nothing half-imported.  (`/api/import` takes raw
+  zip bodies, so the dashboard app now accepts requests up to 512 MiB —
+  aiohttp's 1 MiB default would reject a real export.)  A bundle now
+  optionally carries the project's CURRENT BEST — everything `best/` holds
+  plus `best/meta.json` (the champion's score/metrics/provenance from its
+  `state.json`) — and its MEASURED baseline as `baseline.json` (the
+  fitness/metrics recorded when the engine scored the baseline source)
+  when one exists.  Export options, all default to the FULL export so bare
+  GETs and KAI/curl behave as before: `GET /api/projects/<id>/export?include_best=1|0`
+  (champion data), `include_baseline=1|0` (baseline source file + measured
+  record; 0 = bare pipeline definition) and `baseline_measured=auto|yes|no`
+  (`yes` rejects the export if any project has no measured baseline).
+  Set exports inherit the same options for every member.  Import tolerates
+  bundles with and without the payloads: old-style `.kaisen.zip` files
+  import unchanged, and best data lands under the renamed id — never
+  overwriting an existing best.
+
+- **Endpoint rows edit in place with a full editor.**  The LLM-servers
+  table's ✎ opens a one-labeled-grid editor under the edited row —
+  every field the row can carry (label, type, url/base_url, model,
+  tier, priority, max_concurrent, timeout, context_window, local),
+  schema-driven from `SERVER_EDIT_FIELDS` so the editor and the
+  validation can never disagree.  ✎ becomes ✓/✕ (apply / cancel);
+  applying with unsaved changes warns, leaving the Settings tab while
+  editing warns, and a type change re-decides locality (llama.cpp is
+  probeable, openai/remote is not) unless the patch sets it
+  explicitly.  Server-side: `POST /api/servers/update` merges the
+  patch into the stored spec and rebuilds the Server in place — same
+  id (it keys secrets, health and budgets), same active membership;
+  a non-empty api_key is saved to the secrets store FIRST so the
+  rebuilt Server resolves it by id, and a failed edit rolls the key
+  back.  The old inline label-rename (✎ → text input) is gone.
+
+### Changed
+
+- **System/confirm modals read as warnings, not decoration.**  The title
+  ("System Message") carried no information, and the actual message —
+  which engines will die — was small muted gray.  The title is now an
+  amber `⚠ WARNING` and the message body is larger, bold, full-contrast;
+  modal body text (descriptions, labels, inputs) is bumped up a step.
+  Muted gray is reserved for deactivated/disabled text, never for info.
+
+- **Project rows carry the pill's engine controls.**  The state LED is
+  gone: each row now shows the status pill's own trio — ▶ ⏸ ⏹ — same
+  icons, same lit-language: play glows while the engine runs, pause
+  glows while it is paused or draining (▶ then cancels the pause), and
+  stop glows whenever the engine is NOT producing — opened-but-stopped
+  or fully closed, exactly like the pill on SYSTEM READY.  ▶ starts the
+  engine into the current runs without opening the project.  ⏹ is
+  idempotent: a press when nothing runs is a silent no-op, and
+  `/api/engine/stop` with a `project_id` that is not in the pool
+  answers `ok` instead of 400.  The rows follow the pool within a
+  second even when KAI or curl move it behind the dashboard's back.
+
+- **The opened project's row chip says OPEN, not ACTIVE.**  "ACTIVE"
+  read as "its engine is running" — but the chip only marks which
+  project the dashboard is showing, and the trio already says the
+  engine's state.  The chip now says OPEN and its tooltip points at
+  the trio for engine state.
+
 ### Fixed
+
+- **The pill told the truth about a mixed engine pool.**  With several
+  engines in different states the label collapsed to "SYSTEM — N
+  engines" (hiding that two of three were stopped) and the LED plus the
+  STATUS detail read the SELECTED engine's state — a pool running two
+  projects and showing a stopped one looked red.  `/api/active` now
+  carries `pool`: counts of every engine state plus the queued total,
+  computed once server-side; the pill renders them — "SYSTEM — 2
+  RUNNING · 1 PAUSED", green while anything runs or drains, red only on
+  evidence (a dead server, or the WHOLE pool halted), yellow when
+  everything is merely paused.  The trio mirrors the pool too: play lit
+  while ANY engine runs, stop lit only when ALL are halted.  A single
+  engine keeps its old, more precise label.
 
 - **The live view drew un-dispatched generations as chats and called it
   "WAITING FOR A FREE LLM SLOT".**  A chat is a STREAM: a generation the pool

@@ -107,6 +107,43 @@ class KaiClient:
             data["error"] = f"HTTP {resp.status_code}"
         return data
 
+    def download(self, path: str) -> Tuple[bytes, str]:
+        """GET a binary endpoint (export).  Returns (bytes, filename) —
+        the filename comes from Content-Disposition when present."""
+        url = self.base + path
+        try:
+            resp = self._session.get(url, headers=self.headers, timeout=(3.0, 300.0))
+        except requests.exceptions.RequestException as e:
+            raise KaiError(f"dashboard unreachable at {url}: {e}") from e
+        if resp.status_code >= 400:
+            try:
+                err = resp.json().get("error", f"HTTP {resp.status_code}")
+            except ValueError:
+                err = f"HTTP {resp.status_code}"
+            raise KaiError(str(err))
+        import re as _re
+        m = _re.search(r'filename="?([^";]+)', resp.headers.get("Content-Disposition", ""))
+        return resp.content, (m.group(1) if m else "")
+
+    def upload(self, path: str, data: bytes) -> Dict[str, Any]:
+        """POST raw bytes (import).  Same JSON-reply contract as call()."""
+        url = self.base + path
+        headers = dict(self.headers)
+        headers["Content-Type"] = "application/zip"
+        try:
+            resp = self._session.post(url, data=data, headers=headers,
+                                      timeout=(3.0, 300.0))
+        except requests.exceptions.RequestException as e:
+            raise KaiError(f"dashboard unreachable at {url}: {e}") from e
+        try:
+            out = resp.json()
+        except ValueError:
+            out = {"ok": False, "error": f"non-JSON response ({resp.status_code})"}
+        if resp.status_code >= 400 and "error" not in out:
+            out["error"] = f"HTTP {resp.status_code}"
+        return out
+
+
     def alive(self) -> bool:
         try:
             self.call("GET", "/api/projects", read_timeout=3.0)
@@ -247,6 +284,14 @@ BARE command lines, never prefixed with OK. Commands (case-insensitive):
   CREATE <id> [TEMP] <spec-json>
                              create a project from a hand-written spec
                              (TEMP: lives in temp/, wiped on close/restart)
+  EXPORT <id> [to <path>]   download a project as a portable .kaisen.zip
+  EXPORT SET <sid> [to <path>]
+                            a SET + all its projects in one .kaisen.zip
+                            (default path: exports/ in the KAISEN folder)
+  IMPORT <path>             import a .kaisen.zip — project or set, the kind
+                            is auto-detected.  Nothing is ever overwritten:
+                            colliding ids are renamed -2, -3, … and every
+                            old → new mapping is reported.
   AUTOFIX [tries <n>] [repair <n|off>] [candidates <n>]
                              compile-loop knobs for the session project:
                              deterministic autofix turns (default 5), LLM
@@ -258,6 +303,9 @@ BARE command lines, never prefixed with OK. Commands (case-insensitive):
 NOTES: HTTP clients are FRESH per request — send PROJECT <id> + the command
 in ONE body, or pass a cookie (curl -c/-b) so the server remembers the
 project. Run budgets survive daemon restarts (kai_runs.json).
+PROJECT/RUN are scoped to the ACTIVE SET workspace: a project outside it
+cannot be switched to (the dashboard's Sets feature, docs/SETS.md);
+projects you CREATE while a set is active join that set automatically.
 Examples:
   PROJECT md5-speed
   RUN
@@ -305,6 +353,8 @@ ALIASES: Dict[str, List[str]] = {
     "FACTORY": ["FACTORY", "FABRICATE", "GENPROJECTS"],
     "ESTIMATE": ["ESTIMATE", "COST", "PRICE", "BUDGET"],
     "ACCEPT": ["ACCEPT", "ADOPT"],
+    "EXPORT": ["EXPORT", "PACK", "ZIP", "SHARE"],
+    "IMPORT": ["IMPORT", "UNPACK", "LOAD"],
     "HELP": ["HELP", "H", "?"],
     "QUIT": ["QUIT", "EXIT", "BYE", "DONE", "END-SESSION"],
 }
@@ -1768,6 +1818,56 @@ class KaiSession:
         return (f"OK created {pid}" + (f" WARNINGS {warns}" if warns else "")
                 + (" — TEMP (wiped at server close/next start)" if temp else ""))
 
+    def cmd_export(self, arg: str) -> str:
+        """EXPORT <project-id> [to <path>] | EXPORT SET <set-id> [to <path>]
+        — pull a .kaisen.zip bundle down to a local file (default: the
+        KAISEN folder's exports/)."""
+        tokens = arg.split()
+        is_set = bool(tokens) and tokens[0].upper() in ("SET", "GROUP")
+        if is_set:
+            tokens = tokens[1:]
+        if not tokens:
+            raise KaiError("EXPORT <project-id> | EXPORT SET <set-id> [to <path>]")
+        ident = tokens[0].strip().lower()
+        to = " ".join(tokens[2:]) if len(tokens) >= 3 and tokens[1].lower() == "to" else None
+        path = f"/api/sets/{ident}/export" if is_set else f"/api/projects/{ident}/export"
+        data, fname = self.client.download(path)
+        default_name = fname or (f"{ident}.kaisen-set.zip" if is_set else f"{ident}.kaisen.zip")
+        dest = Path(to).expanduser() if to else REPO_ROOT / "exports" / default_name
+        if dest.is_dir():
+            dest = dest / default_name
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(data)
+        return (f"OK exported {len(data)} bytes -> {dest}\n"
+                f"Move it anywhere:  curl -T \"{dest}\" http://<host>:<port>/api/import\n"
+                f"Or right here:     IMPORT {dest}")
+
+    def cmd_import(self, arg: str) -> str:
+        """IMPORT <path.kaisen.zip> — import a bundle; kind auto-detected,
+        colliding ids renamed, nothing ever overwritten."""
+        raw = arg.strip().strip('"\'')
+        if not raw:
+            raise KaiError("IMPORT <path to a .kaisen.zip>")
+        src = Path(raw).expanduser()
+        if not src.is_file():
+            raise KaiError(f"no such file: {src}")
+        res = self.client.upload("/api/import", src.read_bytes())
+        if not res.get("ok"):
+            raise KaiError(res.get("error", "import failed"))
+        projects = res.get("projects") or {}
+        n = len(projects)
+        head = f"OK imported {res.get('kind', 'bundle')} '{res.get('name', '')}'"
+        smap = res.get("set")
+        if smap:
+            _old, new_sid = next(iter(smap.items()))
+            head += f" — set -> {new_sid}"
+        head += f" ({n} project{'s' if n != 1 else ''})"
+        lines = [head]
+        for old, new in projects.items():
+            if old != new:
+                lines.append(f"  renamed: {old} -> {new}")
+        return "\n".join(lines)
+
     def cmd_factory(self, arg: str) -> str:
         """Generate algorithm × language projects (factory self-checks each
         before registering): FACTORY [ALGOS a,b] [LANGS c,python,rust,go]
@@ -1962,6 +2062,10 @@ class KaiSession:
                 return self.cmd_accept(rest)
             if cmd == "CREATE":
                 return self.cmd_create(rest)
+            if cmd == "EXPORT":
+                return self.cmd_export(rest)
+            if cmd == "IMPORT":
+                return self.cmd_import(rest)
             if cmd == "FACTORY":
                 return self.cmd_factory(rest)
             return f"ERR unimplemented command '{cmd}'"

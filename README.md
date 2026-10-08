@@ -31,6 +31,17 @@ history: [`CHANGELOG.md`](CHANGELOG.md).
 5. **🧠 Agent** — a multi-turn tool loop over a project: reads the spec,
    history, champion, lessons; runs the pipeline; edits the spec with
    validation. Every mutation snapshots first.
+6. **Sets** — bundle the projects of one research goal into a named,
+   loadable workspace: enter the set, start its whole fleet with one
+   click, everything outside stays stopped and hidden until you exit.
+   Tag-based (a project can live in several sets); untagged projects
+   keep the plain default view.  See [`docs/SETS.md`](docs/SETS.md).
+7. **Export / Import** — any project or whole set packs into one
+   `.kaisen.zip`: a button in the GUI, `curl -T bundle.kaisen.zip
+   http://host:port/api/import`, or `EXPORT` / `IMPORT` in KAI. Import
+   auto-detects the kind and never overwrites — colliding ids are
+   renamed and reported.
+
 ## KAI — the LLM-facing API (optimization sidecar)
 
 KAISEN is not only a human tool. **KAI** is its line-oriented protocol that
