@@ -50,6 +50,17 @@ def _reset_shared_workers():
     reset_worker_pool()
 
 
+@pytest.fixture(autouse=True)
+def _reset_shared_health():
+    """Server health (online/ban/inflight) is a process-wide registry —
+    reset it so a ban or a stuck inflight counter never leaks between
+    tests that reuse the same server ids."""
+    from kaisen.llm import reset_health_registry
+    reset_health_registry()
+    yield
+    reset_health_registry()
+
+
 # ----------------------------------------------------------------------
 # hermeticity guards (session scoped)
 # ----------------------------------------------------------------------

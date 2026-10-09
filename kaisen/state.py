@@ -124,6 +124,7 @@ class ProjectState:
         return int(self.data["generation"])
 
     def append_history(self, entry: Dict[str, Any]) -> None:
+        entry.setdefault("ts", time.time())
         self.data["history"].append(entry)
         if len(self.data["history"]) > MAX_HISTORY:
             self.data["history"] = self.data["history"][-MAX_HISTORY:]

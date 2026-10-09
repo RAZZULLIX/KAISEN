@@ -103,6 +103,10 @@ class Session:
         self.finished_at: Optional[float] = None
         self.waiting = False
         self.cancel = threading.Event()
+        # WHY the cancel was raised ("stopped" / "endpoint deactivated"):
+        # the history line must tell the operator what happened, and a chat
+        # killed by a pool edit must not read like one killed by Stop.
+        self.cancel_reason = ""
         self._tokens = 0
         self.tps = 0.0
         # Recent (time, cumulative-tokens) samples — the TPS is measured over
@@ -256,8 +260,10 @@ class SessionHub:
         with self._lock:
             return sum(s.tps for s in self._sessions if s.status == "generating")
 
-    def cancel_all(self) -> None:
+    def cancel_all(self, reason: str = "stopped") -> None:
         for s in self.iter_active():
+            if not s.cancel_reason:
+                s.cancel_reason = reason
             s.cancel.set()
 
     def snapshot(self) -> List[Dict[str, Any]]:
@@ -666,6 +672,7 @@ class ProjectEngine:
                             session.push(token, count, reasoning)
                             full_text.append(token)
 
+                        llm_t0 = time.time()
                         raw, sid = self.orchestrator.request_stream(
                             prompt,
                             pipeline_id=pipeline_id,
@@ -679,12 +686,16 @@ class ProjectEngine:
                         )
                         self._gen_server[gen] = sid
                         session.finish(server_id=sid)
+                        llm_time = round(time.time() - llm_t0, 1)
                     except GenerationCancelled:
-                        session.finish(error="cancelled by stop")
-                        self.state.append_history({"generation": gen, "outcome": "cancelled", "detail": "generation killed by stop"})
+                        why = session.cancel_reason or "stop"
+                        session.finish(error=f"cancelled: {why}")
+                        self.state.append_history({"generation": gen, "outcome": "cancelled",
+                                                   "gen_time": round(time.time() - llm_t0, 1),
+                                                   "detail": f"generation killed ({why})"})
                         self.state.save()
                         self._emit_state()
-                        self._log(f"gen {gen}: cancelled by stop")
+                        self._log(f"gen {gen}: cancelled ({why})")
                         continue
                     except ServerError as e:
                         session.finish(error=str(e))
@@ -693,7 +704,7 @@ class ProjectEngine:
                         # request is still a paid-for generation whose
                         # reasoning trace must be readable afterwards.
                         self._save_raw(gen_dir, full_text, raw)
-                        self.state.append_history({"generation": gen, "outcome": "request_failed", "detail": str(e)[:300]})
+                        self.state.append_history({"generation": gen, "outcome": "request_failed", "gen_time": round(time.time() - llm_t0, 1), "detail": str(e)[:300]})
                         self.state.save()
                         self._emit_state()
                         self._log(f"LLM request failed (gen {gen}): {e}")
@@ -708,7 +719,7 @@ class ProjectEngine:
                     candidates = skills_mod.extract_code_candidates(
                         raw, self._code_lang, limit=self._max_candidates)
                     if not candidates:
-                        self.state.append_history({"generation": gen, "outcome": "no_code", "detail": "no extractable code"})
+                        self.state.append_history({"generation": gen, "outcome": "no_code", "gen_time": llm_time, "detail": "no extractable code"})
                         self.state.save()
                         self._emit_state()
                         time.sleep(2.0)
@@ -723,29 +734,29 @@ class ProjectEngine:
                     extracted = skills_mod.ensure_headers(extracted, self._code_lang)
                     bad = skills_mod.find_dangerous(extracted, self._code_lang)
                     if bad:
-                        self.state.append_history({"generation": gen, "outcome": "rejected_dangerous", "detail": bad})
+                        self.state.append_history({"generation": gen, "outcome": "rejected_dangerous", "gen_time": llm_time, "detail": bad})
                         self.state.save()
                         self._emit_state()
                         continue
                     violation = self._scope_check(extracted)
                     if violation:
-                        self.state.append_history({"generation": gen, "outcome": "scope_violation", "detail": violation})
+                        self.state.append_history({"generation": gen, "outcome": "scope_violation", "gen_time": llm_time, "detail": violation})
                         self.state.save()
                         self._emit_state()
                         self._log(f"gen {gen}: {violation}")
                         continue
                     violation = self._diff_check(extracted)
                     if violation:
-                        self.state.append_history({"generation": gen, "outcome": "diff_violation", "detail": violation})
+                        self.state.append_history({"generation": gen, "outcome": "diff_violation", "gen_time": llm_time, "detail": violation})
                         self.state.save()
                         self._emit_state()
                         self._log(f"gen {gen}: {violation}")
                         continue
                     candidate = gen_dir / f"candidate{self._code_ext}"
                     candidate.write_text(extracted, encoding="utf-8")
-                    if self._dedup_check(extracted, gen, gen_dir):
+                    if self._dedup_check(extracted, gen, gen_dir, llm_time):
                         continue
-                    self._submit(gen, str(candidate), gen_dir)
+                    self._submit(gen, str(candidate), gen_dir, gen_time=llm_time)
                 finally:
                     # A session must NEVER stay "generating" after its
                     # producer iteration ends.  Any exception that is not
@@ -762,7 +773,7 @@ class ProjectEngine:
                 time.sleep(2.0)
 
     def _submit(self, gen: int, candidate: str, gen_dir: Path, baseline: bool = False,
-                **extra: Any) -> None:
+                gen_time: Optional[float] = None, **extra: Any) -> None:
         job_id = f"{int(time.time() * 1000)}-{gen}"
         context = {} if baseline else self._abort_context()
         # Compile-loop caps (KAI AUTOFIX > spec engine.autofix > config
@@ -785,7 +796,9 @@ class ProjectEngine:
         job.update(extra)
         with self._lock:
             self._in_flight[gen] = {"generation": gen, "baseline": baseline,
-                                    "gen_dir": str(gen_dir), "job_id": job_id, **extra}
+                                    "gen_dir": str(gen_dir), "job_id": job_id,
+                                    "gen_time": gen_time,
+                                    **extra}
         self.pool.submit(job)
 
     def _try_next_candidate(self, gen: int, job: Optional[Dict[str, Any]]) -> bool:
@@ -819,7 +832,7 @@ class ProjectEngine:
         candidate = gen_dir / f"candidate{self._code_ext}"
         candidate.write_text(nxt, encoding="utf-8")
         self._log(f"gen {gen}: build failed after autofix — trying next candidate block")
-        self._submit(gen, str(candidate), gen_dir)
+        self._submit(gen, str(candidate), gen_dir, gen_time=job.get("gen_time"))
         return True
 
     def _abort_context(self) -> Dict[str, Any]:
@@ -965,7 +978,7 @@ class ProjectEngine:
                     f"edit, or raise data.max_changed_lines")
         return None
 
-    def _dedup_check(self, code: str, gen: int, gen_dir: Path) -> bool:
+    def _dedup_check(self, code: str, gen: int, gen_dir: Path, gen_time: Optional[float] = None) -> bool:
         # The project language matters: semantic_hash defaults to the C
         # normalizer, which treats `//` as a comment — on python (and other
         # hash-comment languages) floor division would be stripped before
@@ -974,7 +987,7 @@ class ProjectEngine:
         seen_file = self.project.path / "seen_hashes.json"
         seen = set(load_json(seen_file, []) or [])
         if h in seen:
-            self.state.append_history({"generation": gen, "outcome": "duplicate_skip", "detail": h[:16]})
+            self.state.append_history({"generation": gen, "outcome": "duplicate_skip", "gen_time": gen_time, "detail": h[:16]})
             self.state.save()
             self._emit_state()
             return True
@@ -1363,6 +1376,11 @@ class ProjectEngine:
         ok = bool(result.get("ok"))
         metrics = result.get("metrics", {})
         outcome = result.get("outcome", "unknown")
+        # GEN TIME: the time the AI took to WRITE this generation — the LLM
+        # stream duration, stamped in the producer and carried through the
+        # job.  None when no AI wrote the candidate (custom-code submit,
+        # baseline): the table shows '--', never a fake pipeline number.
+        gen_time = job.get("gen_time") if job else None
 
         if not ok:
             # Candidate fallback: the LATEST block failed to build AND the
@@ -1376,7 +1394,7 @@ class ProjectEngine:
                     and not result.get("build_fixes")
                     and self._try_next_candidate(gen, job)):
                 return
-            entry = {"generation": gen, "outcome": outcome, "detail": result.get("reason", "")[:800]}
+            entry = {"generation": gen, "outcome": outcome, "gen_time": gen_time, "detail": result.get("reason", "")[:800]}
             # Autofix observability: a generation that ran the deterministic
             # fixer but still failed must record HOW MANY turns it burned,
             # or the failure looks like a plain compile error and the sweep
@@ -1392,7 +1410,7 @@ class ProjectEngine:
                 entry["detail"] = "BASELINE RE-EVALUATION FAILED: " + entry["detail"]
             self.state.append_history(entry)
             self.state.save()
-            self.results.append({**{"generation": gen, "outcome": outcome}, **metrics})
+            self.results.append({**{"generation": gen, "outcome": outcome, "gen_time": gen_time}, **metrics})
             self._emit_state()
             self._log(f"gen {gen}: {outcome} ({result.get('stage')})")
             self._maybe_llm_repair(gen, job, result, baseline)
@@ -1405,9 +1423,9 @@ class ProjectEngine:
         violations = check_constraints(metrics, schema)
         if violations:
             self.state.append_history({"generation": gen, "outcome": "constraint_violated",
-                                       "detail": "; ".join(violations)})
+                                       "gen_time": gen_time, "detail": "; ".join(violations)})
             self.state.save()
-            self.results.append({**{"generation": gen, "outcome": "constraint_violated"}, **metrics})
+            self.results.append({**{"generation": gen, "outcome": "constraint_violated", "gen_time": gen_time}, **metrics})
             self._emit_state()
             self._log(f"gen {gen}: constraint_violated {'; '.join(violations)}")
             return
@@ -1423,7 +1441,7 @@ class ProjectEngine:
         else:
             fitness = evaluate_score_type(metrics, score_type)
         if fitness is None:
-            self.state.append_history({"generation": gen, "outcome": "no_score", "detail": f"missing metrics for score '{score_key}': {str(metrics)[:300]}"})
+            self.state.append_history({"generation": gen, "outcome": "no_score", "gen_time": gen_time, "detail": f"missing metrics for score '{score_key}': {str(metrics)[:300]}"})
             self.state.save()
             self._emit_state()
             return
@@ -1460,6 +1478,7 @@ class ProjectEngine:
                        + f"fitness={fitness:.5f} " + " ".join(f"{k}={v}" for k, v in metrics.items())),
             "fitness": fitness,
             "metrics": metrics,
+            "gen_time": gen_time,
         }
         fixes = result.get("build_fixes") or []
         if fixes:
@@ -1507,7 +1526,7 @@ class ProjectEngine:
                 "generation": gen,
             })
             self.state.save()
-            self.results.append({**{"generation": gen, "outcome": "NEW_BEST", "fitness": fitness}, **metrics})
+            self.results.append({**{"generation": gen, "outcome": "NEW_BEST", "fitness": fitness, "gen_time": gen_time}, **metrics})
             self._notify_best(gen, fitness, metrics, schema,
                               generated=not (baseline or reeval))
             # lessons (spec-driven)
@@ -1518,7 +1537,7 @@ class ProjectEngine:
             self._log(f"gen {gen}: {what}NEW BEST fitness={fitness:.5f}")
         else:
             self.state.save()
-            self.results.append({**{"generation": gen, "outcome": "valid", "fitness": fitness}, **metrics})
+            self.results.append({**{"generation": gen, "outcome": "valid", "fitness": fitness, "gen_time": gen_time}, **metrics})
             self._log(f"gen {gen}: valid fitness={fitness:.5f} (best {best_f:.5f})")
 
         # Only now is the champion known: a goal is a property of the
@@ -1649,7 +1668,7 @@ class ProjectEngine:
             self.results.append({"generation": gen, "outcome": "llm_repair"})
             self._emit_state()
             self._submit(gen, str(cand), gen_dir, baseline=bool(job.get("baseline")),
-                         repaired=True)
+                         gen_time=job.get("gen_time"), repaired=True)
             self._log(f"gen {gen}: LLM repair applied — candidate rewritten, pipeline re-queued")
 
         except Exception as e:

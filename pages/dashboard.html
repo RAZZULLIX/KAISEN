@@ -110,7 +110,7 @@
             <div class="panel-badges">
               <span class="chip">auto-sync</span>
               <label class="panel-subtitle" style="align-self:center;">Score:</label>
-              <select id="score-type-select" onchange="changeScoreType()" style="width:auto;min-width:220px;font-size:12px;"></select>
+          <select id="score-type-select" onchange="changeScoreType()" style="width:auto;min-width:220px;font-size:16px;"></select>
             </div>
           </div>
           <div class="chart-wrap">
@@ -118,23 +118,10 @@
           </div>
           <div class="iteration-filters">
             <input type="text" id="iter-search" placeholder="Search outcome/detail..." oninput="filterIterations()">
-            <select id="iter-outcome-filter" onchange="filterIterations()">
-              <option value="">All Outcomes</option>
-              <option value="NEW_BEST">New Best</option>
-              <option value="valid">Valid</option>
-              <option value="build_fail">Build Fail</option>
-              <option value="verify_fail">Verify Fail</option>
-              <option value="score_fail">Score Fail</option>
-              <option value="no_metrics">No Metrics</option>
-              <option value="guardrail_denied">Guardrail Denied</option>
-              <option value="protected_data_modified">Protected Data Modified</option>
-              <option value="duplicate_skip">Duplicate</option>
-              <option value="no_code">No Code</option>
-              <option value="rejected_dangerous">Dangerous</option>
-              <option value="cancelled">Cancelled</option>
-              <option value="request_failed">LLM Request Failed</option>
-              <option value="worker_error">Worker Error</option>
-            </select>
+            <div class="outcome-check" id="iter-outcome-check">
+              <button type="button" class="outcome-check-btn" id="iter-outcome-btn" onclick="toggleOutcomeMenu(event)">All Outcomes ▾</button>
+              <div class="outcome-check-menu" id="iter-outcome-menu" style="display:none;"></div>
+            </div>
             <input type="number" id="iter-min-time" placeholder="Min Gen Time (s)" step="0.1" oninput="renderIterations()">
             <input type="number" id="iter-max-time" placeholder="Max Gen Time (s)" step="0.1" oninput="renderIterations()">
             <select id="iter-limit" onchange="updateIterationLimit()">
@@ -148,6 +135,7 @@
             <table class="iteration-table">
               <thead>
                 <tr>
+                  <th class="sortable" data-sort="ts" onclick="sortIterations('ts')">When <span class="sort-arrow"></span></th>
                   <th class="sortable" data-sort="iteration" onclick="sortIterations('iteration')">Gen # <span class="sort-arrow"></span></th>
                   <th class="sortable" data-sort="outcome" onclick="sortIterations('outcome')">Outcome <span class="sort-arrow"></span></th>
                   <th class="sortable" data-sort="score" onclick="sortIterations('score')">Fitness <span class="sort-arrow"></span></th>
@@ -347,7 +335,7 @@
             <div class="panel-header"><div class="panel-title">Factory timeouts</div></div>
             <div class="form-row"><label>Build timeout (s) — blank = per-language empirical default; cap 120</label><input id="cfg-factory-build" type="number" min="5" max="120" placeholder="auto"></div>
             <div class="form-row"><label>Case timeout (s) — max execution time for one fuzz case; blank = per-language empirical default; cap 600</label><input id="cfg-factory-case" type="number" min="1" max="600" placeholder="auto"></div>
-            <div style="font-size:12px;color:var(--muted);line-height:1.5;">Defaults come from trial runs on this machine (every baseline built and timed). Global caps: 2 min compile, 10 min execution. Per-run override via KAI: <code>FACTORY BUILD_TIMEOUT &lt;s&gt; CASE_TIMEOUT &lt;s&gt;</code>.</div>
+            <div style="font-size:16px;color:var(--muted);line-height:1.5;">Defaults come from trial runs on this machine (every baseline built and timed). Global caps: 2 min compile, 10 min execution. Per-run override via KAI: <code>FACTORY BUILD_TIMEOUT &lt;s&gt; CASE_TIMEOUT &lt;s&gt;</code>.</div>
           </section>
           <section class="panel">
             <div class="panel-header"><div class="panel-title">Auto-fix build errors (compiler suggestions)</div></div>
@@ -621,13 +609,13 @@
       <div style="display:flex;flex-direction:column;gap:8px;margin-top:10px;">
         <label class="member-pick"><input type="checkbox" id="ex-best" checked>
           <span class="mp-name">Include current best</span>
-          <span style="font-size:12px;color:var(--muted);margin-left:auto;">champion program from best/ with its score, metrics and generation</span></label>
+          <span style="font-size:16px;color:var(--muted);margin-left:auto;">champion program from best/ with its score, metrics and generation</span></label>
         <label class="member-pick"><input type="checkbox" id="ex-baseline" checked onchange="exBaselineToggled(this)">
           <span class="mp-name">Include baseline</span>
-          <span style="font-size:12px;color:var(--muted);margin-left:auto;">the starting program (data.baseline_source)</span></label>
+          <span style="font-size:16px;color:var(--muted);margin-left:auto;">the starting program (data.baseline_source)</span></label>
         <label class="member-pick" style="margin-left:18px;"><input type="checkbox" id="ex-baseline-measured" checked>
           <span class="mp-name">its measured score</span>
-          <span style="font-size:12px;color:var(--muted);margin-left:auto;">when the engine has scored the baseline — otherwise the bundle carries the definition only</span></label>
+          <span style="font-size:16px;color:var(--muted);margin-left:auto;">when the engine has scored the baseline — otherwise the bundle carries the definition only</span></label>
       </div>
       <div class="modal-actions">
         <button class="btn" onclick="closeModal('export-modal')">Cancel</button>
@@ -749,7 +737,7 @@
       <div class="form-row"><label>Max tokens (blank = unlimited)</label><input id="budget-max-tokens" placeholder="e.g. 1000000 · 1M · 1,000,000 · 2.5M"></div>
       <div class="form-row"><label>Max generations (blank = unlimited)</label><input id="budget-max-gens" type="number" min="0" placeholder="e.g. 50 — LLM calls per window"></div>
       <div class="form-row"><label>Reset window (blank = never — one-shot cap)</label><input id="budget-reset" placeholder="e.g. 30s · 5m · 12h · 3d · 1w · 12:00:00 (= 12h)"></div>
-      <div style="font-size:12px;color:var(--muted);line-height:1.5;">Example: a subscription with 1M free tokens every 3 hours → <code>max_tokens 1M</code>, <code>reset 3h</code>. Same via KAI: <code>BUDGET SERVER &lt;sid&gt; SET max_tokens 1M reset 3h</code>.</div>
+      <div style="font-size:16px;color:var(--muted);line-height:1.5;">Example: a subscription with 1M free tokens every 3 hours → <code>max_tokens 1M</code>, <code>reset 3h</code>. Same via KAI: <code>BUDGET SERVER &lt;sid&gt; SET max_tokens 1M reset 3h</code>.</div>
       <div class="modal-actions">
         <button class="btn" onclick="closeBudgetModal()">Cancel</button>
         <button class="btn btn-primary" onclick="saveBudgetModal()">Save Budget</button>
@@ -771,12 +759,15 @@
   <div id="live-output-modal" class="modal-overlay console-modal" role="dialog" aria-modal="true" aria-label="Live generations" style="display: none;">
     <div class="console-content">
       <div class="console-header">
-        <span>LIVE GENERATIONS</span>
+        <div>
+          <span>LIVE GENERATION</span>
+          <div id="live-gen-project" class="live-gen-sub"></div>
+        </div>
         <div class="live-source-bar">
-          <span id="live-filter-chip" class="live-filter-chip" style="display:none;"></span>
           <button class="btn btn-sm" onclick="closeLiveModal()">Close</button>
         </div>
       </div>
+      <div id="live-tabs" class="live-tabs" style="display:none;" role="tablist" aria-label="Live streams"></div>
       <div id="live-output-content" class="console-body"></div>
     </div>
   </div>

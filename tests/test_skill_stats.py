@@ -176,3 +176,20 @@ def test_check_constraints_missing_metric_not_violation():
     schema = {"err": {"direction": "lower", "constraint": 0.01}}
     assert check_constraints({}, schema) == []
     assert check_constraints({"err": None}, schema) == []
+
+
+def test_check_constraints_zero_time_is_the_do_nothing_cheat():
+    """A lower-better TIME metric reading exactly 0 is a stub that skipped
+    the work and printed the metrics (the rope-neox cheat: empty kernels +
+    hardcoded decode_us=0.0 crowned champion over 27.5us honest runs)."""
+    schema = {"decode_us": {"direction": "lower", "unit": "us"},
+              "max_err": {"direction": "lower", "unit": "", "constraint": 1e-4}}
+    v = check_constraints({"decode_us": 0.0, "max_err": 0.0}, schema)
+    assert len(v) == 1 and "decode_us" in v[0] and "zero" in v[0]
+    # honest times pass; a zero NON-time metric (max_err=0 is perfect) passes
+    assert check_constraints({"decode_us": 7.5, "max_err": 0.0}, schema) == []
+    # negative is equally impossible
+    assert len(check_constraints({"decode_us": -1.0}, schema)) == 1
+    # higher-better metrics are untouched by the rule
+    assert check_constraints({"tps": 0.0},
+                             {"tps": {"direction": "higher", "unit": "us"}}) == []

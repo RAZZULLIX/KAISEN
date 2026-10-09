@@ -191,7 +191,7 @@ def test_acquire_release_capacity(tmp_cfg):
     assert s.acquire()
     s.release()
     s.release()
-    assert s._inflight == 0
+    assert s.inflight == 0
 
 
 def test_ban_blocks_acquire(tmp_cfg):
@@ -243,13 +243,13 @@ def test_routing_prefers_fast_measured_server(orch, tmp_cfg):
     # pick thrice: the FAST box must be chosen every time (never round-robin
     # onto the slow one while fast is free).
     for _ in range(3):
-        orch._servers["fast"]._inflight = 0   # keep fast free
-        orch._servers["slow"]._inflight = 0
+        orch._servers["fast"]._health._inflight = 0   # keep fast free
+        orch._servers["slow"]._health._inflight = 0
         assert orch._pick_server(min_tier="tiny") == "fast"
         # release the picked server's inflight (acquire happened in pick)
         orch._servers["fast"].release()
     # now mark fast busy -> slow is the usable fallback
-    orch._servers["fast"]._inflight = orch._servers["fast"]._capacity
+    orch._servers["fast"]._health._inflight = orch._servers["fast"]._capacity
     assert orch._pick_server(min_tier="tiny") == "slow"
 
 
@@ -366,7 +366,7 @@ def test_alloc_saturated_endpoint_falls_through_to_a_free_one(orch):
     hs = orch._servers[held]
     hs.acquire()
     hs.acquire()                              # another generation saturates it
-    assert hs._inflight == hs._capacity
+    assert hs.inflight == hs._capacity
     got = orch._pick_server("tiny", pipeline_key="eng|0")
     assert got is not None and got != held    # streams on the free endpoint
     orch.release(got)
@@ -417,7 +417,7 @@ def test_alloc_capacity_shrink_is_respected(orch):
     orch._servers["shrink-hi"]._detected_slots = 2
     for sid in inflight[:4]:                  # those generations end
         orch.release(sid)
-    assert hi._inflight == 2
+    assert hi.inflight == 2
     got = orch._pick_server("tiny", pipeline_key="e|6")
     assert got == "shrink-lo"                 # spilling down, not queueing
     for sid in inflight[4:]:
@@ -451,7 +451,7 @@ def test_projects_rotate_generations_on_a_shared_pool(orch):
         orch._generation_done("projA|0")
         nxt = orch._pick_server("tiny", pipeline_key="projA|1")
         assert nxt == first
-        assert orch._servers[nxt]._inflight == 1
+        assert orch._servers[nxt].inflight == 1
         orch.release(nxt)
         orch.release(second)
     finally:
@@ -492,7 +492,7 @@ def test_engine_with_nothing_waiting_stops_holding_its_turn(orch):
     orch.release(held)
     got = orch._pick_server("tiny", pipeline_key="here|0")
     assert got in ("q1", "q2")                # the parked project no longer blocks
-    assert orch._servers[got]._inflight == 1
+    assert orch._servers[got].inflight == 1
     orch.release(got)
     orch._need_exit("here")
 

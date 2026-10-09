@@ -105,7 +105,7 @@ class DashboardServer:
         config: FrameworkConfig,
         engine: Optional[ProjectEngine] = None,
         host: str = "0.0.0.0",
-        port: int = 8080,
+        port: int = 8910,
         temp_root: Optional[Path] = None,
         restore_paused: bool = False,
     ):
@@ -446,7 +446,22 @@ class DashboardServer:
         if getattr(self, "_base_orchestrator", None) is None:
             from .llm import ModelOrchestrator
             self._base_orchestrator = ModelOrchestrator(self.cfg)
+            # Deactivating/removing an endpoint must KILL the chats still
+            # streaming on it — the orchestrator reaches the engines'
+            # SessionHubs only through this hook (it does not own them).
+            self._base_orchestrator.session_killer = self._kill_sessions_on
         return self._base_orchestrator
+
+    def _kill_sessions_on(self, server_ids):
+        killed = 0
+        ids = set(server_ids)
+        for eng in list(self.engines.values()):
+            for sess in eng.sessions.iter_active():
+                if sess.server_id in ids:
+                    sess.cancel_reason = "endpoint deactivated"
+                    sess.cancel.set()
+                    killed += 1
+        return killed
 
     def _orch(self):
         """Engine orchestrator when a project runs, else a bare one —
@@ -1244,11 +1259,22 @@ class DashboardServer:
         the event loop: engine boot spawns worker subprocesses."""
         started, skipped = [], []
         for pid in set_members(sid, self.registry):
-            if pid in self.engines:
-                continue    # already in the pool (running or paused)
             try:
                 project, reg = self._registry_for(pid)
             except KeyError:
+                continue
+            eng = self.engines.get(pid)
+            if eng is not None:
+                if eng.engine_state in ("running", "paused"):
+                    continue    # already active in the pool
+                if getattr(eng.state, "goal_done", None) and eng.state.goal_done():
+                    skipped.append(pid)
+                    continue
+                # Stopped member (manual stop, earlier goal, or error):
+                # Start-set restarts it, exactly like the row's ▶.
+                eng.start(getattr(eng, "_parallel_gens", 0)
+                          or project.default_parallel_gens, paused=False)
+                started.append(pid)
                 continue
             from .engine import EngineEvent, ProjectEngine
             eng = ProjectEngine(project, self._shared_orchestrator(), reg,
@@ -2818,14 +2844,39 @@ class DashboardServer:
                 outcome = "NEW_BEST"
             metrics = dict(h.get("metrics") or {})
             if not metrics:
-                metrics = {k: v for k, v in r.items() if k not in ("generation", "outcome", "fitness")}
+                metrics = {k: v for k, v in r.items() if k not in ("generation", "outcome", "fitness", "gen_time")}
+            gen_time = h.get("gen_time")
+            if gen_time is None:
+                gen_time = r.get("gen_time") or r.get("score_time") or None
+            if gen_time is None:
+                # Infer from the generation's own artifacts: prompt sent ->
+                # answer written.  Backfills every generation logged before
+                # gen_time existed; stays absent for custom-code/baseline
+                # runs (they never write prompt.txt).
+                gd = eng.project.path / "runs" / f"gen_{gen:06d}"
+                try:
+                    d = os.path.getmtime(gd / "llm_raw.txt") - os.path.getmtime(gd / "prompt.txt")
+                    if d > 0:
+                        gen_time = round(d, 1)
+                except OSError:
+                    gen_time = None
             try:
-                gen_time = float(r.get("score_time") or 0)
+                gen_time = float(gen_time)
             except (TypeError, ValueError):
                 gen_time = 0.0
+            ts = h.get("ts")
+            if ts is None:
+                # Backfill for history written before ts existed: the last
+                # artifact the generation wrote IS its ending moment.
+                gd = eng.project.path / "runs" / f"gen_{gen:06d}"
+                try:
+                    ts = max((os.path.getmtime(f) for f in gd.iterdir() if f.is_file()), default=None)
+                except OSError:
+                    ts = None
             items.append({
                 "iteration": gen,
                 "outcome": outcome,
+                "ts": ts,
                 "gen_time": gen_time,
                 "prompt_snippet": json.dumps(metrics)[:120],
                 "metrics": metrics,
@@ -2925,28 +2976,58 @@ class DashboardServer:
     async def _api_config_post_legacy(self, request):
         return await self._api_config_put(request)
 
+    def _workspace_engines(self):
+        """Every pool engine in the active workspace — the fleet the
+        status-pill controls act on.  The pill is the FLEET's control: with
+        a set active it commands the set's engines, in the default
+        workspace every untagged engine.  (It used to hit the single
+        selected engine, which made ▶/⏸/⏹ look dead whenever another
+        project was the one streaming.)"""
+        return [e for e in self.engines.values()
+                if e is not None and self._in_active_workspace(e.project)]
+
     async def _api_llm_pause_legacy(self, request):
-        eng = self._require_engine()
         body = await request.text()
         paused = body.strip().lower() in ("true", "1", "yes")
-        if paused:
-            eng.request_pause()
-        else:
-            eng.request_resume()
-        return _json({"ok": True, "state": eng.engine_state})
+        engines = self._workspace_engines()
+        for eng in engines:
+            if paused:
+                eng.request_pause()
+            else:
+                eng.request_resume()
+        if not engines:
+            return _json({"ok": False, "error": "no engine running"}, 400)
+        return _json({"ok": True, "engines": {e.project.id: e.engine_state
+                                              for e in engines}})
 
     async def _api_llm_stop_legacy(self, request):
-        eng = self._require_engine()
-        eng.request_stop()
-        return _json({"ok": True, "state": eng.engine_state})
+        engines = self._workspace_engines()
+        for eng in engines:
+            eng.request_stop()
+        if not engines:
+            return _json({"ok": False, "error": "no engine running"}, 400)
+        return _json({"ok": True, "stopped": [e.project.id for e in engines]})
 
     async def _api_llm_resume_legacy(self, request):
-        eng = self._require_engine()
-        eng.request_resume()
-        err = getattr(eng, "_startup_error", "")
-        if err and eng.engine_state == "stopped":
-            return _json({"ok": False, "state": eng.engine_state, "error": err})
-        return _json({"ok": True, "state": eng.engine_state})
+        engines = self._workspace_engines()
+        if not engines:
+            # Nothing in the pool: ▶ starts the whole active workspace,
+            # exactly like the set's Start button.
+            sid = self.sets.active()
+            if sid:
+                out = await asyncio.to_thread(self._start_set, sid)
+                return _json(out)
+            return _json({"ok": False, "error": "no engine running"}, 400)
+        for eng in engines:
+            eng.request_resume()
+        errs = {e.project.id: getattr(e, "_startup_error", "")
+                for e in engines
+                if getattr(e, "_startup_error", "") and e.engine_state == "stopped"}
+        if errs and len(errs) == len(engines):
+            return _json({"ok": False, "errors": errs})
+        return _json({"ok": True,
+                      "engines": {e.project.id: e.engine_state for e in engines},
+                      **({"errors": errs} if errs else {})})
 
     async def _api_override_status_legacy(self, request):
         eng = self._require_engine()
@@ -2966,16 +3047,16 @@ class DashboardServer:
         value = data.get("value")
         if isinstance(value, dict):
             spec = dict(value)
-            spec.setdefault("id", f"custom-{int(time.time())}")
             eng.orchestrator.add_server(spec)
-            eng.orchestrator.set_active([spec["id"]])
+            eng.orchestrator.set_active([spec["id"]], kill=False)
         elif isinstance(value, str) and value:
-            eng.orchestrator.set_active([value])
+            eng.orchestrator.set_active([value], kill=False)
         return _json({"ok": True})
 
     async def _api_override_model_clear_legacy(self, request):
         eng = self._require_engine()
-        eng.orchestrator.set_active([s["id"] for s in eng.orchestrator.list_servers() if s["enabled"]])
+        eng.orchestrator.set_active([s["id"] for s in eng.orchestrator.list_servers() if s["enabled"]],
+                                    kill=False)
         return _json({"ok": True})
 
     async def _api_override_prompt_toggle_legacy(self, request):

@@ -37,6 +37,7 @@ class FakeEngine:
         self._st = SimpleNamespace(generation=generation, paused=paused,
                                    best=best or {})
         self._parallel_gens = parallel_gens
+        self.start_calls = []
         self.pool = SimpleNamespace(_procs={i: None for i in range(workers)})
         self.set_parallel_gens_calls = []
 
@@ -64,6 +65,11 @@ class FakeEngine:
         self._parallel_gens = n
         self.set_parallel_gens_calls.append(n)
         return n
+
+    def start(self, parallel_gens=1, paused=False):
+        self.start_calls.append({"parallel_gens": parallel_gens,
+                                 "paused": paused})
+        self.engine_state = "running"
 
     def set_share(self, max_parallel=None, reserve=None):
         if max_parallel is not None:
@@ -495,6 +501,28 @@ def test_set_start_skips_pool_and_goal_met(api, registry):
 
     # the latch round-trips through state.json (the row keeps its DONE chip)
     assert _rows_by_id(base)["skip-b"]["goal"]["met"] is True
+
+
+def test_set_start_restarts_stopped_member(api, registry):
+    """A stopped member (goal reached earlier, manual stop, or error) stays
+    in the pool dict; Start-set must RESTART it — the old code skipped every
+    dict member as "already in the pool" and started nothing."""
+    srv, base = api
+    sid = _create_set(base, "Restart Fleet")["id"]
+    registry.create("rs-a", _spec("rs-a"))
+    requests.post(base + f"/api/sets/{sid}/members",
+                  json={"project_ids": ["rs-a"]}, timeout=5)
+    _seed_engines(srv, ["rs-a"])
+    srv.engines["rs-a"].engine_state = "stopped"
+    r = requests.post(base + "/api/sets/active", json={"id": sid}, timeout=5)
+    assert r.json()["ok"]
+
+    r = requests.post(base + f"/api/sets/{sid}/start", json={}, timeout=5)
+    d = r.json()
+    assert r.status_code == 200 and d["ok"]
+    assert d["started"] == ["rs-a"]
+    assert srv.engines["rs-a"].start_calls
+    assert srv.engines["rs-a"].engine_state == "running"
 
 # ----------------------------------------------------------------------
 # 7. Stop set — every member engine stops

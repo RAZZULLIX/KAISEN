@@ -50,7 +50,7 @@ hardcoded guardrails — KAISEN never trusts the model's word alone.
 
 ```bash
 pip install -r requirements.txt     # aiohttp, requests, psutil (+ pyflakes, ruff recommended)
-python main.py                      # dashboard on http://127.0.0.1:8080
+python main.py                      # dashboard on http://127.0.0.1:8910
 ```
 
 First run opens a setup wizard: connect an LLM server (local llama.cpp
@@ -662,6 +662,18 @@ LLM turns.
 
 One engine per running project; several engines form the pool.
 
+**THE NEVER-GIVE-UP RULE.** KAISEN's premise is that there is always
+something left to try. Every generation prompt — the default blocks AND
+the tier boosts — must push the model to ATTEMPT a concrete improvement
+even when the task looks insurmountable; "output the program unchanged"
+is never offered as an escape hatch. A generation that returns the
+champion untouched is a wasted slot, not a valid result. The rule binds
+the auto-built project prompts too (GOAL/suggest and the factory): the
+specs they write carry this same output contract, so a freshly created
+project cannot be born with a give-up prompt. The only constraint that
+outranks ambition is the contract: the attempted program must still
+compile and honor the entry contract — try boldly, ship validly.
+
 - **Producer threads** ask the LLM for the next candidate (prompt =
   project prompts + champion code + memory/lessons + tier-aware boost).
 - **Workers — ONE shared pool, one fair queue.** Worker processes are
@@ -1198,7 +1210,7 @@ Complete reference — copy from `config.example.json`:
 | Key | Default | Meaning |
 |---|---|---|
 | `server.host` | `127.0.0.1` | dashboard bind (loopback; §18) |
-| `server.port` | `8080` | dashboard port |
+| `server.port` | `8910` | dashboard port |
 | `server.api_key` | `""` | optional server password (Bearer/Basic); empty = no auth; env `KAISEN_API_KEY` wins (§18) |
 | `llm.read_timeout` | `1200` | read timeout (s) for NON-streaming LLM calls; streaming silence is governed by `first_token_timeout` / `nodata_timeout` (§12 resilience) |
 | `llm.connect_timeout` | `15` | connection timeout (s) |

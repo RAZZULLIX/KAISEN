@@ -36,7 +36,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         # authentication. Opt into LAN exposure deliberately by setting
         # "host": "0.0.0.0" in config.json (see README "Security").
         "host": "127.0.0.1",
-        "port": 8080,
+        "port": 8910,
         # Optional server password ("" = no auth). When set, every page
         # and endpoint requires it (Bearer header / Basic auth prompt).
         # Env KAISEN_API_KEY wins.

@@ -132,19 +132,33 @@ def check_constraints(
 ) -> List[str]:
     """Hard constraint violations: a metric with a `constraint` REJECTS
     the candidate outright — no fitness weighting can compensate.
-    lower-better: value must be <= constraint. higher-better: >=."""
+    lower-better: value must be <= constraint. higher-better: >=.
+
+    A lower-better TIME metric reading exactly 0 is also a violation:
+    no real measurement of real work is 0.0 us/ms/s.  This is the
+    do-nothing cheat — a stub that skips the work and PRINTS the metrics
+    the harness parses — and it would otherwise crown the lazy program
+    champion (0.0 beats every honest time under lower-is-better)."""
     violations: List[str] = []
     for key, spec in (schema or {}).items():
-        if not isinstance(spec, dict) or spec.get("constraint") is None:
+        if not isinstance(spec, dict):
             continue
         value = metrics.get(key)
         if value is None:
             continue  # absent metric is the pipeline's problem, not a violation
         try:
             v = float(value)
-            limit = float(spec["constraint"])
         except (TypeError, ValueError):
             continue
+        unit = str(spec.get("unit", "")).strip().lower()
+        if (spec.get("direction", "lower") == "lower"
+                and unit in ("us", "µs", "ms", "s") and v <= 0.0):
+            violations.append(f"{key}={v} {unit}: a real time cannot be zero "
+                              "(a program that does no work is not a candidate)")
+            continue
+        if spec.get("constraint") is None:
+            continue
+        limit = float(spec["constraint"])
         if spec.get("direction") == "higher" and v < limit:
             violations.append(f"{key}={v} < constraint {limit}")
         elif spec.get("direction", "lower") == "lower" and v > limit:

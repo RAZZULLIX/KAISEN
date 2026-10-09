@@ -57,6 +57,11 @@ function fmtScore(v) {
   if (a !== 0 && (a >= 1000 || a < 0.001)) return v.toExponential(4);
   return v.toFixed(4);
 }
+function fmtWhen(ts) {
+  const d = new Date(ts * 1000);
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
 function populateScoreTypes(snap) {
   const s = (snap && snap.scores) || {};
   const types = s.types || {};
@@ -565,7 +570,7 @@ async function renderWorkers(workers, schema, telemetry, bestMetrics) {
         const final = w.result_metrics && w.result_metrics[key];
         const val = (live !== undefined && live !== null) ? live : final;
         const label = spec.label || key;
-        cards += `<div class="metric-card"><div class="metric-label">${escapeHtml(label)} ${dir}</div><div class="metric-val">${fmtMetricValue(key, val, schema)} <span style="font-size:10px;color:var(--muted);">${escapeHtml(spec.unit || '')}</span></div></div>`;
+cards += `<div class="metric-card"><div class="metric-label">${escapeHtml(label)} ${dir}</div><div class="metric-val">${fmtMetricValue(key, val, schema)} <span style="font-size:16px;color:var(--muted);">${escapeHtml(spec.unit || '')}</span></div></div>`;
       }
       if (isRunning) {
         if (w.model && w.model !== '—') {
@@ -647,6 +652,14 @@ async function handleLlmControl(action) {
         updateStatusPill();
         systemAlert(r.error);
         return;
+      }
+      if (r && r.errors) {
+        // Fleet resume: some (or all) engines refused — name them.
+        updateLlmButtons();
+        updateStatusPill();
+        systemAlert('Could not resume: ' + Object.entries(r.errors)
+          .map(([pid, e]) => `${pid}: ${e}`).join('; '));
+        if (!r.ok) return;
       }
       llmControlState = 'running';
     }
@@ -734,13 +747,24 @@ async function updateStatusPill() {
       else llmControlState = 'running';
     }
     const servers = statusData.servers || [];
-    const selectedIds = [...new Set(servers.filter(s => s.active).map(s => s.id))];
-    const anyOffline = servers.some(s => s.active && (s.banned || s.online === false));
+    const activeSrvs = servers.filter(s => s.active);
+    const selectedIds = [...new Set(activeSrvs.map(s => s.id))];
+    const anyOffline = activeSrvs.some(s => s.banned || s.online === false);
+    // "No LLM works" is a SYSTEM-level fact: every selected endpoint is
+    // banned/offline (or none is selected at all).  The engines may be
+    // alive and the producers parked — nothing can EVER generate.  The pill
+    // must say DOWN, not sit there claiming IDLE.
+    const noUsable = activeSrvs.length === 0
+      || activeSrvs.every(s => s.banned || s.online === false);
     const generating = statusData.status === 'generating' && aggTps > 0;
     if (generating) {
       text.textContent = es === 'pausing'
         ? `PAUSING AFTER THIS @ ${aggTps.toFixed(1)} TPS`
         : `GENERATING @ ${aggTps.toFixed(1)} TPS`;
+    } else if (noUsable && es !== 'stopped' && es !== 'paused') {
+      text.textContent = activeSrvs.length === 0
+        ? 'SYSTEM DOWN — NO LLM SELECTED'
+        : 'SYSTEM DOWN — NO WORKING LLM';
     } else if (es === 'pausing') {
       text.textContent = 'PAUSING AFTER THIS';
     } else if (statusData.status === 'paused') {
@@ -753,10 +777,9 @@ async function updateStatusPill() {
     } else {
       text.textContent = 'IDLE';
     }
-    // Engine pool: more than one engine → summarize the pool's STATE,
-    // not just its size: "SYSTEM — 2 RUNNING · 1 PAUSED" tells the truth
-    // when the engines disagree; the old "3 engines" hid two stopped
-    // ones behind a number.
+    // Engine pool: the POOL STATE summary belongs to the expanded panel
+    // (detail-status), never the pill — the pill talks about the LLMs:
+    // how many endpoints are live and what they are streaming.
     let poolParts = null;
     if (hasPool && engines.length > 1) {
       const p = pool || {};
@@ -764,20 +787,24 @@ async function updateStatusPill() {
         [p.running, 'RUNNING'], [p.pausing, 'DRAINING'], [p.paused, 'PAUSED'],
         [p.stopping, 'STOPPING'], [p.stopped, 'STOPPED'],
       ].filter(x => x[0] > 0).map(x => `${x[0]} ${x[1]}`);
-      const queued = p.queued || 0;
-      text.textContent = `SYSTEM — ${poolParts.join(' · ')}`
-        + (aggTps > 0 ? ` @ ${aggTps.toFixed(1)} TPS` : '')
-        + (queued ? ` · ${queued} queued for a worker` : '');
+      const streams = activeSrvs.reduce((n, s) => n + (s.inflight || 0), 0);
+      if (noUsable) {
+        text.textContent = activeSrvs.length === 0 ? 'NO LLM SELECTED' : 'NO WORKING LLM';
+      } else if (streams > 0) {
+        text.textContent = `${streams} ACTIVE STREAM${streams === 1 ? '' : 'S'} @ ${aggTps.toFixed(1)} TPS`;
+      } else {
+        text.textContent = 'NO ACTIVE STREAMS';
+      }
     }
     // The pill LED: single engine — the selected servers decide.
     // Pool — red only on evidence of failure (a dead server, or the
     // WHOLE pool halted); green while anything runs or drains; yellow
     // when everything is merely paused (nothing runs, nothing is broken).
     if (pool && pool.n > 1) {
-      if (anyOffline || pool.stopping + pool.stopped === pool.n) dot.classList.add('red');
+      if (anyOffline || noUsable || pool.stopping + pool.stopped === pool.n) dot.classList.add('red');
       else if (pool.running + pool.pausing > 0) dot.classList.add('green');
       else dot.classList.add('yellow');
-    } else if (statusData.status === 'stopped' || anyOffline) {
+    } else if (statusData.status === 'stopped' || noUsable) {
       dot.classList.add('red');
     } else if (selectedIds.length === 0) {
       dot.classList.add('yellow');
@@ -810,7 +837,7 @@ async function updateStatusPill() {
 function renderFleet(engines) {
   const c = document.getElementById('fleet-rows');
   if (!c) return;
-  const list = Array.isArray(engines) ? engines : [];
+  let list = Array.isArray(engines) ? engines : [];
   // Belt & braces: while a set is active, only its members may run.
   if (activeSetId) list = list.filter(e => projectInTarget(e.project_id, activeSetId));
   if (!list.length) {
@@ -834,10 +861,10 @@ function renderFleet(engines) {
     row.className = 'fleet-row';
     row.innerHTML = `
       <span class="fleet-dot ${stateCls}"></span>
-      <span class="fleet-name">${escapeHtml(name)}<span class="fleet-id">${escapeHtml(String(id))}</span></span>
+      <span class="fleet-name"><span class="fleet-name-t">${escapeHtml(name)}</span><span class="fleet-id">${escapeHtml(String(id))}</span></span>
       <span class="fleet-stat">gen <b>${escapeHtml(String(gen))}</b></span>
       <span class="fleet-stat fleet-pool" title="${escapeHtml(poolTitle(e))}">${poolBadges(e)}</span>
-      <span class="fleet-stat">best <b>${escapeHtml(best)}</b>${metricBits ? ' <span class="fleet-metrics">' + metricBits + '</span>' : ''}</span>
+      <span class="fleet-stat fleet-best">best <b>${escapeHtml(best)}</b>${metricBits ? ' <span class="fleet-metrics">' + metricBits + '</span>' : ''}</span>
       ${goalBadge(e)}
       ${e.engine_error ? `<span class="fleet-error" title="${escapeHtml(e.engine_error)}">${escapeHtml(e.engine_error)}</span>` : ''}
       <span class="fleet-actions">
@@ -944,10 +971,15 @@ function handleLiveContainerScroll() {
 }
 let liveServer = null;  // which endpoint's chats to focus (scroll target)
 let liveSlot = null;    // which chat to scroll to (focus, not filter)
+// TAB PER STREAM: an endpoint running several chats stacks several consoles;
+// the tab bar above the console shows ONE stream at a time - a session id,
+// never a merged view. null = not chosen yet (first stream takes it).
+let liveTab = null;
+let liveFlash = false;  // one-shot: flash the tab we just switched to
 function openServerChat(serverId, slot) {
   liveServer = serverId;
   liveSlot = slot != null ? slot : null;
-  openLiveModal();
+  openLiveModal();   // fetchLiveOutput resolves the clicked chat to its tab
 }
 function openLiveModal() {
   const modal = document.getElementById('live-output-modal');
@@ -971,22 +1003,29 @@ function closeLiveModal() {
 
 async function fetchLiveOutput() {
   try {
-    // ALWAYS fetch every active chat — one pill per chat, never filtered.
+    // Fetch every active chat; the tab bar decides which ONE is shown.
     const data = await api('/api/llm/live');
     const container = document.getElementById('live-output-content');
     if (!container) return;
+    // Focus the clicked chat (if any): switch to its tab BEFORE rendering so
+    // the flash+scroll target is the visible stream.
+    if (liveSlot != null) {
+      const s = (data.sessions || []).find(x => x.server_id === liveServer
+        && String(x.slot) === String(liveSlot) && x.status === 'generating' && !x.waiting);
+      if (s) { liveTab = s.id; liveFlash = true; }
+      liveSlot = null;
+    }
     renderLiveSessions(container, data);
     if (liveAutoscrollEnabled) container.scrollTop = container.scrollHeight;
-    // Focus the clicked chat (if any): scroll its pill into view.
-    if (liveSlot != null) {
+    if (liveFlash && liveTab != null) {
       const target = [...container.querySelectorAll('.live-chat-card')]
-        .find(card => card.dataset.slot === String(liveSlot));
+        .find(card => card.dataset.session === String(liveTab));
       if (target) {
         target.scrollIntoView({ block: 'start', behavior: 'smooth' });
         target.classList.add('flash');
         setTimeout(() => target.classList.remove('flash'), 1600);
+        liveFlash = false;
       }
-      liveSlot = null;
     }
   } catch (e) { console.warn('Live poll failed', e); }
 }
@@ -1008,6 +1047,10 @@ function renderLiveSessions(container, data) {
                     : 'No active generation — press play.');
     container.innerHTML = `<div class="console-line status-line" style="color:var(--muted);">${escapeHtml(msg)}</div>`;
     container._liveChats = new Map();
+    const bar0 = document.getElementById('live-tabs');
+    if (bar0) { bar0._sig = null; bar0.style.display = 'none'; }
+    const sub0 = document.getElementById('live-gen-project');
+    if (sub0) sub0.textContent = '';
     return;
   }
   const perServer = {};
@@ -1038,6 +1081,7 @@ function renderLiveSessions(container, data) {
       const root = document.createElement('div');
       root.className = 'live-chat-card';
       root.dataset.slot = s.slot;
+      root.dataset.session = s.id;
       root.innerHTML = `
         <div class="console-line chat-title-line"></div>
         <div class="console-line">&gt; PROMPT:</div>
@@ -1053,11 +1097,12 @@ function renderLiveSessions(container, data) {
         reasoning: root.querySelector('.output-reasoning'),
         answer: root.querySelector('.output-answer'),
         status: root.querySelector('.status-line'),
+        project: '',
       };
       chats.set(s.id, el);
     }
-    const name = s.display || s.server_id || '';
-    const chatLabel = perServer[s.server_id] > 1 ? `${name} ${s.slot}` : name;
+    const chatLabel = liveChatLabel(s, perServer);
+    el.project = s.project_id || '';
     const poolWide = (data.engines || []).length > 1;
     el.title.textContent = `> ${chatLabel}`
       + (poolWide && s.project_id ? ` · ${s.project_id}` : '')
@@ -1092,6 +1137,79 @@ function renderLiveSessions(container, data) {
       chats.delete(id);
     }
   }
+  renderLiveTabs(container, sessions, perServer);
+}
+
+function liveChatLabel(s, perServer) {
+  const name = s.display || s.server_id || '';
+  return perServer[s.server_id] > 1 ? `${name} ${s.slot}` : name;
+}
+
+// One tab per streaming chat (+ ALL) above the console.  The poller runs at
+// 150 ms, so the bar is rebuilt ONLY when the set of streams changes - a
+// per-tick innerHTML would make the tabs unclickable.
+function renderLiveTabs(container, sessions, perServer) {
+  const bar = document.getElementById('live-tabs');
+  if (!bar) return;
+  // Labels must be unique: several projects can hold the same slot number on
+  // one shared endpoint, so a repeated "server 1" gets its project appended.
+  const label = {};
+  const counts = {};
+  sessions.forEach(s => {
+    const l = liveChatLabel(s, perServer);
+    label[s.id] = l;
+    counts[l] = (counts[l] || 0) + 1;
+  });
+  sessions.forEach(s => {
+    const l = label[s.id];
+    if (counts[l] > 1) label[s.id] = `${l} · ${s.project_id || s.id}`;
+  });
+  const sig = sessions.map(s => `${s.id}\u0000${label[s.id]}`).join('|');
+  if (bar._sig !== sig) {
+    bar._sig = sig;
+    bar.innerHTML = '';
+    const mk = (id, text) => {
+      const b = document.createElement('button');
+      b.className = 'live-tab';
+      b.dataset.tab = String(id);
+      b.textContent = text;
+      b.onclick = () => setLiveTab(id);
+      return b;
+    };
+    sessions.forEach(s => bar.appendChild(mk(s.id, label[s.id])));
+  }
+  // The selected chat may have ended between polls: fall back to the first
+  // remaining stream (there is no "all" - a tab always shows ONE stream).
+  if (!sessions.some(s => String(s.id) === String(liveTab))) liveTab = sessions[0].id;
+  // Header subtitle: which project the shown stream is working on.
+  const shown = sessions.find(s => String(s.id) === String(liveTab));
+  const sub = document.getElementById('live-gen-project');
+  if (sub) sub.textContent = shown && shown.project_id ? `NOW WORKING ON: ${shown.project_id}` : '';
+  bar.style.display = sessions.length > 1 ? 'flex' : 'none';
+  [...bar.querySelectorAll('.live-tab')].forEach(b =>
+    b.classList.toggle('active', b.dataset.tab === String(liveTab)));
+  const chats = container._liveChats || new Map();
+  for (const [id, el] of chats)
+    el.root.style.display = String(id) === String(liveTab) ? '' : 'none';
+}
+
+function setLiveTab(id) {
+  liveTab = id;
+  const container = document.getElementById('live-output-content');
+  const chats = (container && container._liveChats) || new Map();
+  const el = chats.get(id);
+  if (container) {
+    for (const [sid, c] of chats)
+      c.root.style.display = String(sid) === String(liveTab) ? '' : 'none';
+    if (liveAutoscrollEnabled) container.scrollTop = container.scrollHeight;
+  }
+  const bar = document.getElementById('live-tabs');
+  if (bar) [...bar.querySelectorAll('.live-tab')].forEach(b =>
+    b.classList.toggle('active', b.dataset.tab === String(liveTab)));
+  // Subtitle follows the tab immediately (the next poll re-confirms it).
+  const sub = document.getElementById('live-gen-project');
+  if (sub) sub.textContent = el && el.project
+    ? `NOW WORKING ON: ${el.project}` : '';
 }
 
 
@@ -1125,9 +1243,76 @@ function iterSortValue(item, key) {
   if (TEXT_COLUMNS.has(key)) return String(v).toLowerCase();
   return Number(v);
 }
-// Wired to the search input + outcome select (dashboard.html): re-render
-// the iteration table with the current filter values.  renderIterations
-// reads the inputs itself, so this is just the event handler.
+// Outcome CHECKLIST (dashboard.html): checked = shown.  Uncheck outcomes to
+// remove them from the table — multi-select, not single-choice filtering.
+// Outcomes seen in the data but absent from the static list are appended.
+const OUTCOME_CHOICES = [
+  ["NEW_BEST", "New Best"], ["valid", "Valid"], ["build_fail", "Build Fail"],
+  ["verify_fail", "Verify Fail"], ["score_fail", "Score Fail"],
+  ["no_metrics", "No Metrics"], ["guardrail_denied", "Guardrail Denied"],
+  ["protected_data_modified", "Protected Data Modified"],
+  ["duplicate_skip", "Duplicate"], ["no_code", "No Code"],
+  ["rejected_dangerous", "Dangerous"], ["cancelled", "Cancelled"],
+  ["request_failed", "LLM Request Failed"], ["worker_error", "Worker Error"],
+];
+function outcomeHiddenSet() {
+  const hidden = new Set();
+  document.querySelectorAll('#iter-outcome-menu input[type=checkbox]').forEach(cb => {
+    if (!cb.checked) hidden.add(cb.value);
+  });
+  return hidden;
+}
+function buildOutcomeChecklist() {
+  const menu = document.getElementById('iter-outcome-menu');
+  if (!menu) return;
+  const prev = outcomeHiddenSet();
+  const seen = new Map(OUTCOME_CHOICES);
+  iterationsData.forEach(it => { if (it.outcome && !seen.has(it.outcome)) seen.set(it.outcome, it.outcome); });
+  menu.innerHTML = '';
+  const head = document.createElement('div');
+  head.className = 'outcome-check-head';
+  head.innerHTML = '<a href="#" onclick="setAllOutcomes(true); return false;">all</a>' +
+                   '<a href="#" onclick="setAllOutcomes(false); return false;">none</a>';
+  menu.appendChild(head);
+  for (const [val, label] of seen) {
+    const lab = document.createElement('label');
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.value = val;
+    cb.checked = !prev.has(val);
+    cb.addEventListener('change', () => { updateOutcomeBtn(); filterIterations(); });
+    lab.appendChild(cb);
+    lab.appendChild(document.createTextNode(' ' + label));
+    menu.appendChild(lab);
+  }
+  updateOutcomeBtn();
+}
+function setAllOutcomes(on) {
+  document.querySelectorAll('#iter-outcome-menu input[type=checkbox]').forEach(cb => { cb.checked = on; });
+  updateOutcomeBtn();
+  filterIterations();
+}
+function updateOutcomeBtn() {
+  const btn = document.getElementById('iter-outcome-btn');
+  if (!btn) return;
+  const hidden = [...outcomeHiddenSet()];
+  btn.textContent = hidden.length
+    ? `${hidden.length} hidden: ${hidden.slice(0, 2).join(', ')}${hidden.length > 2 ? '…' : ''} ▾`
+    : 'All Outcomes ▾';
+}
+function toggleOutcomeMenu(e) {
+  e.stopPropagation();
+  const menu = document.getElementById('iter-outcome-menu');
+  if (menu) menu.style.display = menu.style.display === 'none' ? 'block' : 'none';
+}
+document.addEventListener('click', e => {
+  const wrap = document.getElementById('iter-outcome-check');
+  const menu = document.getElementById('iter-outcome-menu');
+  if (menu && wrap && !wrap.contains(e.target)) menu.style.display = 'none';
+});
+// Wired to the search input + outcome checklist: re-render the iteration
+// table with the current filter values.  renderIterations reads the inputs
+// itself, so this is just the event handler.
 function filterIterations() { renderIterations(); }
 function toggleArchiveFilter() {
   showArchivedNotes = !showArchivedNotes;
@@ -1140,7 +1325,7 @@ function renderIterations() {
   const tbody = document.getElementById('iteration-tbody');
   if (!tbody) return;
   const search = (document.getElementById('iter-search')?.value || '').toLowerCase();
-  const outcomeFilter = document.getElementById('iter-outcome-filter')?.value || '';
+  const hiddenOutcomes = outcomeHiddenSet();
   const typeSpec = scoreTypes[activeScoreKey] || {};
   let scored = iterationsData.map(item => ({
     ...item,
@@ -1148,7 +1333,7 @@ function renderIterations() {
   }));
 
   let filtered = scored.filter(item => {
-    if (outcomeFilter && item.outcome !== outcomeFilter) return false;
+    if (hiddenOutcomes.has(item.outcome)) return false;
     if (search && !((item.outcome || '').toLowerCase().includes(search) || (item.detail || '').toLowerCase().includes(search) || (item.prompt_snippet || '').toLowerCase().includes(search))) return false;
     const minT = parseFloat(document.getElementById('iter-min-time')?.value);
     const maxT = parseFloat(document.getElementById('iter-max-time')?.value);
@@ -1173,13 +1358,14 @@ function renderIterations() {
   tbody.innerHTML = '';
   if (!sliced.length) {
     const tr = document.createElement('tr');
-    tr.innerHTML = '<td colspan="6" style="text-align:center;color:var(--muted);padding:18px;">No iterations recorded yet — press play and generations appear here.</td>';
+    tr.innerHTML = '<td colspan="7" style="text-align:center;color:var(--muted);padding:18px;">No iterations recorded yet — press play and generations appear here.</td>';
     tbody.appendChild(tr);
   }
   sliced.forEach(item => {
     const tr = document.createElement('tr');
     const outcomeClass = item.outcome === 'NEW_BEST' ? 'iter-ok' : (item.outcome || '').includes('fail') || (item.outcome || '').includes('error') ? 'iter-err' : 'iter-warn';
     tr.innerHTML = `
+      <td class="iter-when">${item.ts ? fmtWhen(item.ts) : '--'}</td>
       <td>${item.iteration}</td>
       <td class="${outcomeClass}">${escapeHtml(item.outcome)}</td>
       <td>${fmtScore(item.score)}</td>
@@ -1197,61 +1383,142 @@ function renderIterations() {
 
   drawScoreChart(scored.filter(i => i.score !== null));
 }
+// Dashed goal line for the chart: only when the goal's metric is what the
+// chart actually plots — the score key itself, or the single metric a
+// composite weighs.  A target in different units would be a lie.
+function chartTargetValue() {
+  const p = (projectsData || []).find(x => x.id === activeProjectId);
+  const g = p && p.goal && p.goal.when;
+  if (!g || typeof g.value !== 'number') return null;
+  const t = scoreTypes[activeScoreKey] || {};
+  const wk = Object.keys(t.weights || {});
+  const match = g.metric === activeScoreKey || (wk.length === 1 && wk[0] === g.metric);
+  return match ? g.value : null;
+}
 function drawScoreChart(scored) {
   const canvas = document.getElementById('score-chart');
   if (!canvas) return;
   const dpr = window.devicePixelRatio || 1;
   const rect = canvas.parentElement.getBoundingClientRect();
   canvas.width = rect.width * dpr;
-  canvas.height = 160 * dpr;
-  canvas.style.height = '160px';
+  canvas.height = 190 * dpr;
+  canvas.style.height = '190px';
   const ctx = canvas.getContext('2d');
   ctx.scale(dpr, dpr);
-  const W = rect.width, H = 160;
+  const W = rect.width, H = 190;
   ctx.clearRect(0, 0, W, H);
+  // Histogram of the LAST 50 VALID entries: one bar per scored generation.
   const pts = scored
+    .filter(i => i.outcome === 'valid' || i.outcome === 'NEW_BEST')
     .slice()
     .sort((a, b) => a.iteration - b.iteration)
+    .slice(-50)
     .map(i => ({ x: i.iteration, y: i.score }));
   if (pts.length < 1) {
     ctx.fillStyle = '#555';
-    ctx.font = '12px monospace';
-    ctx.fillText('no scored generations yet', 12, H / 2);
+    ctx.font = '16px monospace';
+    ctx.fillText('no valid scored generations yet', 12, H / 2);
     return;
   }
   const pad = 12;
-  const x0 = pad, x1 = W - pad, y0 = pad, y1 = H - pad;
-  const xs = pts.map(p => p.x), ys = pts.map(p => p.y);
-  const xmin = Math.min(...xs), xmax = Math.max(...xs, xmin + 1);
-  const ymin = Math.min(...ys), ymax = Math.max(...ys, ymin + 1e-9);
-  const sx = (x) => x0 + ((x - xmin) / (xmax - xmin)) * (x1 - x0);
-  const sy = (y) => y1 - ((y - ymin) / (ymax - ymin)) * (y1 - y0);
+  const x0 = pad, x1 = W - pad, y0 = pad, y1 = H - 34;
+  const ys = pts.map(p => p.y);
+  const target = chartTargetValue();
+  const tset = target !== null ? [target] : [];
+  // The axis follows the BEST, not the worst: the view covers up to 4x the
+  // best score.  Bars beyond that run out of view instead of flattening
+  // every normal generation into noise — the scale stays honest.
+  const bestIdx = pts.reduce((bi, p, i, arr) => (activeScoreDirection === 'lower' ? p.y < arr[bi].y : p.y > arr[bi].y) ? i : bi, 0);
+  const bestY = pts[bestIdx].y;
+  let ymin, ymax;
+  const lowerDir = activeScoreDirection === 'lower';
+  const beaten = target === null || (lowerDir ? bestY <= target : bestY >= target);
+  if (bestY > 0) {
+    if (lowerDir) { ymin = 0; ymax = bestY * 4; }
+    else { ymin = bestY / 4; ymax = bestY; }
+    // Goal not beaten yet: the target line is the top of the view, so the
+    // bars show the real distance to it.
+    if (!beaten && target > ymax) ymax = target;
+  } else {
+    ymin = Math.min(0, ...ys, ...tset);
+    ymax = Math.max(...ys, ...tset);
+  }
+  if (ymax <= ymin) ymax = ymin + 1e-9;
+  const span = ymax - ymin;
+  const sy = (y) => y1 - ((y - ymin) / span) * (y1 - y0);
   ctx.strokeStyle = 'rgba(255,255,255,0.06)';
   ctx.lineWidth = 1;
   for (let g = 0; g <= 4; g++) {
     const gy = y0 + (g / 4) * (y1 - y0);
     ctx.beginPath(); ctx.moveTo(x0, gy); ctx.lineTo(x1, gy); ctx.stroke();
   }
-  ctx.strokeStyle = 'rgba(0,232,124,0.85)';
-  ctx.lineWidth = 1.6;
-  ctx.beginPath();
+  const n = pts.length;
+  const bw = (x1 - x0) / n;
+  const zeroY = sy(0);
+  ctx.save();
+  ctx.beginPath(); ctx.rect(x0, y0, x1 - x0, y1 - y0); ctx.clip();
   pts.forEach((p, i) => {
-    const px = sx(p.x), py = sy(p.y);
-    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    const w = bw * 0.72;
+    const bx = x0 + i * bw + (bw - w) / 2;
+    const by = sy(p.y);
+    const top = Math.min(by, zeroY);
+    const hgt = Math.max(Math.abs(zeroY - by), 2);
+    const best = i === bestIdx;
+    const overflows = by < y0; // bar continues beyond the top of the view
+    let fill;
+    if (overflows) {
+      // fade at the view's top edge reads as "this bar continues off-screen"
+      const grad = ctx.createLinearGradient(0, y0, 0, y0 + (y1 - y0) * 0.22);
+      grad.addColorStop(0, 'rgba(0,232,124,0)');
+      grad.addColorStop(1, best ? '#00ff8c' : '#00e87c');
+      fill = grad;
+    } else {
+      fill = best ? '#00ff8c' : '#00e87c';
+    }
+    ctx.save();
+    if (best) { ctx.shadowColor = 'rgba(0,232,124,0.6)'; ctx.shadowBlur = 12; }
+    ctx.fillStyle = fill;
+    ctx.beginPath();
+    ctx.roundRect(bx, top, w, hgt, [3, 3, 0, 0]);
+    ctx.fill();
+    ctx.restore();
   });
-  ctx.stroke();
-  // best point marker
-  const bestIdx = pts.reduce((bi, p, i, arr) => (activeScoreDirection === 'lower' ? p.y < arr[bi].y : p.y > arr[bi].y) ? i : bi, 0);
-  const bp = pts[bestIdx];
-  ctx.fillStyle = '#00e87c';
-  ctx.beginPath();
-  ctx.arc(sx(bp.x), sy(bp.y), 4, 0, Math.PI * 2);
-  ctx.fill();
+  if (zeroY >= y0 && zeroY <= y1) {
+    ctx.strokeStyle = 'rgba(0,232,124,0.35)';
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(x0, zeroY); ctx.lineTo(x1, zeroY); ctx.stroke();
+  }
+  if (target !== null) {
+    const ty = sy(target);
+    ctx.save();
+    ctx.shadowColor = 'rgba(0,0,0,0.9)';
+    ctx.shadowBlur = 4;
+    ctx.setLineDash([6, 4]);
+    ctx.strokeStyle = '#e8c14a';
+    ctx.lineWidth = 1.4;
+    ctx.beginPath(); ctx.moveTo(x0, ty); ctx.lineTo(x1, ty); ctx.stroke();
+    ctx.fillStyle = '#e8c14a';
+    ctx.font = 'bold 16px monospace';
+    const label = `target ${fmtScore(target)}`;
+    const ly = ty > y0 + 16 ? ty - 5 : ty + 16;
+    // double pass thickens the dark halo so the label reads over bright bars
+    ctx.fillText(label, x0 + 4, ly);
+    ctx.fillText(label, x0 + 4, ly);
+    ctx.restore();
+  }
+  ctx.restore();
   ctx.fillStyle = '#888';
-  ctx.font = '10px monospace';
-  ctx.fillText(`score ${fmtScore(ymax)}`, x0 + 4, y0 + 10);
-  ctx.fillText(`gen ${xmin}`, x0, y1 - 2);
-  ctx.fillText(`gen ${xmax}`, x1 - 40, y1 - 2);
+  ctx.font = '16px monospace';
+  ctx.fillText(`score ${fmtScore(ymax)}`, x0 + 4, y0 + 16);
+  // gen number under each bar; thin out only if labels would collide
+  ctx.font = '16px monospace';
+  ctx.textAlign = 'center';
+  const labelW = String(pts[n - 1].x).length * 9.6 + 4;
+  const step = Math.max(1, Math.ceil(labelW / bw));
+  pts.forEach((p, i) => {
+    if (i % step === 0) ctx.fillText(String(p.x), x0 + i * bw + bw / 2, y1 + 18);
+  });
+  ctx.textAlign = 'left';
 }
 function renderBestFromRows() {
   const typeSpec = scoreTypes[activeScoreKey] || {};
@@ -1274,7 +1541,7 @@ function renderBestFromRows() {
     const chip = document.createElement('div');
     chip.className = 'kpi-pill metric-chip';
     const dir = spec.direction === 'lower' ? '▼' : '▲';
-    chip.innerHTML = `<div><div class="kpi-label">${escapeHtml(spec.label || key)} ${dir}</div><div class="kpi-value">${val !== undefined && val !== null && val !== '' ? Number(val).toFixed(4) : '--'} <span style="font-size:10px;color:var(--muted);">${escapeHtml(spec.unit || '')}</span></div></div><div class="kpi-delta">w=${spec.weight}</div>`;
+    chip.innerHTML = `<div><div class="kpi-label">${escapeHtml(spec.label || key)} ${dir}</div><div class="kpi-value">${val !== undefined && val !== null && val !== '' ? Number(val).toFixed(4) : '--'} <span style="font-size:16px;color:var(--muted);">${escapeHtml(spec.unit || '')}</span></div></div><div class="kpi-delta">w=${spec.weight}</div>`;
     card.appendChild(chip);
   }
 }
@@ -1287,6 +1554,7 @@ async function pollIterations() {
       newItems.forEach(item => knownIterationIds.add(item.iteration));
       iterationsData = [...iterationsData, ...newItems];
     }
+    if (newItems.length) buildOutcomeChecklist();
     renderIterations();
     renderBestFromRows();
   } catch (e) { console.warn('Iteration poll failed', e); }
@@ -1358,8 +1626,13 @@ const SERVER_EDIT_FIELDS = [
 let editingServerId = null;
 let serversLlmCache = null;
 
-function renderServers(llm) {
+function renderServers(llm, force) {
   serversLlmCache = llm;
+  // The status poller re-renders this table every second; rebuilding it while a
+  // row editor is open wipes whatever the user is typing (the editor re-renders
+  // from the SAVED spec, so edits vanish mid-keystroke). Freeze the table until
+  // ✓/✕ closes the editor — both re-render through here.
+  if (editingServerId && !force) return;
   const tbody = document.getElementById('servers-tbody');
   tbody.innerHTML = '';
   const servers = llm.servers || [];
@@ -1386,11 +1659,11 @@ function renderServers(llm) {
       : `<button class="btn btn-sm" title="Edit all fields of this endpoint" onclick="startEditServer('${s.id}')">✎</button><button class="btn btn-sm" title="Probe the endpoint (health check)" onclick="healthCheck('${s.id}')">⟳</button><button class="btn btn-sm" title="Set usage budget (max tokens / generations / reset)" onclick="openBudgetModal('${s.id}')">$</button><button class="btn btn-sm" title="Remove this endpoint" style="border-color:var(--danger);color:var(--danger);" onclick="removeServer('${s.id}')">✕</button>`;
     tr.innerHTML = `
       <td><input type="checkbox" ${active ? 'checked' : ''} onchange="toggleServerActive('${s.id}', this.checked)"></td>
-      <td class="llm-label-cell" style="max-width:150px;overflow:hidden;" data-label="${escapeHtml(s.label || '')}"><b title="${escapeHtml(s.label || s.id)}" style="display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(s.label || s.id)}</b>${s.label && s.label !== s.id ? `<div class="iter-prompt" style="font-size:10px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(s.id)}</div>` : ''}</td><td>${escapeHtml(s.type)}</td><td class="iter-prompt" style="max-width:110px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(s.url || s.base_url)}">${escapeHtml(s.url || s.base_url)}</td>
+      <td class="llm-label-cell" style="max-width:150px;overflow:hidden;" data-label="${escapeHtml(s.label || '')}"><b title="${escapeHtml(s.label || s.id)}" style="display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(s.label || s.id)}</b>${s.label && s.label !== s.id ? `<div class="iter-prompt" style="font-size:16px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(s.id)}</div>` : ''}</td><td>${escapeHtml(s.type)}</td><td class="iter-prompt" style="max-width:110px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(s.url || s.base_url)}">${escapeHtml(s.url || s.base_url)}</td>
       <td style="max-width:104px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(s.model || '')}">${escapeHtml(s.model || '')}</td><td>${escapeHtml(s.tier || 'small')}</td><td>${escapeHtml(s.priority ?? 1)}</td><td>${s.context_window ? s.context_window : '?'}</td><td>${s.inflight ?? 0}/${s.max_concurrent ?? '—'}</td>
-      <td class="${s.banned ? 'iter-err' : s.busy ? 'iter-warn' : s.online === false ? 'iter-err' : 'iter-ok'}">${s.banned ? 'BANNED' : s.busy ? 'busy' : s.online === false ? 'offline' : 'ok'}</td>
+      <td class="${s.banned ? 'iter-err' : s.busy ? 'iter-warn' : s.online === false ? 'iter-err' : 'iter-ok'}" title="${escapeHtml(s.banned ? (s.ban_reason || 'banned') : '')}">${s.banned ? 'BANNED' : s.busy ? 'busy' : s.online === false ? 'offline' : 'ok'}</td>
       <td>${(s.stats ? `${s.stats.requests || 0} req${s.stats.failures ? ' · ' + s.stats.failures + ' fail' : ''}${s.stats.avg_seconds ? ' · ' + Number(s.stats.avg_seconds).toFixed(0) + 's' : ''}` : '—')}</td>
-      ${renderBudgetCell(s)}
+      <td class="llm-budget">${renderBudgetCell(s)}</td>
       <td class="llm-actions">${actions}</td>`;
     tbody.appendChild(tr);
     if (editing) tbody.appendChild(serverEditRow(s));
@@ -1429,7 +1702,7 @@ function serverEditRow(s) {
 
 function startEditServer(id) {
   editingServerId = id;
-  renderServers(serversLlmCache);
+  renderServers(serversLlmCache, true);
   const first = document.getElementById('se-label');
   if (first) first.focus();
 }
@@ -1462,9 +1735,12 @@ function applyEditServer(id) {
   if (!payload) return;
   systemConfirm(`Apply these changes to endpoint "${id}"? The new settings take effect from the next request.`, async () => {
     try {
-      await api('/api/servers/update', { method: 'POST', body: JSON.stringify(payload) });
+      const r = await api('/api/servers/update', { method: 'POST', body: JSON.stringify(payload) });
       editingServerId = null;
-      toast('Endpoint updated.');
+      // The engine may clamp a raise to the box's real slot count; say so
+      // instead of letting the number silently snap back.
+      const ch = (r && r.changes) || [];
+      toast(ch.length ? 'Endpoint updated — ' + ch.join('; ') : 'Endpoint updated.');
       loadActive();
     } catch (e) { systemAlert('Update failed: ' + e.message); }
   });
@@ -1558,7 +1834,10 @@ async function removeServer(id) {
 async function healthCheck(id) {
   try {
     const r = await api(`/api/servers/health/${id}`, { method: 'POST' });
-    systemAlert(r.ok ? `health OK: ${r.reply}` : `health FAIL: ${r.error}`);
+    // The message is already classified per problem ("invalid API key",
+    // "unreachable", ...); the kind tag tells the operator WHERE to fix.
+    systemAlert(r.ok ? `health OK — ban lifted if there was one: ${r.reply}`
+                     : `health FAIL [${r.kind || 'error'}]: ${r.error}`);
   } catch (e) { systemAlert('Health check failed: ' + e.message); }
 }
 
@@ -1895,7 +2174,7 @@ function projectRow(p, inSet) {
   tr.innerHTML = `
     <td class="col-state" onclick="event.stopPropagation()">${rowControls(p)}</td>
     <td class="col-project">
-      <div class="proj-name">${escapeHtml(p.name)}${p.id === activeProjectId ? ' <span class="chip chip-accent" title="The project open in the dashboard right now — engine state is the trio on the left">OPEN</span>' : ''}${goalChip(p)}</div>
+      <div class="proj-name">${escapeHtml(p.name)}${goalChip(p)}</div>
       <div class="proj-sub"><span class="proj-id">${escapeHtml(p.id)}</span></div>
       ${p.description ? `<div class="proj-desc">${escapeHtml(p.description)}</div>` : ''}
     </td>
@@ -2429,6 +2708,8 @@ async function switchProject(id) {
       setProjectTabLabel();
       knownIterationIds.clear();
       iterationsData = [];
+      const om = document.getElementById('iter-outcome-menu');
+      if (om) om.innerHTML = '';
       switchView('dashboard');
     } else systemAlert('Switch failed: ' + r.error);
   } catch (e) { systemAlert('Switch failed: ' + e.message); }
@@ -3120,9 +3401,9 @@ async function loadConfig() {
     document.getElementById('cfg-safety').innerHTML = `
       <div class="safety-row ${s.global_off ? 'bad' : 'ok'}">
         ${s.global_off ? '⚠ GLOBAL SAFETY OFF — guardrails disabled (config.json + KAISEN_SAFETY_OFF=1).' : 'Guardrails ACTIVE.'}
-        <span style="font-size:11px;opacity:0.8;">${s.hard_deny_rules} hard rules · launchers: ${(s.allowed_launchers || []).join(', ')}</span>
+        <span style="font-size:16px;opacity:0.8;">${s.hard_deny_rules} hard rules · launchers: ${(s.allowed_launchers || []).join(', ')}</span>
       </div>
-      <div style="font-size:12px;color:var(--muted);">Global off cannot be toggled from the GUI: edit config.json and set KAISEN_SAFETY_OFF=1.</div>`;
+      <div style="font-size:16px;color:var(--muted);">Global off cannot be toggled from the GUI: edit config.json and set KAISEN_SAFETY_OFF=1.</div>`;
     markSettingsClean();   // baseline for the unsaved-changes guard: taken after
                            // EVERY field is filled, or a pristine panel reads dirty
   } catch (e) { console.error(e); markSettingsClean(); }
@@ -3166,7 +3447,7 @@ async function openAutofixApplyModal(prefillDefault) {
         return `
           <div style="display:flex;align-items:center;gap:10px;border:1px solid var(--border2);border-radius:8px;padding:8px 10px;">
             <input type="checkbox" id="af-${pid}" ${checked ? 'checked' : ''} style="flex:0 0 auto;">
-            <span style="font-family:monospace;font-size:12px;flex:0 0 140px;">${escapeHtml(pid)}</span>
+            <span style="font-family:monospace;font-size:16px;flex:0 0 140px;">${escapeHtml(pid)}</span>
             <input id="afc-${pid}" placeholder="custom fixer path (optional)" value="${escapeHtml(custom)}" style="flex:1;">
           </div>`;
       }).join('');
@@ -3191,7 +3472,7 @@ async function applyAutofixProjects() {
 }
 
 async function saveConfig() {  const body = {
-    server: { host: document.getElementById('cfg-host').value, port: parseInt(document.getElementById('cfg-port').value || '8080') },
+    server: { host: document.getElementById('cfg-host').value, port: parseInt(document.getElementById('cfg-port').value || '8910') },
     workers: {
       default_count: parseInt(document.getElementById('cfg-wcount').value || '4'),
       max_count: parseInt(document.getElementById('cfg-wmax').value || '32'),
@@ -3416,7 +3697,7 @@ function pipeNodeHtml(node, i) {
       <div class="form-row"><label>args (comma list)</label><input data-f="args" placeholder="{candidate}, {artifact}" value="${escapeHtml((node.step.args || []).join(', '))}"></div>
       <div class="form-row"><label>timeout (s)</label><input data-f="timeout" type="number" class="pnode-num" value="${node.step.timeout || 60}"></div>
       <div class="form-row"><label>memory MB (optional)</label><input data-f="memory_limit_mb" type="number" class="pnode-num" value="${node.step.memory_limit_mb || ''}"></div>
-      ${node.stage === 'score' ? `<div class="form-row" style="align-items:flex-start;"><label>parse rules<br><span style="font-size:10px;color:var(--muted);text-transform:none;letter-spacing:0;">one regex per metric — named group = key</span></label><div style="flex:1;display:flex;flex-direction:column;gap:6px;">${parseRows || '<span class="muted" style="font-size:12px;">no metrics declared yet — add one in the Metrics panel</span>'}</div></div>` : ''}
+      ${node.stage === 'score' ? `<div class="form-row" style="align-items:flex-start;"><label>parse rules<br><span style="font-size:16px;color:var(--muted);text-transform:none;letter-spacing:0;">one regex per metric — named group = key</span></label><div style="flex:1;display:flex;flex-direction:column;gap:6px;">${parseRows || '<span class="muted" style="font-size:16px;">no metrics declared yet — add one in the Metrics panel</span>'}</div></div>` : ''}
     </div>
   </div>`;
 }
@@ -3658,8 +3939,8 @@ async function loadSnapshots() {
         <span class="snap-time">${escapeHtml(new Date(s.created * 1000).toLocaleString())}</span>
         <span class="snap-reason" title="${escapeHtml(s.reason || s.kind)}">${escapeHtml(s.reason || s.kind)}</span>
         <button class="btn btn-sm" onclick="restoreSnapshot('${s.id}')">Restore</button>
-      </div>`).join('') : '<div class="muted" style="font-size:12px;">No snapshots yet — they are taken automatically before agent/config changes.</div>';
-  } catch (e) { el.innerHTML = '<div class="muted" style="font-size:12px;">Snapshot list unavailable.</div>'; }
+      </div>`).join('') : '<div class="muted" style="font-size:16px;">No snapshots yet — they are taken automatically before agent/config changes.</div>';
+  } catch (e) { el.innerHTML = '<div class="muted" style="font-size:16px;">Snapshot list unavailable.</div>'; }
 }
 async function restoreSnapshot(id) {
   try {
@@ -3679,9 +3960,9 @@ async function loadToolchains() {
         <span class="snap-reason" style="min-width:120px;" title="${escapeHtml(x.id)}">${escapeHtml(x.id)} <span class="muted">(${escapeHtml(x.kind)})</span></span>
         ${x.installed
           ? `<span class="snap-time ok-badge">OK — ${escapeHtml(x.binary)}</span>`
-          : `<span class="snap-time miss-badge">MISSING</span><span class="muted" style="font-size:12px;flex:1;">${escapeHtml(x.hint || 'no package available')}</span>`}
+          : `<span class="snap-time miss-badge">MISSING</span><span class="muted" style="font-size:16px;flex:1;">${escapeHtml(x.hint || 'no package available')}</span>`}
       </div>`).join('');
-  } catch (e) { el.innerHTML = '<div class="muted" style="font-size:12px;">Toolchain status unavailable.</div>'; }
+  } catch (e) { el.innerHTML = '<div class="muted" style="font-size:16px;">Toolchain status unavailable.</div>'; }
 }
 
 // ------------------------------------------------------------------ //
@@ -4130,7 +4411,7 @@ function renderComments(comments) {
     div.innerHTML = `
       <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
         <span class="note-comment-time">${formatTimestamp(comment.timestamp)}</span>
-        <button class="btn btn-sm btn-danger" style="padding:2px 6px; font-size:10px;" title="Delete Comment">✕</button>
+        <button class="btn btn-sm btn-danger" style="padding:2px 6px; font-size:16px;" title="Delete Comment">✕</button>
       </div>
       <div class="note-comment-text">${escapeHtml(comment.text)}</div>
     `;

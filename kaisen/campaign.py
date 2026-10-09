@@ -320,12 +320,12 @@ class CampaignDriver:
 
 def _client():
     from .kai import KaiClient
-    cfg_port = 8080
+    cfg_port = 8910
     cfg_path = FRAMEWORK_ROOT / "config.json"
     if cfg_path.exists():
         try:
             cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
-            cfg_port = int((cfg.get("server") or {}).get("port", 8080))
+            cfg_port = int((cfg.get("server") or {}).get("port", 8910))
         except (ValueError, OSError):
             pass
     return KaiClient(f"http://127.0.0.1:{cfg_port}")

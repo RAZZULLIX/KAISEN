@@ -2143,7 +2143,7 @@ def serve_stdio(host: str, port: int, auto_start: bool = True) -> None:
             break
 
 
-def handle_text(text: str, host: str = "127.0.0.1", port: int = 8080,
+def handle_text(text: str, host: str = "127.0.0.1", port: int = 8910,
                 auto_start: bool = False, session: Optional[KaiSession] = None) -> str:
     """HTTP transport: whole body as command lines.  `session` (when given)
     carries the caller's sticky session — the dashboard passes one so PROJECT
@@ -2155,7 +2155,7 @@ def handle_text(text: str, host: str = "127.0.0.1", port: int = 8080,
 
 def main(host: Optional[str] = None, port: Optional[int] = None) -> None:
     host = host or os.environ.get("KAISEN_KAI_HOST", "127.0.0.1")
-    port = int(port or os.environ.get("KAISEN_KAI_PORT", 8080))
+    port = int(port or os.environ.get("KAISEN_KAI_PORT", 8910))
     auto_start = os.environ.get("KAISEN_KAI_NO_AUTOSTART") != "1"
     try:
         serve_stdio(host, port, auto_start=auto_start)

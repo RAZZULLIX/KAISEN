@@ -271,7 +271,14 @@ class ServerHealth:
         # None = unknown, True = reachable, False = unreachable.
         self._online: Optional[bool] = None
         self.banned_until: float = 0.0
+        self.ban_kind: Optional[str] = None
         self.last_error: Optional[str] = None
+        # In-flight slots live HERE, not on the Server object: `update_server`
+        # rebuilds the Server in place, and streams started before the edit
+        # release on the object they acquired.  A per-object counter made the
+        # rebuilt server "busy" forever (the dead-pool-after-edit bug); a
+        # shared one is correct across rebuilds by construction.
+        self._inflight: int = 0
 
     def set_online(self, ok: Optional[bool]) -> None:
         with self._lock:
@@ -282,22 +289,46 @@ class ServerHealth:
         with self._lock:
             return self._online
 
-    def ban(self, seconds: float, reason: str = "") -> None:
+    def ban(self, seconds: float, reason: str = "", kind: str = "") -> None:
         with self._lock:
             self.banned_until = max(self.banned_until, time.time() + seconds)
             if reason:
                 self.last_error = reason
+            if kind:
+                self.ban_kind = kind
+
+    def unban(self) -> None:
+        with self._lock:
+            self.banned_until = 0.0
+            self.ban_kind = None
 
     @property
     def banned(self) -> bool:
         return self.banned_until > time.time()
 
+    def acquire(self, capacity: int) -> bool:
+        with self._lock:
+            if self.banned_until > time.time() or self._inflight >= capacity:
+                return False
+            self._inflight += 1
+            return True
+
+    def release(self) -> None:
+        with self._lock:
+            self._inflight = max(0, self._inflight - 1)
+
+    @property
+    def inflight(self) -> int:
+        with self._lock:
+            return self._inflight
+
 
 _HEALTH: Dict[str, ServerHealth] = {}
 _HEALTH_LOCK = threading.Lock()
-# sid -> zero-arg callable returning True when the endpoint answers.  The
-# background re-probe loop calls these for servers marked offline.
-_PROBES: Dict[str, Callable[[], bool]] = {}
+# sid -> zero-arg callable returning a ProbeResult (ok, kind, detail) — see
+# Server._probe.  The background re-probe loop calls these for servers
+# marked offline OR banned.
+_PROBES: Dict[str, Callable[[], tuple]] = {}
 
 
 def health_for(sid: str) -> ServerHealth:
@@ -313,30 +344,73 @@ def register_probe(sid: str, probe: Callable[[], bool]) -> None:
         _PROBES[sid] = probe
 
 
+def reset_health_registry() -> None:
+    """Drop every shared health record + probe (test isolation: the
+    registry is process-wide, so a ban learned in one test must not
+    leak into the next test's same-named server)."""
+    with _HEALTH_LOCK:
+        _HEALTH.clear()
+        _PROBES.clear()
+
+
 _REPROBE_THREAD: Optional[threading.Thread] = None
 _REPROBE_LOCK = threading.Lock()
 
 
+def _apply_probe(sid: str, res: tuple) -> None:
+    """Fold one probe result into the shared health record.
+
+    A probe that answers 200 has verified BOTH facts a ban can rest on:
+    the endpoint is reachable AND (for keyed endpoints) the key is
+    accepted — so it lifts any ban, whatever it was banned for.  A probe
+    that answers 401/403 proves the box is UP and the key is wrong: that
+    is an auth ban with its own message, never "offline".  Anything else
+    keeps the server out of routing with a reason the GUI can show."""
+    ok, kind, detail = res
+    h = health_for(sid)
+    if ok:
+        was_banned = h.banned
+        was_offline = h.online is False
+        h.set_online(True)
+        h.unban()
+        if was_banned:
+            print(f"[KAISEN] LLM server {sid!r} healthy again — ban lifted")
+        elif was_offline:
+            print(f"[KAISEN] LLM server {sid!r} back online (re-probe)")
+        return
+    if kind == "auth":
+        h.set_online(True)          # it ANSWERS — the key is wrong, not the box
+        h.ban(300, detail or "invalid API key", "auth")
+    elif kind == "http":
+        h.set_online(True)          # up, but the request is rejected
+        h.ban(60, detail or "endpoint error", "http")
+    else:                           # down / timeout: unreachable
+        h.set_online(False)
+
+
 def _reprobe_cycle() -> None:
-    """One pass: re-probe every known server marked offline.
+    """One pass: re-probe every known server marked offline OR banned.
 
     llama.cpp instances die (OOM, box reboot, user restarts them) and come
     back.  Without this loop a single failed request would keep the endpoint
     out of routing for the lifetime of the daemon — the operator sees it
-    "offline" in the GUI while it has actually been fine for an hour."""
+    "offline" in the GUI while it has actually been fine for an hour.
+    Banned servers are probed too: a ban is a guess about the past, the
+    probe is the fact about NOW, and the fact wins (the old loop skipped
+    banned-but-"online" servers, so a ban could never be lifted early)."""
     with _HEALTH_LOCK:
         items = list(_PROBES.items())
     for sid, probe in items:
         h = health_for(sid)
-        if h.online is not False:
+        if h.online is not False and not h.banned:
             continue
         try:
-            ok = bool(probe())
+            res = probe()
+            if not (isinstance(res, tuple) and len(res) == 3):   # legacy bool
+                res = (bool(res), "ok" if res else "down", "")
         except Exception:
-            ok = False
-        if ok:
-            print(f"[KAISEN] LLM server {sid!r} back online (background re-probe)")
-        h.set_online(ok)
+            res = (False, "down", "probe raised")
+        _apply_probe(sid, res)
 
 
 def start_reprobe_loop() -> None:
@@ -409,17 +483,34 @@ def _classify(e: Exception) -> str:
     return "unknown"
 
 
+# One line per failure mode, so the GUI/operator sees WHAT is wrong, not a
+# wall of urllib text: "invalid API key" is fixed in the row editor,
+# "unreachable" means start the server, "rejected" means the URL/model.
+_KIND_HINT = {
+    "auth": "invalid API key (the server answered 401/403)",
+    "connection": "unreachable (connection refused — is the server running?)",
+    "timeout": "timed out (no answer in time)",
+    "stream": "stream died mid-response (the process likely crashed)",
+    "http": "the server rejected the request (check URL/model)",
+}
+
+
 def _wrap_error(e: Exception, sid: str, mid_stream: bool = False) -> ServerError:
     """Turn a raw exception into a classified ServerError.  A connection-level
     break AFTER bytes were flowing means the server process died mid-response
     (kind "stream") — that is what the dashboard/operator must see, not a
-    generic error."""
+    generic error.  The message leads with the human hint for the kind; the
+    raw transport text follows, truncated."""
     if isinstance(e, ServerError):
         return e
     kind = _classify(e)
     if mid_stream and kind == "connection":
         kind = "stream"
-    return ServerError(f"{sid}: {e}", kind=kind)
+    raw = str(e).strip().replace("\n", " ")
+    if len(raw) > 160:
+        raw = raw[:157] + "..."
+    hint = _KIND_HINT.get(kind, "request failed")
+    return ServerError(f"{sid}: {hint} — {raw}", kind=kind)
 
 class Server:
     """A configured LLM endpoint with live state."""
@@ -434,6 +525,17 @@ class Server:
         self.type: str = cfg.get("type", "llama")
         self.url: str = cfg.get("url", "")
         self.base_url: str = cfg.get("base_url", "")
+        # OpenAI endpoints are built as base_url + "/chat/completions", but GUI/API edits
+        # routinely store the FULL endpoint in base_url (and leave url empty) - that produced
+        # ".../chat/completions/chat/completions" 404s and banned a perfectly good server.
+        # Normalize both fields to the same canonical base.
+        if self.type == "openai":
+            for _fld in ("base_url", "url"):
+                v = getattr(self, _fld)
+                if v.endswith("/chat/completions"):
+                    setattr(self, _fld, v[: -len("/chat/completions")])
+            if not self.base_url and self.url:
+                self.base_url = self.url
         self.model: str = cfg.get("model", "")
         # Client-side chat template for raw /completion servers.  "auto"
         # (default) infers from the model name; "none" disables templating.
@@ -483,9 +585,9 @@ class Server:
         self.cost_in: float = float(cfg.get("cost_in", cost_cfg.get("in", 0.0)) or 0.0)
         self.cost_out: float = float(cfg.get("cost_out", cost_cfg.get("out", 0.0)) or 0.0)
         self._lock = threading.Lock()
-        self._inflight = 0
-        # Reachability + ban live in the PROCESS-WIDE health record so every
-        # orchestrator (engines, suggest) sees one truth per endpoint.
+        # Reachability, ban AND in-flight slots live in the PROCESS-WIDE
+        # health record: every orchestrator (engines, suggest) and every
+        # rebuild of this object see one truth per endpoint.
         self._health = health_for(self.id)
         register_probe(self.id, self._probe)
         # Learned prompt-processing speed (tokens/s), from measured
@@ -573,8 +675,11 @@ class Server:
     # -- capacity / health -------------------------------------------------
     @property
     def busy(self) -> bool:
-        with self._lock:
-            return self._inflight >= self._capacity
+        return self._health.inflight >= self._capacity
+
+    @property
+    def inflight(self) -> int:
+        return self._health.inflight
 
     @property
     def _capacity(self) -> int:
@@ -587,26 +692,29 @@ class Server:
         return max(1, self.max_concurrent)
 
     def acquire(self) -> bool:
-        with self._lock:
-            if (self._inflight >= self._capacity or self._health.banned
-                    or not self.enabled):
-                return False
-            # Budget cap: an exhausted server must not take another call —
-            # routing skips it until its reset window rolls over.
-            if self.budget is not None and self.budget.exhausted():
-                return False
-            self._inflight += 1
-            return True
+        if not self.enabled:
+            return False
+        # Budget cap: an exhausted server must not take another call —
+        # routing skips it until its reset window rolls over.
+        if self.budget is not None and self.budget.exhausted():
+            return False
+        # Ban + slot accounting are checked atomically in the shared health
+        # record, so a rebuild (update_server) can neither double the real
+        # capacity nor strand the in-flight count of running streams.
+        return self._health.acquire(self._capacity)
 
     def release(self) -> None:
-        with self._lock:
-            self._inflight = max(0, self._inflight - 1)
+        self._health.release()
 
-    def ban(self, seconds: float = 60.0, reason: str = "") -> None:
-        self._health.ban(seconds, reason)
+    def ban(self, seconds: float = 60.0, reason: str = "", kind: str = "") -> None:
+        self._health.ban(seconds, reason, kind)
         with self._lock:
             if reason:
                 self._stats["last_error"] = reason
+
+    def unban(self) -> None:
+        """Forget the ban: a healthy probe or a saved edit resets the slate."""
+        self._health.unban()
 
     @property
     def banned(self) -> bool:
@@ -633,16 +741,21 @@ class Server:
         return self._health.online
 
     # -- reachability / liveness ------------------------------------------
-    def _probe(self) -> bool:
-        """Cheap reachability check for the background re-probe loop.  A
-        successful HTTP answer means the endpoint process is alive — that is
-        all this may conclude (a full generation probe would burn tokens)."""
+    def _probe(self) -> tuple:
+        """Cheap reachability AND key check for the re-probe loop / GUI.
+
+        Returns (ok, kind, detail) — see _apply_probe.  Both probe URLs
+        carry the configured key, so a 200 proves the key too (llama.cpp
+        serves /health unauthenticated unless --api-key is set, in which
+        case a wrong key answers 401 exactly like an OpenAI endpoint).
+        A full generation probe would burn tokens; this never predicts."""
         try:
             if self.type == "llama":
                 base = self._base_of(self.url)
                 if not base:
-                    return False
-                r = requests.get(base + "/health", timeout=5.0)
+                    return (False, "http", "no valid endpoint URL configured")
+                r = requests.get(base + "/health", headers=self._auth_headers(),
+                                 timeout=5.0)
                 if r.status_code == 200:
                     # Learn the REAL slot count now (not only when a capped
                     # first-token stream polls /slots) so the concurrency
@@ -656,17 +769,31 @@ class Server:
                     # delimiters and strip only when reasoning is actually
                     # in the content stream.
                     self._learn_caps()
-                return r.status_code == 200
+                    return (True, "ok", "")
+                return self._probe_http(r)
             if self.type == "openai":
                 if not self.base_url:
-                    return False
-                headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+                    return (False, "http", "no base_url configured")
                 r = requests.get(self.base_url.rstrip("/") + "/models",
-                                 headers=headers, timeout=5.0)
-                return r.status_code == 200
-            return False
-        except Exception:
-            return False
+                                 headers=self._auth_headers(), timeout=5.0)
+                if r.status_code == 200:
+                    return (True, "ok", "")
+                return self._probe_http(r)
+            return (False, "http", f"unknown server type {self.type!r}")
+        except requests.exceptions.Timeout:
+            return (False, "down", "probe timed out")
+        except Exception as e:
+            return (False, "down", f"unreachable: {type(e).__name__}")
+
+    @staticmethod
+    def _probe_http(r) -> tuple:
+        """Classify a non-200 probe answer into (ok, kind, detail)."""
+        code = r.status_code
+        if code in (401, 403):
+            return (False, "auth", f"invalid API key (HTTP {code})")
+        if code == 404:
+            return (False, "http", "HTTP 404 — wrong endpoint path")
+        return (False, "http", f"HTTP {code}")
 
     def model_check(self, prompt: str = "Reply with the single word: ok",
                     max_tokens: int = 64) -> Dict[str, Any]:
@@ -807,35 +934,40 @@ class Server:
             return True
         return self._reasoning_format in ("separate", "content")
 
-    def _learn_slots(self, slots: Optional[List[Any]] = None) -> None:
+    def _learn_slots(self, slots: Optional[List[Any]] = None,
+                     force: bool = False) -> Optional[int]:
         """Record the endpoint's REAL slot count.  Config max_concurrent is
         a hint; a single-slot box configured with max_concurrent: 8 queues
         every generation after the first invisibly behind one slot.  The
         slot count is discovered from /slots and caps concurrency so the
         pool never over-subscribes.  Non-fatal: on any miss the value stays
-        unknown (None = uncapped)."""
-        if self._detected_slots is not None:
-            return
+        unknown (None = uncapped).  Returns the count learned (None = the
+        probe did not answer).  `force=True` re-probes even a KNOWN count:
+        an explicit concurrency edit must not be clamped by a stale probe
+        taken before the box was restarted with a different -np."""
+        if self._detected_slots is not None and not force:
+            return self._detected_slots
         count: Optional[int] = None
         try:
             if slots is None:
-                base = self._base_of(self.url)
+                base = self._base_of(self.url or self.base_url)
                 if not base:
-                    return
+                    return None
                 headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
                 r = requests.get(base + "/slots", headers=headers, timeout=5.0)
                 if r.status_code != 200:
-                    return
+                    return None
                 slots = r.json()
             if isinstance(slots, dict):
                 slots = [slots]
             if isinstance(slots, list) and slots:
                 count = len(slots)
         except Exception:
-            return
+            return None
         if count is not None:
             with self._lock:
                 self._detected_slots = count
+        return count
 
     # -- silence deadlines ---------------------------------------------------
     def _first_byte_deadline(self, prompt: str) -> Optional[float]:
@@ -904,13 +1036,18 @@ class Server:
                 "url": self.url or self.base_url,
                 "model": self.model,
                 "enabled": self.enabled,
-                "busy": self._inflight >= self._capacity,
+                "busy": self._health.inflight >= self._capacity,
                 "online": self.online,
-                "inflight": self._inflight,
+                "inflight": self._health.inflight,
                 "max_concurrent": self.max_concurrent,
                 "detected_slots": self._detected_slots,
                 "budget": self.budget.status() if self.budget else None,
                 "banned": self.banned,
+                # WHY it is banned, in the operator's words ("invalid API
+                # key", "unreachable", ...): the GUI shows this next to the
+                # BANNED chip so the fix is obvious without reading logs.
+                "ban_reason": (self._health.last_error if self.banned else None),
+                "ban_kind": (self._health.ban_kind if self.banned else None),
                 "tier": self.tier,
                 "priority": self.priority,
                 "context_window": self.context_window,
@@ -1622,10 +1759,15 @@ class ModelOrchestrator:
         """Apply a partial patch to one server: merge into its stored spec
         and rebuild the Server in place (same id, same active membership).
         api_key is NOT handled here — the caller saves the secret first so
-        the rebuilt Server resolves the new key by id."""
+        the rebuilt Server resolves the new key by id.  An edit that touches
+        max_concurrent re-probes the REAL slot count synchronously and
+        returns any clamp it had to apply in `changes` (the GUI toasts it)
+        — silently snapping the number back read as "editing concurrency
+        fails"."""
         with self._lock:
             if sid not in self._servers:
                 raise KeyError(sid)
+            old = self._servers[sid]
             merged = self._server_spec(sid)
             for k, v in patch.items():
                 if k in self.EDITABLE_FIELDS:
@@ -1635,18 +1777,60 @@ class ModelOrchestrator:
             if "type" in patch and "local" not in patch:
                 merged["local"] = str(patch.get("type", "")).lower() == "llama"
             merged["id"] = sid
-            self._servers[sid] = Server(merged, self.cfg)
+            srv = Server(merged, self.cfg)
+            # Carry the learned slot count over the rebuild (re-learned in
+            # the background right after).  In-flight slots need NO carry:
+            # they live in the shared health record, so streams running on
+            # the old object release on the same counter this object
+            # acquires from — the old per-object carry silently STRANDED
+            # the count (streams that had grabbed the old object released
+            # there, the new object stayed "busy" forever and every call
+            # after an edit died: the dead-pool-after-edit bug).
+            srv._detected_slots = old._detected_slots
+            changes: List[str] = []
+            if "max_concurrent" in patch:
+                # The operator just touched the number: the boot-time probe
+                # is not allowed to veto it.  Re-probe NOW — if the box
+                # answers, its truth wins (clamp down, reported).  If it
+                # does not answer and the edit RAISED above the stale cap,
+                # the edit wins: drop the stale cap rather than silently
+                # reverting the number (the raise-and-nothing-happens bug).
+                want = srv.max_concurrent
+                if srv._learn_slots(force=True) is None and srv._detected_slots is not None \
+                        and want > srv._detected_slots:
+                    changes.append(
+                        f"max_concurrent {want}: slot re-probe failed, trusting the edit "
+                        f"over the stale cap of {srv._detected_slots}")
+                    srv._detected_slots = None
+                changes.extend(srv._apply_capacity(srv._detected_slots, srv.context_window))
+            self._servers[sid] = srv
+            # The endpoint just CHANGED: a ban recorded against the old
+            # config must not exile the new one.  Forget it and let the
+            # first real call (or the background caps probe) re-decide.
+            srv.unban()
+            srv.mark_online(None)
             self._rebuild_layout()
             threading.Thread(target=self._learn_server_caps, args=(sid,),
                              daemon=True).start()
         self.persist()
-        return self._servers[sid].snapshot()
+        # A raised cap must wake the waiters parked in _acquire_server this
+        # second, not on the next safety re-pick tick.
+        with self._free_slot:
+            self._free_slot.notify_all()
+        out = self._servers[sid].snapshot()
+        if changes:
+            out["changes"] = changes
+        return out
 
     def remove_server(self, sid: str) -> None:
         with self._lock:
             self._servers.pop(sid, None)
+            was_active = sid in self._active_ids
             self._active_ids = [i for i in self._active_ids if i != sid]
             self._rebuild_layout()
+        if was_active:
+            # Removing an endpoint is the strongest deactivate there is.
+            self.kill_sessions_on([sid])
         self.persist()
 
     def _learn_server_caps(self, sid: str) -> None:
@@ -1673,9 +1857,10 @@ class ModelOrchestrator:
         except Exception:
             pass
 
-    def set_active(self, ids: List[str], persist: bool = True) -> None:
+    def set_active(self, ids: List[str], persist: bool = True, kill: bool = True) -> None:
         with self._lock:
             new_ids = [i for i in ids if i in self._servers]
+            removed = [i for i in self._active_ids if i not in new_ids]
             for i in new_ids:
                 if i not in self._active_ids:
                     # Newly activated: forget reachability so the GUI
@@ -1689,8 +1874,32 @@ class ModelOrchestrator:
                 if not self._servers[i]._detected_slots:
                     threading.Thread(target=self._learn_server_caps, args=(i,),
                                      daemon=True).start()
+        if removed and kill:
+            # DEACTIVATION IS AN ORDER, NOT A SUGGESTION: chats streaming on
+            # a removed endpoint are killed now (cancel -> GenerationCancelled
+            # -> the producer records the generation cancelled).  Waiting for
+            # the stream to finish made "deactivate" indistinguishable from
+            # "do nothing" while a 20-minute generation held the slot.
+            # `kill=False` is for ROUTING-ONLY changes (the per-project model
+            # override narrows the shared pool): the override's owner asked
+            # for a different model, it did NOT evict anyone — killing every
+            # other project's live chat made "change model" cancel the world.
+            self.kill_sessions_on(removed)
         if persist:
             self.persist()
+
+    def kill_sessions_on(self, server_ids: List[str]) -> int:
+        """Cancel every live session bound to one of `server_ids`.  The
+        orchestrator does not own the SessionHub (engines do), so the server
+        layer injects the killer via `session_killer` (set by the dashboard
+        at orchestrator creation).  Returns the number of sessions killed."""
+        killer = getattr(self, "session_killer", None)
+        if not killer or not server_ids:
+            return 0
+        try:
+            return killer(list(server_ids)) or 0
+        except Exception:
+            return 0
 
     def set_enabled(self, sid: str, enabled: bool) -> None:
         with self._lock:
@@ -1711,7 +1920,13 @@ class ModelOrchestrator:
         return self._servers[sid].snapshot()
 
     def check_health(self, sid: str) -> Dict[str, Any]:
-        """Probe a server endpoint with a trivial request."""
+        """Probe a server endpoint with a trivial request.
+
+        A pass LIFTS any ban (the endpoint just answered a real call — the
+        old code only set `online`, leaving the server BANNED and unroutable
+        while the GUI showed "health OK", the 'probe says ok but nothing
+        works' bug).  A failure reports the classified kind with a human
+        message and bans only what deserves a ban."""
         s = self._servers.get(sid)
         if s is None:
             return {"ok": False, "error": "unknown server"}
@@ -1721,14 +1936,25 @@ class ModelOrchestrator:
             cap = {"n_predict": 8} if s.type == "llama" else {"max_tokens": 8}
             text = s.request("Reply with the single word: ok", cap)
             s.mark_online(True)
+            s.unban()
             # The activation probe runs for fresh (online=None) servers;
             # this is the one reliable hook to learn the REAL slot count so
             # the concurrency cap engages from the very first generation.
             s._learn_slots()
             return {"ok": True, "reply": text[:80], "detected_slots": s._detected_slots}
+        except ServerError as e:
+            kind = e.kind
+            # auth/http: the box ANSWERS — it is not offline, the request
+            # or the key is wrong.  Only a transport failure means offline.
+            s.mark_online(kind not in ("auth", "http"))
+            if kind == "auth":
+                s.ban(300, str(e), "auth")
+            elif kind in ("http", "timeout"):
+                s.ban(60, str(e), kind)
+            return {"ok": False, "error": str(e), "kind": kind}
         except Exception as e:
             s.mark_online(False)
-            return {"ok": False, "error": str(e)}
+            return {"ok": False, "error": f"{sid}: request failed — {e}", "kind": "unknown"}
 
     def check_model(self, sid: str, prompt: str = "Reply with the single word: ok",
                     max_tokens: int = 64) -> Dict[str, Any]:
@@ -1791,12 +2017,12 @@ class ModelOrchestrator:
                         # The server ANSWERED (it is online); our key is wrong.
                         # Longer ban so the pool stops re-hammering it every
                         # cycle with the same bad key.
-                        s.ban(seconds=300, reason=last_err)
+                        s.ban(seconds=300, reason=last_err, kind="auth")
                     else:
                         # timeout / http / unknown: slow or flaky — never mark
                         # a server offline from that alone (the old behavior
                         # permanently exiled one slow prefill).
-                        s.ban(seconds=min(300, 30 * (attempt + 1)), reason=last_err)
+                        s.ban(seconds=min(300, 30 * (attempt + 1)), reason=last_err, kind=e.kind)
                     time.sleep(backoff * (attempt + 1))
                 finally:
                     s.release()
@@ -1839,9 +2065,9 @@ class ModelOrchestrator:
                         if s.note_stream_failure():
                             s.mark_online(False)
                     elif e.kind == "auth":
-                        s.ban(seconds=300, reason=last_err)
+                        s.ban(seconds=300, reason=last_err, kind="auth")
                     else:
-                        s.ban(seconds=min(300, 30 * (attempt + 1)), reason=last_err)
+                        s.ban(seconds=min(300, 30 * (attempt + 1)), reason=last_err, kind=e.kind)
                     time.sleep(backoff * (attempt + 1))
                 finally:
                     s.release()
@@ -1920,9 +2146,9 @@ class ModelOrchestrator:
                         if s.note_stream_failure():
                             s.mark_online(False)
                     elif e.kind == "auth":
-                        s.ban(seconds=300, reason=last_err)
+                        s.ban(seconds=300, reason=last_err, kind="auth")
                     else:
-                        s.ban(seconds=min(300, 30 * (attempt + 1)), reason=last_err)
+                        s.ban(seconds=min(300, 30 * (attempt + 1)), reason=last_err, kind=e.kind)
                     time.sleep(backoff * (attempt + 1))
                 finally:
                     s.release()
@@ -1957,19 +2183,24 @@ class ModelOrchestrator:
                          name="kaisen-probe-now", daemon=True).start()
 
     def _probe_now(self, sids: List[str]) -> None:
-        """One-shot probe of the given endpoints (background, best effort)."""
+        """One-shot probe of the given endpoints (background, best effort).
+        A healthy answer also LIFTS bans (see _apply_probe) and wakes the
+        parked pipelines waiting on _free_slot."""
+        woke = False
         for sid in sids:
             srv = self._servers.get(sid)
             if srv is None:
                 continue
             try:
-                ok = bool(srv._probe())
+                res = srv._probe()
             except Exception:
-                ok = False
-            srv.mark_online(ok)
-            if ok:
-                with self._free_slot:
-                    self._free_slot.notify_all()
+                res = (False, "down", "probe raised")
+            was_stuck = srv.banned or srv.online is False
+            _apply_probe(sid, res)
+            woke = woke or (res[0] and was_stuck)
+        if woke:
+            with self._free_slot:
+                self._free_slot.notify_all()
 
     # -- fair round-robin between projects (generation granularity) --------
     def _need_enter(self, engine_key: str) -> None:
@@ -2306,7 +2537,7 @@ class ModelOrchestrator:
                         TIER_RANK.get(self._servers[sid].tier, 1),
                         -int(getattr(self._servers[sid], "priority", 1) or 1),
                         _wedge_penalty(sid),   # only a genuine wedge falls back
-                        self._servers[sid]._inflight,
+                        self._servers[sid].inflight,
                         rot(sid),              # otherwise spread across equals
                     ),
                 )
@@ -2317,7 +2548,7 @@ class ModelOrchestrator:
                         TIER_RANK.get(self._servers[sid].tier, 1),
                         -int(getattr(self._servers[sid], "priority", 1) or 1),
                         _wedge_penalty(sid),   # only a genuine wedge falls back
-                        self._servers[sid]._inflight,
+                        self._servers[sid].inflight,
                         rot(sid),              # otherwise spread across equals
                     ),
                 )

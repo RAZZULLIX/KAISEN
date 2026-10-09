@@ -72,6 +72,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The zero-time cheat is now impossible.**  A candidate that skips the
+  work and PRINTS the metrics the harness parses crowned itself champion
+  in rope-neox (empty kernels, hardcoded `decode_us=0.0` — 0.0 beats every
+  honest time under lower-is-better).  `check_constraints` now rejects any
+  lower-better TIME metric (unit us/ms/s) reading <= 0 outright.  The
+  rope-neox cheat was demoted: the honest gen-8 champion (7.5 us) is best
+  again and the goal latch the cheat fired was cleared.
+
+- **Deactivating an endpoint kills its chats.**  Un-ticking an LLM server
+  only stopped NEW requests — a generation already streaming on it kept
+  running to completion, so deactivation looked like a no-op.  Removing a
+  server does it too.
+
+- **Editing an endpoint row no longer doubles its capacity.**  The row
+  editor rebuilt the Server object without its detected-slot count or
+  in-flight count; while old streams still ran on the old object, the new
+  one accepted a fresh batch — the live view exploded with more chats
+  than the box has slots.  Live state now carries over the rebuild.
+
+- **The status-pill ▶/⏸/⏹ command the FLEET.**  They acted on the single
+  selected engine, which made them look dead whenever another project was
+  the one streaming.  They now start/resume/pause/stop every engine in
+  the active workspace (the set's engines, or all untagged ones); ▶ with
+  an empty pool starts the whole active set.
+
+- **The NEVER-GIVE-UP rule — give-up prompts removed.**  Generation
+  prompts used to offer "if you cannot improve it, output the current
+  program unchanged" as an escape hatch.  That contradicts KAISEN's
+  premise: every generation must ATTEMPT a concrete improvement, even
+  when the task looks insurmountable.  The tiny/small/large tier boosts
+  and the default `output_format` block now demand an attempt (while
+  still requiring a valid, contract-honoring program).  Auto-built
+  projects inherit the rule through those same defaults.  Documented in
+  MANUAL §8.
+
+- **Default dashboard port is now 8910** (was 8080).  Strata's server owns
+  8080 on most dev boxes now; KAISEN yields.  `server.port` in `config.json`
+  still overrides; existing configs keep whatever port they set.
+
 - **Graphics rework — one type scale, quiet rows, honest topbar.**  The
   dashboard now runs on a single spacing/typography token set (4px grid,
   one `--fs-*` scale, one focus ring) instead of per-component one-offs.

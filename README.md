@@ -225,7 +225,7 @@ projects/        one directory per project: project.json + harness + data
 ```bash
 ./install.sh                    # venv + deps; PEP-668 safe (Ubuntu 24.04/26.04, Debian 12+)
 # ...or by hand:  python3 -m venv .venv && ./.venv/bin/pip install -r requirements.txt
-./.venv/bin/python main.py      # dashboard on http://127.0.0.1:8080 (loopback only)
+./.venv/bin/python main.py      # dashboard on http://127.0.0.1:8910 (loopback only)
 .venv/bin/python main.py --project my-project --parallel-gens 2 --workers 4
 ```
 

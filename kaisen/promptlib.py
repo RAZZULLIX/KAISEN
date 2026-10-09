@@ -68,18 +68,22 @@ def generation_boost(tier: str, language: str) -> str:
         return f"""FORMAT (MANDATORY):
 Reply with EXACTLY one code block tagged ```{fence}. Nothing else — no
 text, no lists, no "here is". The block contains the COMPLETE program.
-If you cannot improve it, output the current program unchanged.
+NEVER GIVE UP: always attempt a concrete improvement, however hard the
+task looks; an unchanged program is never the answer you aim for.
 An empty or partial reply is a failure."""
     if tier == "small":
         return f"""FORMAT (MANDATORY):
 One code block, tagged ```{fence}, containing the COMPLETE program.
 No explanations. No diffs. No text outside the block.
-If you cannot improve it, output the current program unchanged."""
+NEVER GIVE UP: always attempt a concrete improvement — returning the
+program unchanged is a missed generation, not a valid result."""
     return f"""FORMAT:
 One code block, tagged ```{fence}, containing the COMPLETE improved
 program. You MAY reason first, outside the block; the block is the
 deliverable. Prefer correctness-preserving changes; never silently change
-the program's contract."""
+the program's contract. KAISEN never stops trying: even when the task
+looks insurmountable, attempt the most promising idea you have — a
+failed experiment still teaches the project something."""
 
 
 
